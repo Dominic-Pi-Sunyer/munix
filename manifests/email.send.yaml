@@ -1,0 +1,14 @@
+# Send an email from the demo account. In demos and tests this lands in a local sink, never a real mailbox.
+tool: email.send
+description: Send an email from the user's account to one or more recipients.
+tier: 3
+egress: true
+credentials: vault://mail/demo
+args:
+  to:          {type: "email[]", role: destination, max: 5}
+  cc:          {type: "email[]", role: destination, max: 5, optional: true}
+  subject:     {type: text,      role: content,     max_len: 200,   single_line: true}
+  body:        {type: text,      role: content,     max_len: 20000}
+  attachments: {type: "ref[]",   role: content,     max: 10,        optional: true}
+output:
+  message_id:  {type: id, region: operator_content, confidential: internal}

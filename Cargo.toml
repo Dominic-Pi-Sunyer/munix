@@ -17,6 +17,11 @@ thiserror = "2"
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
+serde_yaml_ng = "0.10"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+munix-core = { path = "crates/munix-core" }
+munix-ledger = { path = "crates/munix-ledger" }
+munix-adapters = { path = "crates/munix-adapters" }
 
 [workspace.lints.rust]
 # A security product: no unsafe in our own code.

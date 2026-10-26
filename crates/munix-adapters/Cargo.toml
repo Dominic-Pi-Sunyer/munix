@@ -1,0 +1,17 @@
+[package]
+name = "munix-adapters"
+description = "Model adapters: one structured-output interface; the Meta Model API backend and a mock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

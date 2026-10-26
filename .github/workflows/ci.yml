@@ -28,3 +28,5 @@ jobs:
       - run: uv run --project demo/agent pytest -q demo/agent/tests
       - run: uv run --project demo/direct-server pytest -q demo/direct-server/tests
       - run: bash -n demo/left.sh
+      - run: python3 -m unittest fixtures/mock-web/test_server.py
+      - run: bash -n scripts/check-meta-api.sh
