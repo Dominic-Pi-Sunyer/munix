@@ -15,10 +15,23 @@ Indie track. Build window **Mon Oct 26 → Wed Nov 4, 9:00 PM ET**. Judging Nov 
 ## The demo
 
 Two laptops, the same Muse Spark agent (`demo/agent`), the same prompt, the same web access through Web Speed OSS.
-The left runs it against `demo/direct-server` and emails the attacker. The right runs it under `munix run`: the Gate
-denies the attacker's email because the recipient traces to a user review rather than the boss's contact, recovery
-restarts a clean agent without the poisoned review, and the boss gets the summary. The demo site is the mock
-PixelMart page at `http://pixelmart.test:8080` (`127.0.0.1 pixelmart.test` in `/etc/hosts`).
+The demo site is the mock PixelMart page at `http://pixelmart.test:8080` (`127.0.0.1 pixelmart.test` in `/etc/hosts`).
+
+**What the red-team showed (Oct 26, `docs/redteam/bare-agent.md`):** on its own, Muse Spark resisted all ten injection
+techniques in 30 runs: none hijacked, none tainted, one run stalled. So the demo does not stage a model failure.
+It opens on that result and makes the case for Munix in three steps that don't depend on the model failing:
+
+1. **Muse Spark is good at this.** Both sides read the poisoned page and both refuse. Show the red-team table.
+2. **Assume the takeover anyway.** A model's refusal is a probability: tomorrow's payload, a jailbreak, a swapped
+   model or a compromised tool can still take an agent over. Both sides run the agent with a **simulated takeover**
+   (labeled on screen). The left emails the attacker. On the right the Gate denies it by code, because the recipient
+   traces to a user review rather than the boss's contact. Recovery restarts a clean agent without that review, and the
+   boss gets the summary.
+3. **Proof and resilience.** The ledger shows why the call was denied. A model's refusal leaves nothing to audit. The
+   watchdog ends a stalled agent like the one the red-team found.
+
+The simulated takeover is a demo-agent switch that makes the agent obey instructions in tool results. It is shown as
+a simulation, never as the model failing.
 
 ## Scope
 
@@ -31,6 +44,8 @@ PixelMart page at `http://pixelmart.test:8080` (`127.0.0.1 pixelmart.test` in `/
 | `munix-gate` | Request validation, refs, Stage-1 policy (destinations trace to the plan's sources), tool proxy, labeling, bands | 2 |
 | `munix-tools` | `web.open` via Web Speed OSS, `email.send` to Mailpit | 2–3 |
 | `munix-runtime` | `munix run`: agent in a network-less container, MCP channel, model gateway | 3–4 |
+| `demo/agent` takeover switch | Simulated takeover for the demo, labeled on screen; checked live against Muse Spark | 4 |
+| `scripts/redteam_bare.py` | Ten injection variants against the unprotected agent; results in `docs/redteam/` | 1 (done) |
 | `munix-supervisor` | Muse Spark planner, redacted metadata view, gray-zone reviewer | 5 |
 | Recovery + watchdog | Kill, quarantine the traced region, restart; liveness, deadlines, spin budget | 6 |
 | Integrity Seal / Readers | Whichever is further along; the other is stretch | 7 |
