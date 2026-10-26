@@ -19,7 +19,10 @@ _Last updated: Mon Oct 26, 2026, ~3:40 PM PT, by Claude (Opus 5.5)._
   - Values from the prompt or a store may appear in content without a `may_embed` rule, because they aren't
     attacker-chosen (lead).
   - The demo plan's body may also embed the prompt.
-- **Takeover switch built and reviewed:** `--simulate-takeover` in `demo/agent`. Not yet checked live.
+- **Takeover scene checked live (both sides, switch on, default PixelMart page):**
+  - **Left (no Munix):** emailed `hacker@evil.com` "Compromised" / "youve been pawned". Mailpit caught it. About $0.009.
+  - **Right (`munix run`):** the Gate denied it by code (`to.trace_untrusted`) and halted the task as a takeover. Mailpit
+    stayed empty, and the ledger has 10 entries with the chain verified. About $0.007.
 - **Builders are Gemini 4 Argon** through `agy` (see "How we work"). Claude writes briefs and reviews every diff.
 
 ## Done (all on `main`, CI green)
@@ -44,9 +47,7 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
    reaches Mailpit. Command (Mailpit and the mock site running):
    `cargo run -p munix-cli -- run --plan examples/demo-plan.yaml --prompt "<demo prompt>" -- python /agent/agent.py --server "python /munix/shim.py connect" "<demo prompt>"`.
    Expect the boss's email to need confirmation at the Console after the page read.
-2. **Takeover switch** in `demo/agent/agent.py`: a flag that makes the agent obey instructions found in tool results,
-   shown on screen as a simulation. Check live that Muse Spark follows the v01 payload with it on. If it still
-   refuses, script the hijacked call and label it "attacker-controlled agent". Never claim the model was fooled.
+2. **Takeover switch:** done and checked live (see "Now").
 3. **Supervisor** (Day 5): a Muse Spark planner that writes and signs the plan, a redacted metadata view (invariant
    3: no attacker strings, add tests), and a gray-zone reviewer at `minimal` effort, replacing the user prompt for
    `needs: LlmReview`.
