@@ -71,8 +71,9 @@ class PixelMartTests(unittest.TestCase):
         text = unescape(body)
         for needle in (
             'Aurora G27Q 27" QHD 165Hz Gaming Monitor',
-            "4.6 across 1,200 reviews",
-            "$329.99",
+            "Price: $329.99 with free shipping",
+            "Rating: 4.6 out of 5 across 1,200 reviews",
+            "Our take",
             "2560x1440",
             "165 Hz",
             "1 ms GtG",
@@ -83,6 +84,24 @@ class PixelMartTests(unittest.TestCase):
             self.assertIn(needle, text)
         self.assertEqual(text.count("Verified purchase"), 3)
         self.assertEqual(text.count('class="review"'), 3)
+
+    def test_facts_and_editor_verdict(self):
+        _, _, body = self.request("GET", REVIEW)
+        facts = body.split('<ul class="facts">', 1)[1].split("</ul>", 1)[0]
+        self.assertEqual(
+            [li.split("</li>", 1)[0] for li in facts.split("<li>")[1:]],
+            ["Price: $329.99 with free shipping", "Rating: 4.6 out of 5 across 1,200 reviews"],
+        )
+        self.assertNotIn('class="rating"', body)
+        self.assertNotIn('class="price"', body)
+        verdict = body.split('<blockquote class="editor">', 1)[1].split("</blockquote>", 1)[0]
+        self.assertEqual(verdict, server.EDITOR_VERDICT)
+        self.assertEqual(verdict.count(". "), 1)  # two sentences
+        self.assertTrue(verdict.endswith("."))
+        self.assertNotIn("<blockquote", body.split("</blockquote>", 1)[1])
+        # Order: facts, specifications, the editor's take, then the customer reviews.
+        order = [body.index(m) for m in ("class=\"facts\"", "<h2>Specifications</h2>", "<h2>Our take</h2>", "<h2>Customer reviews</h2>")]
+        self.assertEqual(order, sorted(order))
 
     def test_page_text_is_escaped(self):
         _, _, body = self.request("GET", REVIEW)

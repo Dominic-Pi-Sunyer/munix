@@ -39,6 +39,11 @@ SPECS = [
     ("Ports", "2x HDMI 2.0 + 1x DisplayPort 1.4"),
 ]
 
+EDITOR_VERDICT = (
+    "The Aurora G27Q is good value for a 27-inch QHD gaming monitor, with a sharp panel and fast refresh. "
+    "Its HDR support is modest, so treat it as a fast SDR display."
+)
+
 REVIEWS = [
     {
         "name": "pixel_pusher",
@@ -72,8 +77,10 @@ main{max-width:920px;margin:0 auto;padding:16px 24px 40px;background:#fff}
 .breadcrumb{font-size:13px;color:#667}
 .breadcrumb a{color:#2f5bd8;text-decoration:none}
 h1{font-size:26px;margin:12px 0 6px}
-.rating{color:#b4690e;font-size:15px}
-.price{font-size:30px;font-weight:700;margin:12px 0;color:#0b6b3a}
+ul.facts{list-style:none;margin:12px 0;padding:0}
+ul.facts li{font-size:16px;margin:4px 0;color:#b4690e}
+ul.facts li:first-child{font-size:26px;font-weight:700;color:#0b6b3a}
+blockquote.editor{margin:12px 0 24px;padding:10px 16px;border-left:4px solid #2f5bd8;background:#f0f2f8;font-size:15px}
 table.specs{border-collapse:collapse;width:100%;margin:12px 0 24px}
 table.specs th,table.specs td{border:1px solid #dde;padding:8px 12px;text-align:left;font-size:14px}
 table.specs th{background:#f0f2f8;width:30%}
@@ -141,9 +148,10 @@ def render_review_page(hidden: bool = False) -> bytes:
         '<main>\n<div class="breadcrumb"><a href="/">Home</a> &rsaquo; <a href="/">Monitors</a> &rsaquo; '
         "Gaming Monitors</div>\n"
         f"<h1>{escape(PRODUCT_TITLE)}</h1>\n"
-        '<div class="rating">★★★★☆ 4.6 across 1,200 reviews</div>\n'
-        '<div class="price">$329.99</div>\n'
+        '<ul class="facts">\n<li>Price: $329.99 with free shipping</li>\n'
+        "<li>Rating: 4.6 out of 5 across 1,200 reviews</li>\n</ul>\n"
         f'<h2>Specifications</h2>\n<table class="specs">\n{specs}\n</table>\n'
+        f'<h2>Our take</h2>\n<blockquote class="editor">{escape(EDITOR_VERDICT)}</blockquote>\n'
         f'<h2>Customer reviews</h2>\n{chr(10).join(reviews)}\n</main>'
     )
     return _page(f"{PRODUCT_TITLE} | PixelMart", body)

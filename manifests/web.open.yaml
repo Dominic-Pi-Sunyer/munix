@@ -1,4 +1,7 @@
 # Open a web page and return its text and links. Everything it returns is untrusted until the Gate scores it.
+# Without a site template the text comes back whole as `page` (unclassified). With a template for the site (see
+# sites/), the page is split into `listing`, `editorial` and `reviews`, each labeled by what it is, and there is no
+# `page`. A call returns either `page` or the template fields, never both.
 tool: web.open
 description: Open a web page and return its text and the links on it.
 tier: 1
@@ -6,5 +9,8 @@ egress: true
 args:
   url: {type: url, role: destination}
 output:
-  page:  {type: text,  region: unclassified, confidential: public}
-  links: {type: "url[]", region: unclassified, confidential: public}
+  page:      {type: text,    region: unclassified,    confidential: public}
+  listing:   {type: text,    region: product_listing, confidential: public}
+  editorial: {type: text,    region: editorial,       confidential: public}
+  reviews:   {type: "text[]", region: ugc_review,     confidential: public}
+  links:     {type: "url[]", region: unclassified,    confidential: public}

@@ -7,6 +7,10 @@
 //! [`ToolFailure::Unavailable`]; the next call starts a fresh one. Web Speed's own error
 //! messages are never copied: only its error code picks a coarse [`ToolFailure`].
 //!
+//! A [`SiteTemplate`] for the requested site splits the page into fields the manifest labels by region (listing,
+//! editorial, reviews) instead of one `page` text. It applies only when the page map's final URL is still on the
+//! template's host and paths, so a redirect to another site gets the plain `page`.
+//!
 //! The child gets a cleared environment plus a short allowlist of variables, so secrets in the
 //! parent (model API keys, SMTP passwords) never reach it.
 
@@ -19,6 +23,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use munix_core::ids::RefId;
 use munix_core::validate::Scalar;
 use munix_core::validate::{is_clean_text, is_valid as is_valid_scalar_string};
 use munix_gate::tool::{Tool, ToolFailure};
@@ -26,6 +31,7 @@ use munix_gate::vault::Credential;
 use serde_json::{Value, json};
 
 use crate::ToolConfigError;
+use crate::site::{SiteTemplate, SiteTemplates};
 
 /// MCP protocol revision announced in `initialize`.
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -35,6 +41,8 @@ const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PAGE_CHARS: usize = 20_000;
 /// Most links returned.
 const MAX_LINKS: usize = 50;
+/// Most entries in one template field built with `each`.
+const MAX_ITEMS: usize = 50;
 /// Parent environment variables the child may see.
 const PASSED_ENV: [&str; 4] = ["PATH", "HOME", "LANG", "PLAYWRIGHT_BROWSERS_PATH"];
 
@@ -51,6 +59,8 @@ pub struct WebSpeedConfig {
     pub allow_hosts: Option<String>,
     /// Limit for one `tools/call` round trip (and for the startup handshake).
     pub timeout: Duration,
+    /// Site templates; none by default, so every page is one unclassified `page` text.
+    pub templates: SiteTemplates,
 }
 
 impl WebSpeedConfig {
@@ -64,6 +74,7 @@ impl WebSpeedConfig {
             cwd: dir,
             allow_hosts: None,
             timeout: Duration::from_secs(60),
+            templates: SiteTemplates::default(),
         }
     }
 }
@@ -133,7 +144,7 @@ impl Tool for WebSpeedOpen {
             }
         };
         drop(guard);
-        interpret(&response)
+        interpret(&response, &self.config.templates, url)
     }
 }
 
@@ -312,7 +323,14 @@ fn read_lines(stdout: impl Read, tx: &mpsc::Sender<Line>) {
 // ---------------------------------------------------------------------------------------------
 
 /// Map one `tools/call` response to the tool output or a coarse failure.
-fn interpret(response: &Value) -> Result<BTreeMap<String, Value>, ToolFailure> {
+///
+/// With a template that matches both the requested URL and the page map's final URL, the output is the template's
+/// fields plus `links`; otherwise it is `page` plus `links`.
+fn interpret(
+    response: &Value,
+    templates: &SiteTemplates,
+    requested: &str,
+) -> Result<BTreeMap<String, Value>, ToolFailure> {
     let result = response.get("result").ok_or(ToolFailure::Internal)?;
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(ToolFailure::Internal);
@@ -333,22 +351,82 @@ fn interpret(response: &Value) -> Result<BTreeMap<String, Value>, ToolFailure> {
         });
     }
 
-    let page = render_page(&map);
-    if !is_valid_scalar_string(Scalar::Text, &page) {
-        return Err(ToolFailure::Internal);
+    let mut out = match templates
+        .find(requested)
+        .filter(|template| final_url_matches(template, &map))
+    {
+        Some(template) => template_output(template, &map)?,
+        None => {
+            let page = render_page(&map);
+            if !is_valid_scalar_string(Scalar::Text, &page) {
+                return Err(ToolFailure::Internal);
+            }
+            BTreeMap::from([("page".to_owned(), Value::String(page))])
+        }
+    };
+    out.insert(
+        "links".to_owned(),
+        Value::Array(collect_links(&map).into_iter().map(Value::String).collect()),
+    );
+    Ok(out)
+}
+
+/// The page the child ended on is still covered by the template: same host and port, and under its paths. A
+/// missing or odd final URL means no template.
+fn final_url_matches(template: &SiteTemplate, map: &Value) -> bool {
+    map.get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| template.matches(url))
+}
+
+/// The template's fields, each text cleaned like `page` is. Texts that are empty after cleaning, or are a whole
+/// `ref:` token, are dropped, and so are fields left with nothing.
+fn template_output(
+    template: &SiteTemplate,
+    map: &Value,
+) -> Result<BTreeMap<String, Value>, ToolFailure> {
+    let mut out = BTreeMap::new();
+    for (name, value) in template.apply(map) {
+        let cleaned = match value {
+            Value::String(text) => clean_field(&text).map(Value::String),
+            Value::Array(items) => {
+                let texts: Vec<Value> = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(clean_field)
+                    .take(MAX_ITEMS)
+                    .map(Value::String)
+                    .collect();
+                (!texts.is_empty()).then_some(Value::Array(texts))
+            }
+            _ => None,
+        };
+        let Some(cleaned) = cleaned else { continue };
+        let texts_ok = match &cleaned {
+            Value::String(text) => is_valid_scalar_string(Scalar::Text, text),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .all(|text| is_valid_scalar_string(Scalar::Text, text)),
+            _ => false,
+        };
+        if !texts_ok {
+            return Err(ToolFailure::Internal);
+        }
+        out.insert(name, cleaned);
     }
-    let links = collect_links(&map);
-    Ok(BTreeMap::from([
-        ("page".to_owned(), Value::String(page)),
-        (
-            "links".to_owned(),
-            Value::Array(links.into_iter().map(Value::String).collect()),
-        ),
-    ]))
+    Ok(out)
+}
+
+/// One field text, cleaned; `None` when nothing is left. A text that is only a `ref:` token would be refused by
+/// the Gate (it could forge a Gate ref) and sink the whole output, so it is dropped here.
+fn clean_field(text: &str) -> Option<String> {
+    let cleaned = clean_block(text);
+    (!cleaned.is_empty() && cleaned.parse::<RefId>().is_err()).then_some(cleaned)
 }
 
 /// A string or number as text; anything else is nothing.
-fn scalar_text(value: &Value) -> Option<String> {
+pub(crate) fn scalar_text(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
@@ -357,7 +435,7 @@ fn scalar_text(value: &Value) -> Option<String> {
     }
 }
 
-fn field_text(object: &Value, key: &str) -> Option<String> {
+pub(crate) fn field_text(object: &Value, key: &str) -> Option<String> {
     object.get(key).and_then(scalar_text)
 }
 
@@ -408,28 +486,29 @@ fn render_page(map: &Value) -> String {
         }
     }
     for table in array(map, "tables") {
-        let rows = std::iter::once(table.get("headers")).chain(array(table, "rows").map(Some));
-        for row in rows.flatten() {
-            if let Some(cells) = row.as_array() {
-                let cells: Vec<String> = cells.iter().filter_map(scalar_text).collect();
-                if !cells.is_empty() {
-                    lines.push(cells.join(" | "));
-                }
+        lines.extend(table_rows(table));
+    }
+
+    clean_block(&lines.join("\n"))
+}
+
+/// A table as text lines: the header row, then each row, cells joined with " | ". Rows with no cells are skipped.
+pub(crate) fn table_rows(table: &Value) -> Vec<String> {
+    let rows = std::iter::once(table.get("headers")).chain(array(table, "rows").map(Some));
+    let mut lines = Vec::new();
+    for row in rows.flatten() {
+        if let Some(cells) = row.as_array() {
+            let cells: Vec<String> = cells.iter().filter_map(scalar_text).collect();
+            if !cells.is_empty() {
+                lines.push(cells.join(" | "));
             }
         }
     }
-
-    finish_text(
-        &lines
-            .iter()
-            .map(|l| clean_text(l))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+    lines
 }
 
 /// Elements of an array-valued key; empty when the key is missing or not an array.
-fn array<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+pub(crate) fn array<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
     value
         .get(key)
         .and_then(Value::as_array)
@@ -502,6 +581,12 @@ fn is_stripped(c: char) -> bool {
 
 fn clean_text(s: &str) -> String {
     s.chars().filter(|c| !is_stripped(*c)).collect()
+}
+
+/// The cleaning every text that leaves the tool gets: invisible and control characters stripped, then tidied and
+/// capped by [`finish_text`].
+fn clean_block(text: &str) -> String {
+    finish_text(&clean_text(text))
 }
 
 /// Trim trailing blanks, allow at most two blank lines in a row, cap the length.

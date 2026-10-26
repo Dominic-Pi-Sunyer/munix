@@ -1,0 +1,10 @@
+# Site template for the mock PixelMart review page (fixtures/mock-web). The trusted side splits the page by what each
+# part is, so the Gate can score the listing, the editor's take and the user reviews separately. Parts not picked
+# here are dropped. A template applies only to this exact host and port, and only if the page it finally lands on
+# is still on that host under these paths.
+host: pixelmart.test:8080
+paths: ["/reviews/"]
+fields:
+  listing:   {picks: [title, headings, tables, li]}
+  editorial: {picks: [blockquote]}
+  reviews:   {picks: [p], each: true}

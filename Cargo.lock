@@ -463,7 +463,9 @@ dependencies = [
  "lettre",
  "munix-core",
  "munix-gate",
+ "serde",
  "serde_json",
+ "serde_yaml_ng",
  "thiserror",
 ]
 
