@@ -353,5 +353,13 @@ fn dropping_the_gateway_stops_the_server() {
     let gw = Gateway::start(config(up.url())).unwrap();
     let addr = gw.addr();
     drop(gw);
-    assert!(std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err());
+    // tiny_http's accept thread can hold the socket for a moment after the server is dropped, so wait for it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "gateway still accepting after drop"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
