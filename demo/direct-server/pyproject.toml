@@ -1,0 +1,16 @@
+[project]
+name = "munix-demo-direct-server"
+version = "0.1.0"
+description = "Undefended demo MCP server: web_open and email_send wired straight to Web Speed OSS and Mailpit"
+requires-python = ">=3.11"
+dependencies = ["mcp[cli]>=1.0,<2"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+package = false

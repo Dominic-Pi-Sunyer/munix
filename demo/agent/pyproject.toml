@@ -1,0 +1,18 @@
+[project]
+name = "demo-agent"
+version = "0.1.0"
+description = "Ordinary tool-calling agent (OpenAI-compatible API + MCP stdio client) used on both sides of the demo"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.109.1,<2",
+    "mcp[cli]>=1.0,<2",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

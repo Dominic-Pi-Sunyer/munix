@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/Dominic-Pi-Sunyer/munix"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+
+[workspace.lints.rust]
+# A security product: no unsafe in our own code.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# No panicking shortcuts outside tests (clippy.toml allows them in tests).
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
