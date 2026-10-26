@@ -5,4 +5,5 @@
 //! one port to the host. The gateway adds the model API key, so the agent never holds one.
 
 pub mod gateway;
+pub mod mcp;
 pub mod sandbox;

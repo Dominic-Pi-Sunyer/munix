@@ -1058,3 +1058,167 @@ fn an_approval_cannot_exceed_the_budget() {
     );
     assert_eq!(h.emails_sent(), 1);
 }
+
+// ---- what the Console and the front need to ask ----
+
+fn other_task() -> TaskId {
+    "T-other".parse().unwrap()
+}
+
+#[test]
+fn plan_returns_the_task_plan() {
+    let mut h = harness();
+    assert_eq!(h.gate.plan(&task_id()), None, "no task yet");
+    h.start();
+    let plan = h.gate.plan(&task_id()).unwrap();
+    assert_eq!(*plan, h.plan_body());
+    assert_eq!(plan.plan, "P-demo".parse().unwrap());
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(h.gate.plan(&other_task()), None);
+}
+
+#[test]
+fn calls_made_counts_executed_calls_per_step() {
+    let mut h = harness();
+    assert_eq!(h.gate.calls_made(&task_id(), 1), None, "no task yet");
+    let brief = h.start();
+    assert_eq!(brief.plan.steps.len(), 3);
+    for step in 0..=4 {
+        assert_eq!(h.gate.calls_made(&task_id(), step), Some(0));
+    }
+    assert_eq!(h.gate.calls_made(&other_task(), 1), None);
+
+    h.read_page();
+    assert_eq!(h.gate.calls_made(&task_id(), 1), Some(1));
+    assert_eq!(h.gate.calls_made(&task_id(), 2), Some(0));
+
+    // Malformed, denied and parked requests do not count; neither does a request on another step.
+    let no_url = req(1, "web.open", json!({}));
+    assert!(matches!(h.gate.submit(&no_url), Reply::Malformed(_)));
+    let forbidden_cc = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "cc": ["ref:e2"], "subject": "Hi", "body": "Hello"}),
+    );
+    assert_eq!(
+        h.gate.submit(&forbidden_cc),
+        Reply::Denied(DenyCode::ForbiddenArg)
+    );
+    let email = email_to_boss("Reviews");
+    let hash = pending(h.gate.submit(&email), &email, Stage::User);
+    assert_eq!(h.gate.calls_made(&task_id(), 1), Some(1));
+    assert_eq!(h.gate.calls_made(&task_id(), 2), Some(0));
+
+    // An approved call counts; so does a call whose tool failed.
+    let approval = user_approves(&h, &hash, Band::Lockdown);
+    assert!(matches!(h.gate.decide(&approval), Reply::Delivered(_)));
+    assert_eq!(h.gate.calls_made(&task_id(), 2), Some(1));
+    h.web_fails.store(true, Ordering::SeqCst);
+    assert_eq!(
+        h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
+        Reply::Failed(ToolFailure::Unavailable)
+    );
+    assert_eq!(h.gate.calls_made(&task_id(), 1), Some(2));
+    assert_eq!(h.gate.calls_made(&task_id(), 3), Some(0));
+}
+
+#[test]
+fn describe_pending_shows_real_values_and_where_they_came_from() {
+    let mut h = harness();
+    h.start();
+    h.read_page();
+    let email = email_to_boss("Reviews");
+    let hash = pending(h.gate.submit(&email), &email, Stage::User);
+
+    let view = h.gate.describe_pending(&task_id(), &hash).unwrap();
+    assert_eq!(view.tool.as_str(), "email.send");
+    assert_eq!(view.step, 2);
+    assert_eq!(view.needs, Stage::User);
+    assert_eq!(view.band, Band::Lockdown);
+    let names: Vec<&str> = view.args.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["body", "subject", "to"], "in name order");
+    let arg = |name: &str| view.args.iter().find(|a| a.name == name).unwrap();
+
+    // Refs are resolved to the values that will be sent; nothing says `ref:`.
+    let expected_body = format!("Summary of {PROMPT_URL} for {BOSS}");
+    assert_eq!(arg("body").value, expected_body);
+    assert!(arg("to").value.contains(BOSS) && !arg("to").value.contains("ref:"));
+    assert!(view.args.iter().all(|a| !a.value.contains("ref:")));
+
+    // Sources, in order of appearance.
+    assert_eq!(arg("to").sources, ["store contacts.boss (trust 100)"]);
+    assert_eq!(
+        arg("body").sources,
+        ["the prompt (trust 100)", "store contacts.boss (trust 100)"]
+    );
+    // A plain word that traces to nothing says so.
+    assert_eq!(arg("subject").sources, ["untraced"]);
+
+    // The view matches what executing the request does.
+    let approval = user_approves(&h, &hash, view.band);
+    assert!(matches!(h.gate.decide(&approval), Reply::Delivered(_)));
+    let sent = h.sent.lock().unwrap();
+    assert_eq!(sent[0]["body"], json!(expected_body));
+    drop(sent);
+
+    // A decided request is no longer parked.
+    assert_eq!(h.gate.describe_pending(&task_id(), &hash), None);
+}
+
+#[test]
+fn describe_pending_names_raw_values_that_match_a_known_value_or_nothing() {
+    let mut h = harness();
+    h.start();
+    h.read_page();
+    // The boss's address typed out in full still traces to the store entry it equals.
+    let typed = req(
+        2,
+        "email.send",
+        json!({"to": [BOSS], "subject": "Reviews", "body": "Hello"}),
+    );
+    let hash = pending(h.gate.submit(&typed), &typed, Stage::User);
+    let view = h.gate.describe_pending(&task_id(), &hash).unwrap();
+    let to = view.args.iter().find(|a| a.name == "to").unwrap();
+    assert_eq!(to.sources, ["store contacts.boss (trust 100)"]);
+    assert!(to.value.contains(BOSS));
+    // A single word that is not a known value traces to nothing.
+    let body = view.args.iter().find(|a| a.name == "body").unwrap();
+    assert_eq!(body.value, "Hello");
+    assert_eq!(body.sources, ["untraced"]);
+}
+
+#[test]
+fn describe_pending_only_knows_parked_requests_of_known_tasks() {
+    let mut h = harness();
+    let hash = hash_of(&email_to_boss("Reviews"));
+    assert_eq!(h.gate.describe_pending(&task_id(), &hash), None, "no task");
+    h.start();
+    h.read_page();
+    assert_eq!(
+        h.gate.describe_pending(&task_id(), &hash),
+        None,
+        "not parked"
+    );
+
+    let email = email_to_boss("Reviews");
+    let hash = pending(h.gate.submit(&email), &email, Stage::User);
+    assert_eq!(h.gate.describe_pending(&other_task(), &hash), None);
+    assert!(h.gate.describe_pending(&task_id(), &hash).is_some());
+    let other_hash = Digest::of_bytes(b"another request");
+    assert_eq!(h.gate.describe_pending(&task_id(), &other_hash), None);
+
+    // Describing is read-only: the request is still parked and can be decided.
+    let approval = user_approves(&h, &hash, Band::Lockdown);
+    assert!(matches!(h.gate.decide(&approval), Reply::Delivered(_)));
+}
+
+#[test]
+fn describe_pending_reports_the_review_stage_and_band() {
+    let mut h = harness();
+    h.start();
+    h.read_news();
+    let email = email_to_boss("Reviews");
+    let hash = pending(h.gate.submit(&email), &email, Stage::LlmReview);
+    let view = h.gate.describe_pending(&task_id(), &hash).unwrap();
+    assert_eq!((view.needs, view.band), (Stage::LlmReview, Band::Elevated));
+}

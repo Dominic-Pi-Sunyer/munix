@@ -4,6 +4,12 @@ Munix is a runtime against prompt injection: the agent runs inside it, plain cod
 Supervisor model that never sees attacker text plans and reviews. Read `docs/design-spec.md` sections 1 (invariants),
 3 (architecture) and 4 (data model) before changing enforcement code. `HACKATHON.md` is the scope and schedule.
 
+## Handoff (do this every time)
+
+`docs/HANDOFF.md` is the live handoff between agents (Claude, Gemini or anyone). **Before you edit any code, update
+its "Now" section** with what you are about to change and what is uncommitted. When you finish a piece of work,
+update "Done", "Next steps" and "Known issues". Commit it with the work.
+
 ## Clean-room rule (hackathon: new work only)
 
 Everything here is written during the event (Oct 26 – Nov 4, 2026). A private pre-event prototype exists.

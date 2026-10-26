@@ -4,6 +4,10 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# A model or effort set by the caller (e.g. the red-team runner) wins over .env.
+caller_model="${MUNIX_WORKER_MODEL:-}"
+caller_effort="${MUNIX_WORKER_EFFORT:-}"
+
 if [ -f .env ]; then
   set -a
   # shellcheck disable=SC1091
@@ -15,6 +19,9 @@ if [ -z "${MODEL_API_KEY:-}" ]; then
   echo "error: MODEL_API_KEY is not set (put it in .env at the repo root)" >&2
   exit 1
 fi
+
+[ -n "$caller_model" ] && export MUNIX_WORKER_MODEL="$caller_model"
+[ -n "$caller_effort" ] && export MUNIX_WORKER_EFFORT="$caller_effort"
 
 export OPENAI_BASE_URL="https://api.meta.ai/v1"
 export OPENAI_API_KEY="$MODEL_API_KEY"

@@ -410,6 +410,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "munix-cli"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "munix-adapters",
+ "munix-core",
+ "munix-gate",
+ "munix-ledger",
+ "munix-runtime",
+ "munix-tools",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "munix-core"
 version = "0.1.0"
 dependencies = [

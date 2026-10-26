@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -16,31 +16,41 @@ use munix_runtime::sandbox::{PLACEHOLDER_KEY, Sandbox, SandboxSpec};
 
 const REAL_KEY: &str = "sk-live-test-real-key";
 
-/// What the agent runs: call the gateway with the placeholder key (retrying while the relay starts), then try to
-/// open a raw TCP connection to the internet.
+/// What the agent runs: call the gateway with the placeholder key (retrying while the relay starts), try to open a
+/// raw TCP connection to the internet, then report both over the MCP channel the way a real agent would: start
+/// `shim.py connect` as its MCP server, write one JSON line and read one reply. Its own prints go to the shim's
+/// stderr, so a stray print to stdout must never show up on the channel.
 const AGENT_PY: &str = r#"
-import json, os, socket, time, urllib.request
+import json, os, socket, subprocess, sys, time, urllib.request
 url = os.environ["OPENAI_BASE_URL"] + "/chat/completions"
 req = urllib.request.Request(
     url,
     data=json.dumps({"model": "m", "messages": []}).encode(),
     headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"},
 )
-result = "GATEWAY failed"
+gateway = "GATEWAY failed"
 for _ in range(20):
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            result = "GATEWAY %d %s" % (r.status, r.read().decode())
+            gateway = "GATEWAY %d %s" % (r.status, r.read().decode())
             break
     except Exception as e:
-        result = "GATEWAY failed %s" % type(e).__name__
+        gateway = "GATEWAY failed %s" % type(e).__name__
         time.sleep(0.5)
-print(result, flush=True)
 try:
     socket.create_connection(("1.1.1.1", 443), timeout=3).close()
-    print("INTERNET reachable", flush=True)
+    internet = "INTERNET reachable"
 except OSError:
-    print("INTERNET blocked", flush=True)
+    internet = "INTERNET blocked"
+print("STRAY-PRINT-MUST-NOT-REACH-THE-CHANNEL", flush=True)
+server = subprocess.Popen(
+    ["python", "/munix/shim.py", "connect"], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+)
+report = {"jsonrpc": "2.0", "id": 1, "method": "report", "params": {"gateway": gateway, "internet": internet}}
+server.stdin.write((json.dumps(report) + "\n").encode())
+server.stdin.flush()
+reply = json.loads(server.stdout.readline())
+sys.exit(0 if reply.get("result") == "thanks" else 3)
 "#;
 
 #[test]
@@ -90,25 +100,39 @@ fn the_agent_reaches_the_gateway_but_not_the_internet() {
         host_gateway: "192.168.5.2".to_string(),
         gateway_port: gateway.addr().port(),
         relay_script: crate_dir.join("relay/relay.py"),
+        shim_script: crate_dir.join("shim/munix_shim.py"),
     };
     let mut sandbox = Sandbox::launch(spec).unwrap();
-    drop(sandbox.child.stdin.take()); // no MCP traffic in this test
-    let mut out = String::new();
-    let mut stdout = sandbox.child.stdout.take().unwrap();
-    stdout.read_to_string(&mut out).unwrap();
+
+    // The host end of the MCP channel: read the agent's one line from the sandbox's stdout, answer on its stdin.
+    let mut stdin = sandbox.child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(sandbox.child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| {
+        panic!("the first line on the channel was not JSON ({e}): {line:?}");
+    });
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"result":"thanks"}}"#).unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
     let status = sandbox.child.wait().unwrap();
     sandbox.kill().unwrap();
 
-    eprintln!("agent output:\n{out}");
+    eprintln!("agent report: {report}");
     assert!(status.success(), "agent exited with {status}");
+    assert_eq!(report["method"], "report");
+    let gateway_line = report["params"]["gateway"].as_str().unwrap();
+    let internet_line = report["params"]["internet"].as_str().unwrap();
     assert!(
-        out.contains(r#"GATEWAY 200 {"ok":true}"#),
-        "gateway not reached: {out}"
+        gateway_line.contains(r#"GATEWAY 200 {"ok":true}"#),
+        "gateway not reached: {gateway_line}"
     );
-    assert!(
-        out.contains("INTERNET blocked"),
-        "internet reachable: {out}"
-    );
+    assert_eq!(internet_line, "INTERNET blocked");
+    // The agent's own prints stayed off the channel.
+    assert!(rest.is_empty(), "stray output on the channel: {rest:?}");
+    let out = format!("{line}{rest}");
 
     // The upstream saw the real key, never the placeholder.
     let seen = auth_seen.lock().unwrap().clone();

@@ -99,6 +99,26 @@ pub enum Reply {
     Failed(ToolFailure),
 }
 
+/// A parked request as the Console shows it to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingView {
+    pub tool: ToolName,
+    pub step: u32,
+    pub needs: Stage,
+    pub band: Band,
+    pub args: Vec<PendingArg>,
+}
+
+/// One argument of a parked request: the value as it will be sent, and where each part of it came from, such as
+/// `store contacts.boss (trust 100)` or `step 1 reviews (ugc_review, trust 15)`. Raw values the Gate can't trace
+/// say `untraced`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingArg {
+    pub name: String,
+    pub value: String,
+    pub sources: Vec<String>,
+}
+
 pub struct Gate {
     key: SigningKey,
     catalog: Catalog,
@@ -503,6 +523,53 @@ impl Gate {
         self.domains.values().copied().collect()
     }
 
+    /// Calls already executed on one step of a task.
+    pub fn calls_made(&self, task: &TaskId, step: u32) -> Option<u32> {
+        self.tasks
+            .get(task)
+            .map(|t| t.calls.get(&step).copied().unwrap_or(0))
+    }
+
+    /// The catalog this Gate enforces.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// The plan a task runs under.
+    pub fn plan(&self, task: &TaskId) -> Option<&Plan> {
+        self.tasks.get(task).map(|t| &t.plan)
+    }
+
+    /// What the user sees to confirm a parked request at the Console: the tool, and each argument as it will be
+    /// sent, with where its values came from. Real values: this goes to the user's own screen, never to a model.
+    pub fn describe_pending(&self, task: &TaskId, request_hash: &Digest) -> Option<PendingView> {
+        let t = self.tasks.get(task)?;
+        let parked = t.pending.get(request_hash)?;
+        let manifest = self.catalog.get(&parked.request.tool)?;
+        let resolved = resolve_args(manifest, &parked.request.args, &t.refs)?;
+        let args = resolved
+            .iter()
+            .map(|(name, value)| {
+                let raw = &parked.request.args[name];
+                PendingArg {
+                    name: name.clone(),
+                    value: match value {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                    sources: describe_sources(raw, &t.refs),
+                }
+            })
+            .collect();
+        Some(PendingView {
+            tool: parked.request.tool.clone(),
+            step: parked.request.step,
+            needs: parked.needs,
+            band: parked.band,
+            args,
+        })
+    }
+
     // ---- private helpers ----
 
     /// Appends one event. False means the write failed and the caller must fail closed.
@@ -886,6 +953,59 @@ fn named_store_values(plan: &Plan, store: &Store) -> BTreeSet<(String, String)> 
 /// Swaps refs for their values in the arguments the tracer examined. Destinations and selectors take whole-value
 /// refs only (that is all the tracer checks); content text also takes refs embedded in it. Control arguments are
 /// never examined, so they are passed through untouched. `None` means a ref could not be resolved.
+/// Where the values of one argument came from, for the Console.
+fn describe_sources(value: &Value, refs: &RefTable) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut strings = Vec::new();
+    match value {
+        Value::String(s) => strings.push(s.as_str()),
+        Value::Array(items) => strings.extend(items.iter().filter_map(Value::as_str)),
+        _ => {}
+    }
+    for s in strings {
+        let mut found = false;
+        let ids: Vec<RefId> = match s.parse::<RefId>() {
+            Ok(id) => vec![id],
+            Err(_) => find_embedded(s).into_iter().map(|(_, _, id)| id).collect(),
+        };
+        for id in ids {
+            if let Some(entry) = refs.get(&id) {
+                out.push(describe_entry(entry));
+                found = true;
+            }
+        }
+        if !found && s.parse::<RefId>().is_err() {
+            let matches = refs.find_value(s);
+            if matches.is_empty() {
+                if find_embedded(s).is_empty() && !s.is_empty() && !s.contains(char::is_whitespace)
+                {
+                    out.push("untraced".to_owned());
+                }
+            } else {
+                out.extend(matches.into_iter().map(|(_, entry)| describe_entry(entry)));
+            }
+        }
+    }
+    out.dedup();
+    out
+}
+
+fn describe_entry(entry: &crate::refs::RefEntry) -> String {
+    let trust = entry.label.trust.value();
+    match &entry.origin {
+        Origin::Prompt => format!("the prompt (trust {trust})"),
+        Origin::UserData => format!("the user's data (trust {trust})"),
+        Origin::Store { name, key } => format!("store {name}.{key} (trust {trust})"),
+        Origin::Step { step, field } => {
+            let region = serde_json::to_value(entry.label.region)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            format!("step {step} {field} ({region}, trust {trust})")
+        }
+    }
+}
+
 fn resolve_args(
     manifest: &ToolManifest,
     args: &BTreeMap<String, Value>,

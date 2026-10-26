@@ -25,6 +25,7 @@ fn check_mount_path(p: &Path, what: &'static str) -> Result<(), SandboxError> {
     if !p.is_absolute() || s.contains([':', ',', '\0', '\n']) {
         return Err(SandboxError::Invalid(match what {
             "agent_dir" => "agent_dir must be an absolute path without ':' or ','",
+            "shim_script" => "shim_script must be an absolute path without ':' or ','",
             _ => "relay_script must be an absolute path without ':' or ','",
         }));
     }
@@ -54,6 +55,9 @@ pub struct SandboxSpec {
     pub gateway_port: u16,
     /// This crate's `relay/relay.py` on the host, mounted read-only into the relay container.
     pub relay_script: PathBuf,
+    /// This crate's `shim/munix_shim.py` on the host, mounted read-only at `/munix/shim.py`. It runs as the agent
+    /// container's entry point and owns the container's stdio, which is the MCP channel.
+    pub shim_script: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +92,7 @@ impl SandboxSpec {
         }
         check_mount_path(&self.agent_dir, "agent_dir")?;
         check_mount_path(&self.relay_script, "relay_script")?;
+        check_mount_path(&self.shim_script, "shim_script")?;
         if self.command.is_empty() || self.command.iter().any(|c| c.contains('\0')) {
             return bad("command must be non-empty without NUL");
         }
@@ -172,8 +177,8 @@ impl SandboxSpec {
 
     /// Runs the agent with `-i --rm` on the internal network only, read-only root with a small `/tmp` tmpfs, all
     /// capabilities dropped, `no-new-privileges`, `--pids-limit 256`, `--memory 1g`, `-v <agent_dir>:/agent:ro`,
-    /// `OPENAI_BASE_URL=http://munix-<name>-relay:<port>/v1`, `OPENAI_API_KEY=<PLACEHOLDER_KEY>` and `env`, then
-    /// the image and command.
+    /// `-v <shim_script>:/munix/shim.py:ro`, `OPENAI_BASE_URL=http://munix-<name>-relay:<port>/v1`,
+    /// `OPENAI_API_KEY=<PLACEHOLDER_KEY>` and `env`, then the image and `python /munix/shim.py serve -- <command>`.
     pub fn agent_run_args(&self) -> Vec<String> {
         let mut args = strings(&[
             "run",
@@ -196,6 +201,8 @@ impl SandboxSpec {
             "1g",
             "-v",
             &format!("{}:/agent:ro", self.agent_dir.display()),
+            "-v",
+            &format!("{}:/munix/shim.py:ro", self.shim_script.display()),
             "-e",
             &format!(
                 "OPENAI_BASE_URL=http://{}:{}/v1",
@@ -210,6 +217,7 @@ impl SandboxSpec {
             args.push(format!("{k}={v}"));
         }
         args.push(self.image.clone());
+        args.extend(strings(&["python", "/munix/shim.py", "serve", "--"]));
         args.extend(self.command.iter().cloned());
         args
     }
@@ -314,6 +322,7 @@ mod tests {
             host_gateway: "192.168.5.2".to_string(),
             gateway_port: 4040,
             relay_script: PathBuf::from("/home/u/munix/relay/relay.py"),
+            shim_script: PathBuf::from("/home/u/munix/shim/munix_shim.py"),
         }
     }
 
@@ -361,6 +370,9 @@ mod tests {
         invalid(|sp| sp.agent_dir = PathBuf::from("/a,b"));
         invalid(|sp| sp.relay_script = PathBuf::from("relay.py"));
         invalid(|sp| sp.relay_script = PathBuf::from("/a:rw/relay.py"));
+        invalid(|sp| sp.shim_script = PathBuf::from("shim.py"));
+        invalid(|sp| sp.shim_script = PathBuf::from("/a:rw/shim.py"));
+        invalid(|sp| sp.shim_script = PathBuf::from("/a,b/shim.py"));
         invalid(|sp| sp.host_gateway = String::new());
         invalid(|sp| sp.host_gateway = "1.2.3.4 --x".into());
         invalid(|sp| sp.gateway_port = 0);
@@ -471,6 +483,8 @@ mod tests {
                 "1g",
                 "-v",
                 "/home/u/agent:/agent:ro",
+                "-v",
+                "/home/u/munix/shim/munix_shim.py:/munix/shim.py:ro",
                 "-e",
                 "OPENAI_BASE_URL=http://munix-demo-1-relay:4040/v1",
                 "-e",
@@ -478,6 +492,10 @@ mod tests {
                 "-e",
                 "MODEL=muse",
                 "python:3.12-slim",
+                "python",
+                "/munix/shim.py",
+                "serve",
+                "--",
                 "python",
                 "/agent/agent.py",
                 "--x",
@@ -515,13 +533,52 @@ mod tests {
     }
 
     #[test]
-    fn relay_script_and_agent_dir_are_read_only_mounts() {
+    fn mount_path_errors_name_the_right_field() {
+        let message = |f: fn(&mut SandboxSpec)| {
+            let mut sp = spec();
+            f(&mut sp);
+            match sp.validate() {
+                Err(SandboxError::Invalid(m)) => m,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(message(|sp| sp.agent_dir = PathBuf::from("a")).starts_with("agent_dir"));
+        assert!(message(|sp| sp.relay_script = PathBuf::from("a")).starts_with("relay_script"));
+        assert!(message(|sp| sp.shim_script = PathBuf::from("a")).starts_with("shim_script"));
+    }
+
+    #[test]
+    fn the_shim_is_the_entry_point_and_the_command_stays_the_users() {
+        let args = spec().agent_run_args();
+        let image = args.iter().position(|a| a == "python:3.12-slim").unwrap();
+        assert_eq!(
+            args[image + 1..],
+            s(&[
+                "python",
+                "/munix/shim.py",
+                "serve",
+                "--",
+                "python",
+                "/agent/agent.py",
+                "--x"
+            ])
+        );
+    }
+
+    #[test]
+    fn relay_script_shim_and_agent_dir_are_read_only_mounts() {
         let sp = spec();
         for args in [sp.relay_run_args(), sp.agent_run_args()] {
             for w in args.windows(2).filter(|w| w[0] == "-v") {
                 assert!(w[1].ends_with(":ro"), "{}", w[1]);
             }
         }
+        let mounts = sp
+            .agent_run_args()
+            .windows(2)
+            .filter(|w| w[0] == "-v")
+            .count();
+        assert_eq!(mounts, 2);
     }
 
     #[test]
