@@ -195,6 +195,7 @@ fn the_allowlist_reaches_the_child_and_the_read_flag_is_sent() {
     let flags = env_flags(Some("127.0.0.1:8080"));
     assert_eq!(flags["allow_hosts"], json!("127.0.0.1:8080"));
     assert_eq!(flags["read_flag"], json!(true));
+    assert_eq!(flags["registry_sync"], json!("false"));
     assert_eq!(env_flags(None)["allow_hosts"], Value::Null);
 }
 

@@ -184,6 +184,7 @@ def handle_call(msg_id, params):
             "model_api_key": "MODEL_API_KEY" in os.environ,
             "allow_hosts": os.environ.get("WEBSPEED_ALLOW_HOSTS"),
             "read_flag": args.get("read"),
+            "registry_sync": os.environ.get("WEB_SPEED_REGISTRY_SYNC"),
         }
         send({"jsonrpc": "2.0", "id": msg_id, "result": tool_result({"title": json.dumps(flags, sort_keys=True)})})
         return

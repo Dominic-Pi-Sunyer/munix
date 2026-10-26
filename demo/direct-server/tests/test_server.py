@@ -135,3 +135,8 @@ def test_exposes_exactly_two_tools():
     schema = {t.name: t.inputSchema for t in tools}
     assert schema["web_open"]["required"] == ["url"]
     assert sorted(schema["email_send"]["required"]) == ["body", "subject", "to"]
+
+
+def test_web_speed_registry_sync_is_always_off(monkeypatch):
+    monkeypatch.setenv("WEB_SPEED_REGISTRY_SYNC", "true")
+    assert server._webspeed_params().env["WEB_SPEED_REGISTRY_SYNC"] == "false"

@@ -53,7 +53,11 @@ def _webspeed_params() -> StdioServerParameters:
         if not oss_dir.is_absolute():
             oss_dir = REPO_ROOT / oss_dir
         argv = [str(oss_dir / "venv" / "bin" / "python"), str(oss_dir / "server.py")]
-    env = {"WEBSPEED_ALLOW_HOSTS": os.environ.get("WEBSPEED_ALLOW_HOSTS") or DEFAULT_ALLOW_HOSTS}
+    # Web Speed OSS shares page maps with a hosted registry unless told not to; demo pages stay on this machine.
+    env = {
+        "WEBSPEED_ALLOW_HOSTS": os.environ.get("WEBSPEED_ALLOW_HOSTS") or DEFAULT_ALLOW_HOSTS,
+        "WEB_SPEED_REGISTRY_SYNC": "false",
+    }
     return StdioServerParameters(command=argv[0], args=argv[1:], env=env)
 
 

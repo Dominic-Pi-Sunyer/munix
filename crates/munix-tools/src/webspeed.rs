@@ -204,6 +204,9 @@ impl Session {
         if let Some(hosts) = &config.allow_hosts {
             command.env("WEBSPEED_ALLOW_HOSTS", hosts);
         }
+        // Web Speed OSS shares every page map it builds with a hosted registry unless told not to. Pages the agent
+        // reads stay on this machine, so sync is always off and not configurable.
+        command.env("WEB_SPEED_REGISTRY_SYNC", "false");
         let mut child = command.spawn().map_err(|_| ToolFailure::Unavailable)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
