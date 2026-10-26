@@ -94,8 +94,8 @@ pub struct Facts<'a> {
 ///    - `from`: every entry of `values` must satisfy it with `min_trust` (else `UntrustedDestination`);
 ///    - a destination argument of a tier 1+ tool with no `from` rule: `UntrustedDestination`;
 ///    - content of an egress tool with `raw_destinations > 0`: `RawDestination`;
-///    - `embedded` refs: each must satisfy `may_embed.from` with `may_embed.min_trust`; any embedded ref without
-///      a `may_embed` rule is `UntrustedDestination`;
+///    - `embedded` refs: each must trace to a clean-side origin (prompt, user data or a store), or satisfy
+///      `may_embed.from` with `may_embed.min_trust`; anything else is `UntrustedDestination`;
 ///    - `contains_credential`, or `confidential` above the `dlp` rule (`no_secret`: secret is too much;
 ///      `no_private`: private or more; `public_only`: anything above public): `ConfidentialData`. A content
 ///      argument with no `dlp` rule gets `no_secret`.
@@ -191,11 +191,12 @@ fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<(), Den
         }
 
         if !arg.embedded.is_empty() {
+            // Values the user or operator supplied (prompt, user data, stores) may appear in content: they aren't
+            // attacker-chosen. Anything read during the task needs the plan's may_embed, with enough trust.
             let embed = rule.and_then(|r| r.may_embed.as_ref());
-            let allowed = embed.is_some_and(|e| {
-                arg.embedded
-                    .iter()
-                    .all(|t| t.satisfies(&e.from, e.min_trust))
+            let allowed = arg.embedded.iter().all(|t| {
+                t.matches.iter().any(|m| m.origin.is_clean_side())
+                    || embed.is_some_and(|e| t.satisfies(&e.from, e.min_trust))
             });
             if !allowed {
                 reasons.push(format!("{name}.embed_untrusted"));
@@ -870,6 +871,34 @@ args:
             to.unknown_refs = 1;
         });
         assert_eq!(denied(&email(Band::Clean, &a)), DenyCode::UnknownRef);
+    }
+
+    #[test]
+    fn clean_side_values_may_appear_in_content_without_a_may_embed_rule() {
+        // The prompt's URL and the boss's address: supplied by the user or operator, never attacker-chosen.
+        for origin in [
+            Origin::Prompt,
+            Origin::Store {
+                name: "contacts".into(),
+                key: "boss".into(),
+            },
+        ] {
+            let mut plan = band_plan();
+            plan.steps[1].args.get_mut("body").unwrap().may_embed = None;
+            let a = email_with(|a| {
+                a.get_mut("body").unwrap().embedded = vec![traced(origin.clone(), 100)]
+            });
+            let m = manifest(EMAIL_SEND);
+            let r = run_with(&plan, 2, "email.send", &m, 0, Band::Clean, &a);
+            assert_eq!(r.outcome, Outcome::Allow, "{origin:?}");
+        }
+        // A value read during the task still needs the rule.
+        let mut plan = band_plan();
+        plan.steps[1].args.get_mut("body").unwrap().may_embed = None;
+        let a = email_with(|a| a.get_mut("body").unwrap().embedded = vec![from_step(95)]);
+        let m = manifest(EMAIL_SEND);
+        let r = run_with(&plan, 2, "email.send", &m, 0, Band::Clean, &a);
+        assert_eq!(denied(&r), DenyCode::UntrustedDestination);
     }
 
     #[test]

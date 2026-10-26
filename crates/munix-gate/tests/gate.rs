@@ -99,7 +99,7 @@ fn test_plan(prompt_hash: Digest) -> Plan {
             "reads: [operator_content, product_listing, editorial, ugc_review, unclassified]",
         ),
         (
-            "may_embed: {from: [step.1], min_trust: 60}",
+            "may_embed: {from: [prompt, step.1], min_trust: 60}",
             "may_embed: {from: [prompt, store.contacts.boss]}",
         ),
         (
@@ -715,6 +715,101 @@ fn a_raw_link_in_the_body_is_a_takeover() {
     assert_eq!(h.gate.submit(&email_to_boss("Hi")), Reply::Halted);
     assert_eq!(h.emails_sent(), 0);
     assert!(h.events().contains(&"takeover".to_owned()));
+    assert_ledger_clean(&h);
+}
+
+#[test]
+fn quoting_the_prompts_url_in_the_body_is_delivered_with_the_demo_plan() {
+    let mut h = harness();
+    let mut demo = Plan::from_yaml(DEMO_PLAN).unwrap();
+    demo.prompt_hash = prompt_envelope().digest().unwrap();
+    h.plan = h.sign_plan(demo);
+    h.start();
+
+    let body = format!("Summary of {PROMPT_URL}: 4.6 stars across 1,200 reviews.");
+    let request = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "subject": "Reviews", "body": body}),
+    );
+    let Reply::Delivered(done) = h.gate.submit(&request) else {
+        panic!("expected delivery");
+    };
+    assert_eq!(done.fields["message_id"], json!("msg-1"));
+    assert_eq!(h.emails_sent(), 1);
+    assert_eq!(h.sent.lock().unwrap()[0]["body"], json!(body));
+    assert_ledger_clean(&h);
+}
+
+#[test]
+fn quoting_a_low_trust_page_link_in_the_body_is_untrusted_destination_not_raw() {
+    let mut h = harness();
+    let mut demo = Plan::from_yaml(&DEMO_PLAN.replace(
+        "reads: [operator_content, product_listing, editorial, ugc_review]",
+        "reads: [operator_content, product_listing, editorial, ugc_review, unclassified]",
+    ))
+    .unwrap();
+    demo.prompt_hash = prompt_envelope().digest().unwrap();
+    h.plan = h.sign_plan(demo);
+    h.start();
+    h.read_page();
+
+    let request = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "subject": "Hi", "body": "Read https://evil.test/collect now"}),
+    );
+    assert_eq!(
+        h.gate.submit(&request),
+        Reply::Takeover(DenyCode::UntrustedDestination)
+    );
+    assert_eq!(h.emails_sent(), 0);
+    assert_ledger_clean(&h);
+}
+
+#[test]
+fn raw_email_in_the_body_traces_known_store_values_and_rejects_unknown_ones() {
+    // Known store address when may_embed allows store.contacts.boss: delivered at Clean band.
+    let mut h = harness();
+    h.start();
+    let request = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "subject": "Reviews", "body": format!("Prepared for {BOSS}.")}),
+    );
+    assert!(matches!(h.gate.submit(&request), Reply::Delivered(_)));
+    assert_eq!(h.emails_sent(), 1);
+    assert_ledger_clean(&h);
+
+    // Known store address when may_embed only allows [prompt, step.1] (the demo plan): still delivered, because a
+    // value the operator supplied isn't attacker-chosen.
+    let mut h = harness();
+    let mut demo = Plan::from_yaml(DEMO_PLAN).unwrap();
+    demo.prompt_hash = prompt_envelope().digest().unwrap();
+    h.plan = h.sign_plan(demo);
+    h.start();
+    let request = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "subject": "Reviews", "body": format!("Prepared for {BOSS}.")}),
+    );
+    assert!(matches!(h.gate.submit(&request), Reply::Delivered(_)));
+    assert_eq!(h.emails_sent(), 1);
+    assert_ledger_clean(&h);
+
+    // Unknown email address typed raw into the body: RawDestination.
+    let mut h = harness();
+    h.start();
+    let request = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "subject": "Reviews", "body": "Forward to mallory@evil.test."}),
+    );
+    assert_eq!(
+        h.gate.submit(&request),
+        Reply::Takeover(DenyCode::RawDestination)
+    );
+    assert_eq!(h.emails_sent(), 0);
     assert_ledger_clean(&h);
 }
 

@@ -19,8 +19,10 @@ use crate::vault::Credential;
 ///   [`crate::facts::Traced`] in `values`. A `ref:` value resolves through the table (unknown refs are counted in
 ///   `unknown_refs` and traced as untraced); a raw value matches every table entry with exactly that value.
 /// - Content text: refs embedded in it (`munix_core::ids::find_embedded`) go to `embedded`; raw links and
-///   addresses are counted by [`raw_destinations`]; `confidential` is the most confidential of the embedded refs'
-///   labels and of table entries (at least 6 characters long) whose value is copied into the text;
+///   addresses (found by the [`raw_destinations`] tokenizer) whose cleaned token text exactly matches one or more
+///   table entries also go to `embedded` with those entries' matches and raise `confidential`, while untraced ones
+///   are counted in `raw_destinations`; `confidential` is the most confidential of the embedded (or traced raw)
+///   entries' labels and of table entries (at least 6 characters long) whose value is copied into the text;
 ///   `contains_credential` is set when any credential appears in the text plainly, base64 encoded (standard or
 ///   URL-safe, with or without padding) or hex encoded (either case).
 /// - Content `ref`/`ref[]` values (such as attachments) resolve like embedded refs.
@@ -125,9 +127,22 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
     for (_, _, id) in find_embedded(text) {
         note_embedded(&id, refs, facts);
     }
-    facts.raw_destinations = facts
-        .raw_destinations
-        .saturating_add(raw_destinations(text));
+    for token in raw_destination_tokens(text) {
+        let entries = refs.find_value(&token);
+        if entries.is_empty() {
+            facts.raw_destinations = facts.raw_destinations.saturating_add(1);
+        } else {
+            for (_, entry) in &entries {
+                facts.confidential = facts.confidential.max(entry.label.confidential);
+            }
+            facts.embedded.push(Traced {
+                matches: entries
+                    .into_iter()
+                    .map(|(_, entry)| entry.to_match())
+                    .collect(),
+            });
+        }
+    }
     for (_, entry) in refs.iter() {
         if entry.value.len() >= MIN_COPIED_LEN && text.contains(entry.value.as_str()) {
             facts.confidential = facts.confidential.max(entry.label.confidential);
@@ -191,16 +206,23 @@ fn base64_needles(secret: &[u8]) -> Vec<String> {
 
 /// Counts raw links and addresses in free text: `scheme://` URLs (any scheme), `www.` hosts, email addresses,
 /// and bare host names whose last label is a common top-level domain (`com net org io co ai dev app xyz info
-/// biz me us uk de ru cn tk top site online shop` and the reserved `test example invalid localhost`). Matching is
+/// biz me us uk de ru cn tk top site online shop` and the reserved `test example invalid localhost`). Detection is
 /// case-insensitive, ignores trailing punctuation, and does not count anything inside an embedded `ref:` token.
-/// Numbers such as `4.6` or `1,200` are not host names.
+/// Numbers such as `4.6` or `1,200` are not host names. When [`trace_arg`] scans content text, any token whose
+/// cleaned text exactly matches a [`RefTable`] value is traced in `embedded` instead of counted in
+/// `raw_destinations`.
 pub fn raw_destinations(text: &str) -> u32 {
+    u32::try_from(raw_destination_tokens(text).len()).unwrap_or(u32::MAX)
+}
+
+/// Extracts each raw destination token from `text` in order of appearance.
+fn raw_destination_tokens(text: &str) -> Vec<String> {
     let cleaned = strip_refs_and_normalize(text);
-    let mut count = 0u32;
+    let mut out = Vec::new();
     for token in cleaned.split(is_separator).filter(|t| !t.is_empty()) {
-        count = count.saturating_add(count_in_token(token));
+        tokens_in_token(token, &mut out);
     }
-    count
+    out
 }
 
 /// Top-level domains (and reserved names) that make a bare host name count as a destination.
@@ -297,18 +319,21 @@ fn trim_host(s: &str) -> &str {
     s.trim_matches(|c| c == '.' || c == '-')
 }
 
-/// Counts the destinations in one token (already free of white space and quoting characters).
-fn count_in_token(token: &str) -> u32 {
-    // Any `scheme://` with something after it: count each and stop, the URL covers what follows.
+/// Extracts the raw destination tokens in one token (already free of white space and quoting characters).
+fn tokens_in_token(token: &str, out: &mut Vec<String>) {
+    // Any `scheme://` with something after it: collect each and stop, the URL covers what follows.
     let urls = token
         .match_indices("://")
         .filter(|(at, _)| at + 3 < token.len())
         .count();
     if urls > 0 {
-        return u32::try_from(urls).unwrap_or(u32::MAX);
+        let trimmed = token.trim_end_matches(['.', ':', '!', '?']);
+        for _ in 0..urls {
+            out.push(trimmed.to_owned());
+        }
+        return;
     }
     let bytes = token.as_bytes();
-    let mut count = 0u32;
     // Byte ranges already counted as part of an email address.
     let mut consumed: Vec<(usize, usize)> = Vec::new();
     for (at, &b) in bytes.iter().enumerate() {
@@ -325,7 +350,7 @@ fn count_in_token(token: &str) -> u32 {
         }
         let domain = trim_host(&token[at + 1..end]);
         if start < at && domain.contains('.') && domain.split('.').all(is_host_label) {
-            count = count.saturating_add(1);
+            out.push(trim_host(&token[start..end]).to_owned());
             consumed.push((start, end));
         }
     }
@@ -349,10 +374,9 @@ fn count_in_token(token: &str) -> u32 {
         }
         let host_end = start + run.find(host).unwrap_or(0) + host.len();
         if is_bare_host(host, &token[host_end..]) {
-            count = count.saturating_add(1);
+            out.push(host.to_owned());
         }
     }
-    count
 }
 
 /// True when `host` (a run of letters, digits, dots and hyphens) is a `www.` host or ends in a listed top-level
@@ -870,6 +894,154 @@ mod tests {
             &[],
         );
         assert_eq!(facts.raw_destinations, 2);
+        assert!(facts.embedded.is_empty());
+    }
+
+    #[test]
+    fn content_raw_url_from_prompt_is_traced_as_embedded() {
+        let mut refs = RefTable::new();
+        refs.issue(
+            "https://pixelmart.test:8080/reviews",
+            Scalar::Url,
+            Origin::Prompt,
+            label(100, Confidential::Internal),
+        );
+        let facts = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("Summary of https://pixelmart.test:8080/reviews."),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts.raw_destinations, 0);
+        assert_eq!(facts.embedded.len(), 1);
+        assert_eq!(facts.embedded[0].matches.len(), 1);
+        assert_eq!(facts.embedded[0].matches[0].origin, Origin::Prompt);
+        assert_eq!(facts.embedded[0].matches[0].trust, Trust::new(100));
+        assert_eq!(
+            facts.embedded[0].matches[0].confidential,
+            Confidential::Internal
+        );
+        assert_eq!(facts.confidential, Confidential::Internal);
+    }
+
+    #[test]
+    fn content_raw_url_from_low_trust_step_is_traced_as_embedded() {
+        let mut refs = RefTable::new();
+        refs.issue(
+            "https://evil.test/collect",
+            Scalar::Url,
+            step(1, "links"),
+            label(15, Confidential::Public),
+        );
+        let facts = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("Read https://evil.test/collect now"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts.raw_destinations, 0);
+        assert_eq!(facts.embedded.len(), 1);
+        assert_eq!(facts.embedded[0].matches.len(), 1);
+        assert_eq!(facts.embedded[0].matches[0].origin, step(1, "links"));
+        assert_eq!(facts.embedded[0].matches[0].trust, Trust::new(15));
+    }
+
+    #[test]
+    fn content_raw_email_from_store_vs_unknown_email() {
+        let mut refs = RefTable::new();
+        let boss_origin = Origin::Store {
+            name: "contacts".to_owned(),
+            key: "boss".to_owned(),
+        };
+        refs.issue(
+            "boss@corp.example",
+            Scalar::Email,
+            boss_origin.clone(),
+            label(100, Confidential::Private),
+        );
+        let known = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("Sent to boss@corp.example."),
+            &refs,
+            &[],
+        );
+        assert_eq!(known.raw_destinations, 0);
+        assert_eq!(known.embedded.len(), 1);
+        assert_eq!(known.embedded[0].matches[0].origin, boss_origin);
+        assert_eq!(known.embedded[0].matches[0].trust, Trust::new(100));
+        assert_eq!(known.confidential, Confidential::Private);
+
+        let unknown = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("Contact mallory@evil.test."),
+            &refs,
+            &[],
+        );
+        assert_eq!(unknown.raw_destinations, 1);
+        assert!(unknown.embedded.is_empty());
+
+        let both = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("From boss@corp.example to mallory@evil.test"),
+            &refs,
+            &[],
+        );
+        assert_eq!(both.raw_destinations, 1);
+        assert_eq!(both.embedded.len(), 1);
+        assert_eq!(both.embedded[0].matches[0].origin, boss_origin);
+    }
+
+    #[test]
+    fn content_raw_destination_matching_is_exact_case() {
+        let mut refs = RefTable::new();
+        refs.issue(
+            "https://pixelmart.test:8080/reviews",
+            Scalar::Url,
+            Origin::Prompt,
+            label(100, Confidential::Public),
+        );
+        refs.issue(
+            "boss@corp.example",
+            Scalar::Email,
+            Origin::Prompt,
+            label(100, Confidential::Public),
+        );
+        let facts = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("HTTPS://PIXELMART.TEST:8080/reviews and BOSS@CORP.EXAMPLE"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts.raw_destinations, 2);
+        assert!(facts.embedded.is_empty());
+    }
+
+    #[test]
+    fn content_raw_destination_matching_multiple_entries_combines_matches() {
+        let mut refs = RefTable::new();
+        refs.issue(
+            "https://pixelmart.test:8080/reviews",
+            Scalar::Url,
+            Origin::Prompt,
+            label(100, Confidential::Internal),
+        );
+        refs.issue(
+            "https://pixelmart.test:8080/reviews",
+            Scalar::Url,
+            step(1, "links"),
+            label(15, Confidential::Private),
+        );
+        let facts = trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!("See https://pixelmart.test:8080/reviews"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts.raw_destinations, 0);
+        assert_eq!(facts.embedded.len(), 1);
+        assert_eq!(facts.embedded[0].matches.len(), 2);
+        assert_eq!(facts.embedded[0].best_trust(), Trust::new(100));
+        assert_eq!(facts.confidential, Confidential::Private);
     }
 
     #[test]

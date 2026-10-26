@@ -17,7 +17,7 @@ steps:
       cc:          {forbid: true}
       attachments: {forbid: true}
       subject:     {dlp: no_secret}
-      body:        {dlp: no_secret, may_embed: {from: [step.1], min_trust: 60}}
+      body:        {dlp: no_secret, may_embed: {from: [prompt, step.1], min_trust: 60}}
     budget: 1
 amendments:
   auto_max_tier: 1

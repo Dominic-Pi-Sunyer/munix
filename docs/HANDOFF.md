@@ -6,16 +6,21 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~2:45 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~3:40 PM PT, by Claude (Opus 5.5)._
 
-- **Just finished:** the Day 4 MVP code. `munix run` (`crates/munix-cli`), the Gate's MCP front and the terminal
-  Console, an MCP server and the container shim in `munix-runtime`, and the agent image's Dockerfile. All checks are
-  green and the live Docker shim test passes.
-- **Not yet run end to end:** `munix run` needs the agent image (`docker build -t munix-demo-agent demo/agent`). The
-  build downloads from PyPI, so ask the owner first. After that, one live run costs about $0.01.
-- **Builders are moving to Gemini 4 Argon** through `agy` (see "How we work"). Claude writes briefs and contracts and
-  reviews every diff.
-- **Takeover switch built** by Gemini 4 Argon and reviewed: `--simulate-takeover` / `MUNIX_SIMULATE_TAKEOVER=1` in `demo/agent`. Not yet checked live against Muse Spark (next step 2).
+- **`munix run` works live end to end.** The image `munix-demo-agent` is built.
+  - **The run:** the agent reads the page through the Gate (trust falls to 15). Its email to the boss (`ref:e2`) is
+    parked for the user, and the Console shows the real recipient traced to `store contacts.boss`.
+  - **Answering it:** the Console reads `/dev/tty`, so it must be answered in a real terminal. From a non-interactive
+    shell it denies.
+- **Fixed, from the first live run:**
+  - A raw link or address in content that the Gate can trace is judged like an embedded ref, not counted as raw
+    (Gemini 4 Argon, reviewed).
+  - Values from the prompt or a store may appear in content without a `may_embed` rule, because they aren't
+    attacker-chosen (lead).
+  - The demo plan's body may also embed the prompt.
+- **Takeover switch built and reviewed:** `--simulate-takeover` in `demo/agent`. Not yet checked live.
+- **Builders are Gemini 4 Argon** through `agy` (see "How we work"). Claude writes briefs and reviews every diff.
 
 ## Done (all on `main`, CI green)
 
@@ -35,9 +40,10 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 
 ## Next steps (in order)
 
-1. **First live `munix run`:** build the agent image (owner approval), start Mailpit and the mock site, then run
+1. **Approve at the Console:** the owner runs `munix run` in their own terminal and answers `y`; check that the summary
+   reaches Mailpit. Command (Mailpit and the mock site running):
    `cargo run -p munix-cli -- run --plan examples/demo-plan.yaml --prompt "<demo prompt>" -- python /agent/agent.py --server "python /munix/shim.py connect" "<demo prompt>"`.
-   Expect the boss's email to need confirmation at the Console after the page read. Fix whatever breaks.
+   Expect the boss's email to need confirmation at the Console after the page read.
 2. **Takeover switch** in `demo/agent/agent.py`: a flag that makes the agent obey instructions found in tool results,
    shown on screen as a simulation. Check live that Muse Spark follows the v01 payload with it on. If it still
    refuses, script the hijacked call and label it "attacker-controlled agent". Never claim the model was fooled.
