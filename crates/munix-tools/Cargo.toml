@@ -1,0 +1,18 @@
+[package]
+name = "munix-tools"
+description = "Real tools behind the Gate's Tool trait: web.open via Web Speed OSS, email.send via SMTP to a local sink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+munix-core.workspace = true
+munix-gate.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+lettre.workspace = true
+
+[lints]
+workspace = true

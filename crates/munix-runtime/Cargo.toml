@@ -1,0 +1,17 @@
+[package]
+name = "munix-runtime"
+description = "The Munix runtime: the agent's sandbox and its model gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+tiny_http.workspace = true
+
+[lints]
+workspace = true

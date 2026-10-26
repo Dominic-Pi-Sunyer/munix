@@ -1,0 +1,20 @@
+[package]
+name = "munix-gate"
+description = "The Gate: the only path from the agent to tools, credentials and the network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+munix-core.workspace = true
+munix-ledger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true
