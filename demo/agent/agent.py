@@ -1,11 +1,12 @@
 """A plain tool-calling agent: OpenAI-compatible chat API plus an MCP stdio server.
 
-Usage: agent.py --server "<command line>" [--max-steps 12] "<prompt>"
+Usage: agent.py --server "<command line>" [--max-steps 12] [--reasoning-effort low] "<prompt>"
 """
 
 import argparse
 import asyncio
 import json
+import math
 import os
 import shlex
 import sys
@@ -17,6 +18,10 @@ from openai import AsyncOpenAI
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
 DEFAULT_MODEL = "muse-spark-1.3"
 DEFAULT_BOSS = "boss@corp.example"
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "low"
+DEFAULT_PRICE_INPUT_PER_M = 1.25
+DEFAULT_PRICE_OUTPUT_PER_M = 4.25
 
 
 def one_line(text: str, limit: int = 200) -> str:
@@ -28,7 +33,58 @@ def result_text(result) -> str:
     return f"ERROR: {text}" if result.isError else text
 
 
+def read_price(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number, got {raw!r}")
+    return value
+
+
+class Usage:
+    """Token totals over every model call. Reasoning tokens are already counted inside completion tokens."""
+
+    def __init__(self):
+        self.prompt = 0
+        self.completion = 0
+        self.reasoning = 0
+        self.calls = 0
+
+    def add(self, response) -> None:
+        self.calls += 1
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self.prompt += getattr(usage, "prompt_tokens", None) or 0
+        self.completion += getattr(usage, "completion_tokens", None) or 0
+        details = getattr(usage, "completion_tokens_details", None)
+        self.reasoning += getattr(details, "reasoning_tokens", None) or 0
+
+    def line(self, price_in: float, price_out: float) -> str:
+        cost = (self.prompt * price_in + self.completion * price_out) / 1_000_000
+        return (
+            f"tokens: prompt {self.prompt} · completion {self.completion} (reasoning {self.reasoning}) "
+            f"· calls {self.calls} · est. cost ${cost:.4f}"
+        )
+
+
 async def run(args) -> int:
+    effort = args.reasoning_effort
+    if effort not in EFFORTS:
+        print(f"error: reasoning effort must be one of {', '.join(EFFORTS)}, got {effort!r}", file=sys.stderr)
+        return 2
+    try:
+        price_in = read_price("MUNIX_PRICE_INPUT_PER_M", DEFAULT_PRICE_INPUT_PER_M)
+        price_out = read_price("MUNIX_PRICE_OUTPUT_PER_M", DEFAULT_PRICE_OUTPUT_PER_M)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("error: OPENAI_API_KEY is not set", file=sys.stderr)
@@ -43,6 +99,7 @@ async def run(args) -> int:
         return 2
 
     client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    usage = Usage()
     messages = [
         {
             "role": "system",
@@ -70,8 +127,9 @@ async def run(args) -> int:
 
             for _ in range(args.max_steps):
                 response = await client.chat.completions.create(
-                    model=model, messages=messages, tools=tools, max_tokens=4096
+                    model=model, messages=messages, tools=tools, max_tokens=4096, reasoning_effort=effort
                 )
+                usage.add(response)
                 message = response.choices[0].message
                 calls = message.tool_calls or []
                 entry = {"role": "assistant", "content": message.content}
@@ -88,6 +146,7 @@ async def run(args) -> int:
 
                 if not calls:
                     print(f"\n{message.content or ''}")
+                    print(usage.line(price_in, price_out))
                     return 0
 
                 for call in calls:
@@ -108,6 +167,7 @@ async def run(args) -> int:
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": output})
 
             print(f"\nStopped after {args.max_steps} steps without a final answer.")
+            print(usage.line(price_in, price_out))
             return 1
 
 
@@ -115,6 +175,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Tool-calling agent over an MCP stdio server.")
     parser.add_argument("--server", required=True, help="command line that starts the MCP stdio server")
     parser.add_argument("--max-steps", type=int, default=12)
+    parser.add_argument(
+        "--reasoning-effort",
+        default=os.environ.get("MUNIX_WORKER_EFFORT") or DEFAULT_EFFORT,
+        help=f"one of {', '.join(EFFORTS)} (default: $MUNIX_WORKER_EFFORT, else {DEFAULT_EFFORT})",
+    )
     parser.add_argument("prompt")
     return asyncio.run(run(parser.parse_args()))
 

@@ -236,7 +236,8 @@ fn upstream_status_and_body_pass_through() {
         Usage {
             calls: 1,
             prompt_tokens: 0,
-            completion_tokens: 0
+            completion_tokens: 0,
+            reasoning_tokens: 0
         }
     );
 }
@@ -257,7 +258,48 @@ fn usage_adds_up() {
         Usage {
             calls: 3,
             prompt_tokens: 21,
-            completion_tokens: 9
+            completion_tokens: 9,
+            reasoning_tokens: 0
+        }
+    );
+}
+
+const REASONING_BODY: &str = r#"{"id":"x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":25}}}"#;
+
+#[test]
+fn reasoning_tokens_are_counted_on_successful_responses() {
+    let up = FakeUpstream::start(200, REASONING_BODY);
+    let gw = Gateway::start(config(up.url())).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            post(&gw, "/v1/chat/completions", None, GOOD_REQ).status,
+            200
+        );
+    }
+    assert_eq!(
+        gw.usage(),
+        Usage {
+            calls: 2,
+            prompt_tokens: 20,
+            completion_tokens: 80,
+            reasoning_tokens: 50
+        }
+    );
+}
+
+#[test]
+fn reasoning_tokens_are_not_counted_on_failed_responses() {
+    let up = FakeUpstream::start(429, REASONING_BODY);
+    let gw = Gateway::start(config(up.url())).unwrap();
+    assert_eq!(
+        post(&gw, "/v1/chat/completions", None, GOOD_REQ).status,
+        429
+    );
+    assert_eq!(
+        gw.usage(),
+        Usage {
+            calls: 1,
+            ..Usage::default()
         }
     );
 }
@@ -275,7 +317,8 @@ fn a_response_without_usage_counts_only_the_call() {
         Usage {
             calls: 1,
             prompt_tokens: 0,
-            completion_tokens: 0
+            completion_tokens: 0,
+            reasoning_tokens: 0
         }
     );
 }

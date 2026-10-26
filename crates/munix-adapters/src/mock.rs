@@ -3,7 +3,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde_json::Value;
 
-use crate::{AdapterError, ModelAdapter, ModelReply, ModelRequest};
+use crate::{AdapterError, ModelAdapter, ModelReply, ModelRequest, Usage};
 
 /// Scripted adapter for tests: returns the queued results in order and records every request.
 #[derive(Debug)]
@@ -41,6 +41,7 @@ impl ModelAdapter for MockAdapter {
             Some(Ok(value)) => Ok(ModelReply {
                 value,
                 model: "mock".to_string(),
+                usage: Usage::default(),
             }),
             Some(Err(e)) => Err(e),
             None => Err(AdapterError::Unavailable(

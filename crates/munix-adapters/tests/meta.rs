@@ -4,7 +4,12 @@ mod support;
 
 use std::time::Duration;
 
-use munix_adapters::{AdapterError, MetaAdapter, ModelAdapter, ModelReply};
+use std::sync::Arc;
+
+use munix_adapters::{
+    AdapterError, MetaAdapter, Metered, MockAdapter, ModelAdapter, ModelReply, Pricing,
+    ReasoningEffort, Usage,
+};
 use serde_json::{Value, json};
 use support::{Canned, KEY, TestServer, adapter, request, split, verdict_schema};
 
@@ -69,6 +74,148 @@ fn request_has_the_exact_shape_and_bearer_header() {
             }
         })
     );
+}
+
+fn sent_body(server: &TestServer) -> Value {
+    let requests = server.requests();
+    serde_json::from_str(&split(&requests[0]).1).unwrap()
+}
+
+#[test]
+fn no_effort_means_no_reasoning_effort_field() {
+    let server = TestServer::start(vec![Canned::ok(&json!({"verdict": "approve"}))]);
+    call(&server).unwrap();
+    assert!(sent_body(&server).get("reasoning_effort").is_none());
+}
+
+#[test]
+fn effort_is_sent_as_its_wire_name() {
+    for effort in [
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let server = TestServer::start(vec![Canned::ok(&json!({"verdict": "approve"}))]);
+        let a = adapter(&server).0.with_reasoning_effort(effort);
+        a.complete_json(&request(verdict_schema())).unwrap();
+        let body = sent_body(&server);
+        assert_eq!(body["reasoning_effort"], effort.as_str());
+        // Nothing else about the request changes.
+        assert_eq!(body["model"], "muse-spark-1.3");
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(body["max_tokens"], 256);
+    }
+}
+
+fn with_usage(usage: Value) -> Canned {
+    Canned::json(&json!({
+        "model": "muse-spark-1.3",
+        "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+        "usage": usage
+    }))
+}
+
+#[test]
+fn usage_is_read_from_the_response() {
+    let reply = one(with_usage(json!({
+        "prompt_tokens": 120,
+        "completion_tokens": 80,
+        "total_tokens": 200,
+        "completion_tokens_details": {"reasoning_tokens": 50}
+    })))
+    .unwrap();
+    assert_eq!(
+        reply.usage,
+        Usage {
+            prompt_tokens: 120,
+            completion_tokens: 80,
+            reasoning_tokens: 50
+        }
+    );
+}
+
+#[test]
+fn missing_or_malformed_usage_fields_are_zero() {
+    assert_eq!(
+        one(Canned::reply("{}", "stop")).unwrap().usage,
+        Usage::default()
+    );
+    assert_eq!(
+        one(with_usage(json!({"prompt_tokens": 7}))).unwrap().usage,
+        Usage {
+            prompt_tokens: 7,
+            ..Usage::default()
+        }
+    );
+    assert_eq!(
+        one(with_usage(
+            json!({"completion_tokens": 9, "completion_tokens_details": {}})
+        ))
+        .unwrap()
+        .usage,
+        Usage {
+            completion_tokens: 9,
+            ..Usage::default()
+        }
+    );
+    let junk = json!({
+        "prompt_tokens": "many", "completion_tokens": -3,
+        "completion_tokens_details": {"reasoning_tokens": null}
+    });
+    assert_eq!(one(with_usage(junk)).unwrap().usage, Usage::default());
+    assert_eq!(
+        one(with_usage(json!("nope"))).unwrap().usage,
+        Usage::default()
+    );
+}
+
+#[test]
+fn metered_totals_calls_and_usage_across_clones_and_errors() {
+    let server = TestServer::start(vec![
+        with_usage(json!({
+            "prompt_tokens": 100, "completion_tokens": 40,
+            "completion_tokens_details": {"reasoning_tokens": 30}
+        })),
+        Canned::status(400),
+        with_usage(json!({
+            "prompt_tokens": 10, "completion_tokens": 5,
+            "completion_tokens_details": {"reasoning_tokens": 1}
+        })),
+    ]);
+    let metered = Metered::new(Arc::new(adapter(&server).0));
+    assert_eq!(metered.total(), (0, Usage::default()));
+    assert_eq!(metered.name(), "meta:muse-spark-1.3");
+    let handle = metered.clone();
+
+    let req = request(verdict_schema());
+    metered.complete_json(&req).unwrap();
+    assert!(handle.complete_json(&req).is_err());
+    metered.complete_json(&req).unwrap();
+
+    let expected = (
+        3,
+        Usage {
+            prompt_tokens: 110,
+            completion_tokens: 45,
+            reasoning_tokens: 31,
+        },
+    );
+    assert_eq!(metered.total(), expected);
+    assert_eq!(handle.total(), expected);
+    let cost = Pricing::default().cost_usd(&expected.1);
+    assert!((cost - (110.0 * 1.25 + 45.0 * 4.25) / 1e6).abs() < 1e-12);
+}
+
+#[test]
+fn metered_mock_replies_have_zero_usage() {
+    let mock = MockAdapter::new(vec![Ok(json!({"a": 1}))]);
+    let metered = Metered::new(Arc::new(mock));
+    let reply = metered.complete_json(&request(verdict_schema())).unwrap();
+    assert_eq!(reply.usage, Usage::default());
+    assert_eq!(metered.total(), (1, Usage::default()));
 }
 
 #[test]
@@ -393,7 +540,7 @@ fn reported_model_id_is_sanitized() {
     assert_eq!(one(no_model).unwrap().model, "unknown");
 }
 
-/// Live check against the real Meta Model API. Run with `MUNIX_LIVE_META=1 MODEL_API_KEY=... cargo test -- --ignored`.
+/// Live check against the real Meta Model API, at minimal effort. Run with `MUNIX_LIVE_META=1 MODEL_API_KEY=... cargo test -- --ignored`.
 #[test]
 #[ignore = "needs MUNIX_LIVE_META=1 and MODEL_API_KEY"]
 fn live_meta_verdict() {
@@ -403,7 +550,9 @@ fn live_meta_verdict() {
     }
     let model =
         std::env::var("MUNIX_SUPERVISOR_MODEL").unwrap_or_else(|_| "muse-spark-1.3".to_string());
-    let adapter = MetaAdapter::from_env(&model).unwrap();
+    let adapter = MetaAdapter::from_env(&model)
+        .unwrap()
+        .with_reasoning_effort(ReasoningEffort::Minimal);
     let req = munix_adapters::ModelRequest {
         system: "You review requests. Answer only with the requested JSON.".to_string(),
         user: "Request: read the file notes.txt in the user's own workspace. Approve or deny, with a short reason.".to_string(),
@@ -417,11 +566,19 @@ fn live_meta_verdict() {
     };
     let started = std::time::Instant::now();
     let reply = adapter.complete_json(&req).unwrap();
+    let pricing = Pricing::from_env().unwrap();
     println!(
-        "live latency: {:?}, model: {}, value: {}",
+        "live latency: {:?}, model: {}, effort: minimal, value: {}",
         started.elapsed(),
         reply.model,
         reply.value
+    );
+    println!(
+        "live usage: {} prompt, {} completion ({} reasoning); estimated cost: ${:.6}",
+        reply.usage.prompt_tokens,
+        reply.usage.completion_tokens,
+        reply.usage.reasoning_tokens,
+        pricing.cost_usd(&reply.usage)
     );
     assert!(matches!(
         reply.value["verdict"].as_str(),

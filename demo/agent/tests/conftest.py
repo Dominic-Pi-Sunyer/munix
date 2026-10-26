@@ -32,6 +32,7 @@ class FakeOpenAI:
 
     def __init__(self):
         self.replies = []
+        self.usages = []  # optional per-reply usage objects; missing entries default to 1 prompt / 1 completion
         self.requests = []
         outer = self
 
@@ -48,7 +49,11 @@ class FakeOpenAI:
                     "created": 0,
                     "model": body.get("model", "fake"),
                     "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    "usage": (
+                        outer.usages[index]
+                        if index < len(outer.usages)
+                        else {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    ),
                 }
                 data = json.dumps(payload).encode()
                 self.send_response(200)

@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{AdapterError, ModelAdapter, ModelReply, ModelRequest, sanitize_schema};
+use crate::{
+    AdapterError, ModelAdapter, ModelReply, ModelRequest, ReasoningEffort, Usage, sanitize_schema,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.meta.ai/v1";
 const MAX_ATTEMPTS: u32 = 3;
@@ -34,6 +36,7 @@ pub struct MetaAdapter {
     key: SecretKey,
     timeout: Duration,
     sleeper: Sleeper,
+    effort: Option<ReasoningEffort>,
 }
 
 impl fmt::Debug for MetaAdapter {
@@ -42,6 +45,7 @@ impl fmt::Debug for MetaAdapter {
             .field("model", &self.model)
             .field("key", &self.key)
             .field("timeout", &self.timeout)
+            .field("effort", &self.effort)
             .finish_non_exhaustive()
     }
 }
@@ -89,6 +93,7 @@ impl MetaAdapter {
             key: SecretKey(key.to_string()),
             timeout: DEFAULT_TIMEOUT,
             sleeper: Arc::new(std::thread::sleep),
+            effort: None,
         })
     }
 
@@ -96,6 +101,13 @@ impl MetaAdapter {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Sends `"reasoning_effort"` with every request. Without it the field is left out and the server decides.
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.effort = Some(effort);
         self
     }
 
@@ -119,7 +131,7 @@ impl MetaAdapter {
     }
 
     fn request_body(&self, req: &ModelRequest) -> String {
-        json!({
+        let mut body = json!({
             "model": self.model,
             "temperature": 0,
             "max_tokens": req.max_output_tokens,
@@ -131,8 +143,11 @@ impl MetaAdapter {
                 "type": "json_schema",
                 "json_schema": {"name": req.schema_name, "strict": true, "schema": sanitize_schema(&req.schema)},
             },
-        })
-        .to_string()
+        });
+        if let (Some(effort), Some(map)) = (self.effort, body.as_object_mut()) {
+            map.insert("reasoning_effort".to_string(), json!(effort.as_str()));
+        }
+        body.to_string()
     }
 
     /// One attempt: either a final result or a retryable failure.
@@ -269,7 +284,26 @@ fn parse_response(bytes: &[u8]) -> Result<ModelReply, AdapterError> {
         .filter(|m| valid_model_id(m))
         .unwrap_or("unknown")
         .to_string();
-    Ok(ModelReply { value, model })
+    Ok(ModelReply {
+        value,
+        model,
+        usage: parse_usage(&response),
+    })
+}
+
+/// Missing or malformed fields count as 0. Reasoning tokens are already part of the completion tokens.
+fn parse_usage(response: &Value) -> Usage {
+    let count = |pointer: &str| {
+        response
+            .pointer(pointer)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    Usage {
+        prompt_tokens: count("/usage/prompt_tokens"),
+        completion_tokens: count("/usage/completion_tokens"),
+        reasoning_tokens: count("/usage/completion_tokens_details/reasoning_tokens"),
+    }
 }
 
 /// Removes a leading `<think>...</think>` block and a single surrounding code fence.

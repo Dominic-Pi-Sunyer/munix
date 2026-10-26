@@ -29,9 +29,26 @@ Errors come back as an MCP tool error (`isError: true`) with a short fixed messa
 | `OPENAI_BASE_URL` | Model endpoint | `https://api.meta.ai/v1` | Munix's model gateway |
 | `OPENAI_API_KEY` | Model key | `MODEL_API_KEY` from `.env` | A placeholder; the gateway adds the real key |
 | `MUNIX_WORKER_MODEL` | Model id | `muse-spark-1.3` | `muse-spark-1.3` |
+| `MUNIX_WORKER_EFFORT` | Reasoning effort (default `low`); the `--reasoning-effort` flag overrides it | `low` | `low` |
+| `MUNIX_PRICE_INPUT_PER_M` / `MUNIX_PRICE_OUTPUT_PER_M` | USD per million input / output tokens, for the cost line (defaults `1.25` / `4.25`) | defaults | defaults |
 | `WEBSPEED_OSS_DIR` | Web Speed OSS checkout | `../web-speed-oss` | (used by Munix, not the agent) |
 | `WEBSPEED_ALLOW_HOSTS` | Loopback opt-in | `pixelmart.test:8080` | (used by Munix) |
 | `MUNIX_SMTP` | SMTP sink, loopback only | `127.0.0.1:1025` | (used by Munix) |
+
+## Reasoning effort and cost line
+
+`agent.py --reasoning-effort <level>` sets the model's reasoning effort: `minimal`, `low`, `medium`, `high`, `xhigh` or
+`max`. The default is `$MUNIX_WORKER_EFFORT`, else `low`. Anything else exits with code 2 before any API call, as does
+a negative or non-numeric price.
+
+After the final answer (or the step limit) the agent prints one line:
+
+```
+tokens: prompt 1000 · completion 500 (reasoning 200) · calls 1 · est. cost $0.0034
+```
+
+It sums usage over every model call (reasoning tokens are already inside completion tokens). The cost is an estimate
+from the two price variables above, whose defaults are the published Muse Spark 1.1 rates.
 
 ## Demo hostname
 

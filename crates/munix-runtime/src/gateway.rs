@@ -55,6 +55,8 @@ pub struct Usage {
     pub calls: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Already included in `completion_tokens`; shown separately so the cost of thinking is visible.
+    pub reasoning_tokens: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,7 +106,8 @@ impl Gateway {
     /// string `model` in `models` (else 400 or 403); `"stream": true` is refused with 400. Any `Authorization`
     /// header from the agent is dropped and `Authorization: Bearer <key>` is added; the body is forwarded
     /// unchanged to `<upstream>/chat/completions`, and the upstream status and body come back unchanged. The usage
-    /// counters add `usage.prompt_tokens` and `usage.completion_tokens` from successful responses. An unreachable
+    /// counters add `usage.prompt_tokens`, `usage.completion_tokens` and
+    /// `usage.completion_tokens_details.reasoning_tokens` from successful responses. An unreachable
     /// upstream is 502. The key is never logged or echoed.
     pub fn start(config: GatewayConfig) -> Result<Gateway, GatewayError> {
         if !config.bind.ip().is_loopback() {
@@ -288,17 +291,17 @@ fn handle(mut request: Request, shared: &Shared) {
     if (200..300).contains(&status)
         && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&upstream_body)
     {
-        let tokens = |name: &str| {
-            v.get("usage")
-                .and_then(|u| u.get(name))
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0)
-        };
+        let tokens = |pointer: &str| v.pointer(pointer).and_then(|t| t.as_u64()).unwrap_or(0);
         let mut usage = lock(&shared.usage);
-        usage.prompt_tokens = usage.prompt_tokens.saturating_add(tokens("prompt_tokens"));
+        usage.prompt_tokens = usage
+            .prompt_tokens
+            .saturating_add(tokens("/usage/prompt_tokens"));
         usage.completion_tokens = usage
             .completion_tokens
-            .saturating_add(tokens("completion_tokens"));
+            .saturating_add(tokens("/usage/completion_tokens"));
+        usage.reasoning_tokens = usage
+            .reasoning_tokens
+            .saturating_add(tokens("/usage/completion_tokens_details/reasoning_tokens"));
     }
     reply(request, status, content_type.as_deref(), upstream_body);
 }
