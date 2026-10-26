@@ -1,0 +1,19 @@
+[package]
+name = "munix-supervisor"
+description = "The Supervisor: a Muse Spark planner and gray-zone reviewer that never sees attacker-chosen text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+munix-core.workspace = true
+munix-gate.workspace = true
+munix-adapters.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

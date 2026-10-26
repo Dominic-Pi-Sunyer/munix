@@ -473,6 +473,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "munix-supervisor"
+version = "0.1.0"
+dependencies = [
+ "munix-adapters",
+ "munix-core",
+ "munix-gate",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "munix-tools"
 version = "0.1.0"
 dependencies = [

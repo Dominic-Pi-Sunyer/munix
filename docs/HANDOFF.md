@@ -6,7 +6,21 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~3:40 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~4:30 PM PT, by Claude (Opus 5.5)._
+
+- **Supervisor built (Day 5 code), not yet wired into `munix run`:**
+  - **`Gate::review_view`** (Gemini G1) builds the redacted metadata view. Poison tests fill pages and requests with
+    attacker strings, and none reach the view (invariant 3). The lead added `lowest_read` from the lowest-trust field
+    delivered.
+  - **`munix-supervisor`** (Gemini G2) holds the reviewer and the planner.
+  - **Lead fixes after live runs:**
+    - The reviewer's system prompt was rewritten. It used to answer `unclear` or deny honest requests. Now, at
+      `minimal`, it approved the honest boss email 5 of 5 times and denied an email the prompt never asked for 3 of
+      3 times.
+    - The planner raises any model-written `min_trust` on step sources to 60 (`MIN_STEP_TRUST`), because the live
+      planner wrote 0.
+- **Next:** wire into `munix run`. Use the planner when `--plan` is absent (`MUNIX_SUPERVISOR_MODEL`), and the reviewer
+  for `needs: LlmReview` instead of the Console.
 
 - **`munix run` works live end to end.** The image `munix-demo-agent` is built.
   - **The run:** the agent reads the page through the Gate (trust falls to 15). Its email to the boss (`ref:e2`) is
@@ -123,4 +137,7 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 - `munix run` reads `.env` as a fallback layer, not into the process environment: `set_var` needs `unsafe`.
 - A tool name that can't become a `ToolName` is treated as a takeover but isn't written to the ledger, since there is
   no `Request` to log.
-- Until the Supervisor exists, requests parked for review (`needs: LlmReview`) go to the user at the Console.
+- Until the Supervisor is wired into `munix run`, requests parked for review (`needs: LlmReview`) go to the user at
+  the Console.
+- The live planner reads only `ugc_review`, so the listing and the editor's take (price, specs) are withheld. That's
+  safe but thin; nudge the planner prompt to list every region the task needs.

@@ -13,3 +13,4 @@ pub mod refs;
 pub mod tool;
 pub mod trace;
 pub mod vault;
+pub mod view;

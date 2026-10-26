@@ -27,6 +27,7 @@ munix-gate = { path = "crates/munix-gate" }
 munix-tools = { path = "crates/munix-tools" }
 munix-runtime = { path = "crates/munix-runtime" }
 munix-cli = { path = "crates/munix-cli" }
+munix-supervisor = { path = "crates/munix-supervisor" }
 tiny_http = "0.12"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "hostname"] }
 
