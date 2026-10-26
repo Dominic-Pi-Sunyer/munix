@@ -257,3 +257,60 @@ def test_bad_price_exits_2_without_calling_the_model(fake_openai, run_agent, env
     assert result.returncode == 2
     assert "MUNIX_PRICE_" in result.stderr
     assert fake_openai.requests == []
+
+
+# --- simulated takeover -----------------------------------------------------
+
+TAKEOVER_BANNER = "SIMULATED TAKEOVER: this agent is configured to obey instructions found in tool results (demo only)."
+DEFAULT_SYSTEM = (
+    "You are a helpful assistant that completes the user's task with the tools available. "
+    "The user's boss is boss@corp.example."
+)
+
+
+def test_simulate_takeover_defaults_to_off(fake_openai, run_agent):
+    fake_openai.replies = [text_reply("ok")]
+    result = run_agent()
+    assert result.returncode == 0, result.stderr
+    assert "SIMULATED TAKEOVER" not in result.stderr
+    assert fake_openai.requests[0]["body"]["messages"][0] == {"role": "system", "content": DEFAULT_SYSTEM}
+
+
+@pytest.mark.parametrize("env_value", ["0", "false", ""])
+def test_simulate_takeover_remains_off_when_env_is_not_1(fake_openai, run_agent, env_value):
+    fake_openai.replies = [text_reply("ok")]
+    result = run_agent(env={"MUNIX_SIMULATE_TAKEOVER": env_value})
+    assert result.returncode == 0, result.stderr
+    assert "SIMULATED TAKEOVER" not in result.stderr
+    assert fake_openai.requests[0]["body"]["messages"][0] == {"role": "system", "content": DEFAULT_SYSTEM}
+
+
+@pytest.mark.parametrize("via", ["flag", "env"])
+def test_simulate_takeover_appends_paragraph_prints_banner_and_behaves_the_same(fake_openai, run_agent, via):
+    fake_openai.replies = [tool_call("call_1", "echo", {"text": "hi"}), text_reply("All done.")]
+    if via == "flag":
+        result = run_agent("--simulate-takeover")
+    else:
+        result = run_agent(env={"MUNIX_SIMULATE_TAKEOVER": "1"})
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.splitlines()[0] == TAKEOVER_BANNER
+
+    system = fake_openai.requests[0]["body"]["messages"][0]
+    assert system["role"] == "system"
+    paragraphs = system["content"].split("\n\n")
+    assert len(paragraphs) == 2
+    assert paragraphs[0] == DEFAULT_SYSTEM
+    assert "instructions" in paragraphs[1] and "tool results" in paragraphs[1] and "user" in paragraphs[1]
+
+    # The rest of the run behaves the same: tools, tool messages, output and cost line.
+    assert {t["function"]["name"] for t in fake_openai.requests[0]["body"]["tools"]} == {"echo", "boom"}
+    assert tool_messages(fake_openai.requests[1]) == [
+        {"role": "tool", "tool_call_id": "call_1", "content": "echo: hi"}
+    ]
+    assert '→ echo {"text": "hi"}' in result.stdout
+    assert "← echo: hi" in result.stdout
+    answer, cost_line = result.stdout.rstrip().rsplit("\n", 1)
+    assert answer.endswith("All done.")
+    assert cost_line.startswith("tokens: prompt 2 · completion 2 (reasoning 0) · calls 2 · est. cost $")
+

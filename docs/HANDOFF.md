@@ -15,6 +15,7 @@ _Last updated: Mon Oct 26, 2026, ~2:45 PM PT, by Claude (Opus 5.5)._
   build downloads from PyPI, so ask the owner first. After that, one live run costs about $0.01.
 - **Builders are moving to Gemini 4 Argon** through `agy` (see "How we work"). Claude writes briefs and contracts and
   reviews every diff.
+- **Takeover switch built** by Gemini 4 Argon and reviewed: `--simulate-takeover` / `MUNIX_SIMULATE_TAKEOVER=1` in `demo/agent`. Not yet checked live against Muse Spark (next step 2).
 
 ## Done (all on `main`, CI green)
 
@@ -56,6 +57,19 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
   the next token as the prompt. `--mode plan` is read-only.
 - **Briefs:** each one names the files the builder owns, the decisions already made, the done-checks and a short
   report. Builders never spend Meta API credit, never run Docker builds, never send mail and never commit.
+- **Gemini permissions:** headless `agy` auto-denies any tool not covered by the allow-rules in
+  `~/.gemini/antigravity-cli/settings.json`, and one denial ends the run. The rules allow:
+  - reads and writes inside this repo;
+  - `cargo build/check/clippy/test/fmt` and `rustfmt`;
+  - `uv run pytest`, `python3 -m py_compile` and `python3 -m unittest`;
+  - `git status` and `git diff`.
+
+  So briefs must say "only run these commands, no env-var prefixes, no `cd`".
+- **Lessons from the first Gemini run:**
+  - It can end while waiting on a background test run, without its report. Tell it to run tests in the foreground,
+    and always rerun them yourself.
+  - It wrote tests that assumed an empty stderr, but the fake MCP server logs to stderr. Review its tests, not just
+    its code.
 
 ## How to run
 

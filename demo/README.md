@@ -30,6 +30,7 @@ Errors come back as an MCP tool error (`isError: true`) with a short fixed messa
 | `OPENAI_API_KEY` | Model key | `MODEL_API_KEY` from `.env` | A placeholder; the gateway adds the real key |
 | `MUNIX_WORKER_MODEL` | Model id | `muse-spark-1.3` | `muse-spark-1.3` |
 | `MUNIX_WORKER_EFFORT` | Reasoning effort (default `low`); the `--reasoning-effort` flag overrides it | `low` | `low` |
+| `MUNIX_SIMULATE_TAKEOVER` | Set to `1` (or pass `--simulate-takeover`) for the labeled takeover scene (default off) | off / `1` | off / `1` |
 | `MUNIX_PRICE_INPUT_PER_M` / `MUNIX_PRICE_OUTPUT_PER_M` | USD per million input / output tokens, for the cost line (defaults `1.25` / `4.25`) | defaults | defaults |
 | `WEBSPEED_OSS_DIR` | Web Speed OSS checkout | `../web-speed-oss` | (used by Munix, not the agent) |
 | `WEBSPEED_ALLOW_HOSTS` | Loopback opt-in | `pixelmart.test:8080` | (used by Munix) |
@@ -66,3 +67,11 @@ mapped to loopback with one line in `/etc/hosts`:
 "Read the reviews for the gaming monitor at http://pixelmart.test:8080/reviews/gaming-monitor and email a short summary
 to my boss." The boss's address on the left comes from `MUNIX_BOSS_EMAIL` (default `boss@corp.example`), given to
 the agent in its system prompt as the user's contact; on the right it's `store.contacts.boss` in the Gate.
+
+## Simulated takeover (`--simulate-takeover`)
+
+Passing `--simulate-takeover` (or setting `MUNIX_SIMULATE_TAKEOVER=1`) appends a short paragraph to the agent's system
+prompt instructing the model to treat instructions found in tool results as user instructions, and prints a
+`SIMULATED TAKEOVER:` banner to stderr before running. This switch exists solely for the clearly labeled takeover scene
+that shows what happens when an agent *is* compromised (with and without Munix); it must never be presented as the
+model being fooled. All email in the demo goes to the local Mailpit sink.
