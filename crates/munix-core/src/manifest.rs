@@ -150,6 +150,57 @@ impl OutputSpec {
             Some(one)
         }
     }
+
+    /// How many bits one delivered `value` of this output actually carries, or `None` when it counts as free text.
+    /// `value` is the tool's raw value, before the Gate swaps anything for refs.
+    ///
+    /// - **Element:** as in [`capacity_bits`](Self::capacity_bits) for bool, enum and date. An int or number needs
+    ///   its `max` (single values only, as there), and a number must sit on the 0.1 grid that bound assumes.
+    /// - **Values the Gate shows only as refs** (url, email, phone, iban): the agent sees which values are equal,
+    ///   never the values, so each element carries ceil(log2 k) bits for k distinct values in the field.
+    /// - **List:** the elements' bits plus the length's: ceil(log2(max+1)) with a `max`, else ceil(log2(n+1)) for n
+    ///   elements. A value of the wrong shape is `None`.
+    pub fn delivered_bits(&self, value: &serde_json::Value) -> Option<u32> {
+        use serde_json::Value;
+        let items: Vec<&Value> = match (self.ty.list, value) {
+            (true, Value::Array(items)) => items.iter().collect(),
+            (false, Value::Array(_)) | (true, _) => return None,
+            (false, one) => vec![one],
+        };
+        let one = match self.ty.scalar {
+            Scalar::Bool => 1,
+            Scalar::Enum => bits_for(self.values.len() as u64),
+            Scalar::Date => 16,
+            Scalar::Int if !self.ty.list => bits_for(u64::from(self.max?) + 1),
+            Scalar::Number if !self.ty.list => {
+                let tenths = items.first()?.as_f64()? * 10.0;
+                if (tenths - tenths.round()).abs() > 1e-6 {
+                    return None;
+                }
+                bits_for(u64::from(self.max?) * 10 + 1)
+            }
+            Scalar::Url | Scalar::Email | Scalar::Phone | Scalar::Iban => {
+                let mut distinct: Vec<&str> = Vec::new();
+                for item in &items {
+                    let s = item.as_str()?;
+                    if !distinct.contains(&s) {
+                        distinct.push(s);
+                    }
+                }
+                bits_for(distinct.len() as u64)
+            }
+            _ => return None,
+        };
+        let n = u32::try_from(items.len()).ok()?;
+        let elements = one.checked_mul(n)?;
+        if self.ty.list {
+            // The length is the sender's choice too: out of max + 1 when bounded, else counted from n.
+            let lengths = self.max.unwrap_or(n);
+            elements.checked_add(bits_for(u64::from(lengths) + 1))
+        } else {
+            Some(elements)
+        }
+    }
 }
 
 fn default_confidential() -> Confidential {
@@ -721,5 +772,42 @@ mod capacity_tests {
         assert_eq!(out("url[]", &[], Some(3)).capacity_bits(), None);
         assert_eq!(out("int", &[], None).capacity_bits(), None);
         assert_eq!(out("bool[]", &[], None).capacity_bits(), None);
+    }
+
+    #[test]
+    fn delivered_bits_count_what_was_actually_sent() {
+        use serde_json::json;
+        // A list: elements plus its length. 5 flags: 5 + ceil(log2 6) = 8.
+        assert_eq!(
+            out("bool[]", &[], None).delivered_bits(&json!([true, false, false, true, false])),
+            Some(8)
+        );
+        // An enum list of 10 values: 4 bits each; 3 elements, and the length out of 101 (max 100) is 7 more.
+        let kinds: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        assert_eq!(
+            out("enum[]", &kinds, Some(100)).delivered_bits(&json!(["a", "b", "a"])),
+            Some(19)
+        );
+        // Refs: only equality shows. 5 ibans, 2 distinct: 1 bit each + 3 for the length.
+        let ibans = json!(["DE1", "DE1", "DE1", "DE1", "GB2"]);
+        assert_eq!(out("iban[]", &[], None).delivered_bits(&ibans), Some(8));
+        // A bounded number on the 0.1 grid; off the grid or unbounded is free text.
+        assert_eq!(
+            out("number", &[], Some(100_000)).delivered_bits(&json!(1200.0)),
+            Some(20)
+        );
+        assert_eq!(
+            out("number", &[], Some(100_000)).delivered_bits(&json!(12.05)),
+            None
+        );
+        assert_eq!(out("number", &[], None).delivered_bits(&json!(1.0)), None);
+        assert_eq!(
+            out("number[]", &[], None).delivered_bits(&json!([1.0])),
+            None
+        );
+        // Free text, and a value of the wrong shape.
+        assert_eq!(out("text", &[], None).delivered_bits(&json!("hi")), None);
+        assert_eq!(out("bool[]", &[], None).delivered_bits(&json!(true)), None);
+        assert_eq!(out("iban[]", &[], None).delivered_bits(&json!([1])), None);
     }
 }

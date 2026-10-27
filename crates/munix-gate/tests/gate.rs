@@ -19,7 +19,7 @@ use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{Request, ViolationCode};
 use munix_core::validate::Scalar;
 use munix_gate::gate::{
-    AMENDMENT_BUDGET, Gate, GateError, MAX_AMENDMENTS, Reply, Store, StoreValue, TaskBrief,
+    AMENDMENT_BUDGET, Gate, GateError, MAX_READ_AMENDMENTS, Reply, Store, StoreValue, TaskBrief,
 };
 use munix_gate::policy::DenyCode;
 use munix_gate::tool::{Tool, ToolFailure};
@@ -49,7 +49,10 @@ output:
 ";
 
 /// Tier 0 tools for the amendment tests: their output is operator content, so reading them lowers nothing.
-const PROBE_NAMES: [&str; 5] = ["probe.a", "probe.b", "probe.c", "probe.d", "probe.e"];
+const PROBE_NAMES: [&str; 9] = [
+    "probe.a", "probe.b", "probe.c", "probe.d", "probe.e", "probe.f", "probe.g", "probe.h",
+    "probe.i",
+];
 const PROBE_TEMPLATE: &str = "
 tool: NAME
 description: A harmless read.
@@ -2401,10 +2404,11 @@ output:
     gate.register(
         "reviews.over".parse().unwrap(),
         digests.1,
+        // 30 themes actually delivered: capacity counts what a call carried, not just the manifest's bound.
         tool(|_, _| {
             Ok(args(&[
                 ("stars", json!(4.6)),
-                ("themes", json!(["a", "b"])),
+                ("themes", Value::from(vec!["h"; 30])),
             ]))
         }),
     )
@@ -2527,7 +2531,7 @@ amendments:
     gate.recover(&task_id()).unwrap();
     assert_eq!(gate.context_trust(&task_id()), Some(Trust::FULL));
 
-    // 3. Same typed fields over the 64-bit budget (6 + 90 = 96 bits) lower context trust to 15.
+    // 3. Typed fields that carried more than the 64-bit budget (6 + 30 x 3 + 5 = 101 bits) lower context trust to 15.
     let Reply::Delivered(d_over) = gate.submit(&req(4, "reviews.over", json!({}))) else {
         panic!("expected reviews.over delivery");
     };
@@ -2845,11 +2849,11 @@ fn a_plan_with_auto_max_tier_0_amends_tier_0_only() {
 }
 
 #[test]
-fn the_fifth_distinct_amendment_is_a_takeover() {
+fn the_ninth_distinct_read_amendment_is_denied_and_the_task_goes_on() {
     let mut h = amend_harness();
     start_without_news(&mut h);
-    assert_eq!(MAX_AMENDMENTS, 4);
-    for (n, name) in PROBE_NAMES.iter().take(4).enumerate() {
+    assert_eq!(MAX_READ_AMENDMENTS, 8);
+    for (n, name) in PROBE_NAMES.iter().take(8).enumerate() {
         assert!(
             matches!(h.gate.submit(&req(0, name, json!({}))), Reply::Delivered(_)),
             "{name}"
@@ -2865,18 +2869,39 @@ fn the_fifth_distinct_amendment_is_a_takeover() {
         .iter()
         .map(|s| s.id)
         .collect();
-    assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     // A tool that already has a step is not a new amendment.
     assert!(matches!(
         h.gate.submit(&req(3, "probe.a", json!({}))),
         Reply::Delivered(_)
     ));
+    // The ninth new read is off plan, but a read can't send anything: denied and counted, not a takeover.
     assert_eq!(
-        h.gate.submit(&req(0, "probe.e", json!({}))),
-        Reply::Takeover(DenyCode::OffPlan)
+        h.gate.submit(&req(0, "probe.i", json!({}))),
+        Reply::Denied(DenyCode::OffPlan)
     );
-    assert_eq!(amended_events(&h).len(), 4);
-    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 6);
+    assert_eq!(amended_events(&h).len(), 8);
+    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 10);
+    let ledger = std::fs::read_to_string(h.ledger_path()).unwrap();
+    assert!(ledger.contains("plan.off_plan_read"));
+    assert!(!ledger.contains("\"takeover\""));
+    // The task is still running, and reads did not use up the slots a write needs: an egress tool is still amended.
+    assert!(matches!(
+        h.gate.submit(&req(3, "probe.a", json!({}))),
+        Reply::Delivered(_)
+    ));
+    let reply = h
+        .gate
+        .submit(&req(0, "link.ping", json!({"url": "ref:u1"})));
+    assert!(matches!(reply, Reply::Delivered(_)), "{reply:?}");
+    // A spinning agent still pauses: three off-plan reads on the same (missing) step.
+    for _ in 0..2 {
+        assert_eq!(
+            h.gate.submit(&req(0, "probe.i", json!({}))),
+            Reply::Denied(DenyCode::OffPlan)
+        );
+    }
+    assert_eq!(h.gate.submit(&req(3, "probe.a", json!({}))), Reply::Halted);
 }
 
 #[test]

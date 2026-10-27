@@ -210,8 +210,19 @@ struct Task {
 /// Denials on one step before the task pauses (design spec 7.4).
 pub const MAX_DENIALS_PER_STEP: u32 = 3;
 
-/// Automatic amendments per task (design spec 7.4). The fifth distinct new tool is a takeover.
+/// Automatic amendments per task for tools that write or send (design spec 7.4). The fifth distinct new one is a
+/// takeover.
 pub const MAX_AMENDMENTS: u32 = 4;
+
+/// Automatic amendments per task for read-only tools (tier 0, no egress), counted apart from [`MAX_AMENDMENTS`] so an
+/// agent looking around doesn't use up the slots a write needs. A read can't send anything, and what it returns
+/// lowers context trust like any other read. Past this cap an off-plan read is denied, not taken over.
+pub const MAX_READ_AMENDMENTS: u32 = 8;
+
+/// True for a tool that only reads: tier 0 with no egress.
+fn read_only(manifest: &ToolManifest) -> bool {
+    manifest.tier == 0 && !manifest.egress
+}
 
 /// The budget of an amended step.
 pub const AMENDMENT_BUDGET: u32 = 3;
@@ -507,8 +518,9 @@ impl Gate {
     /// 2. `check_shape` against the tool's manifest (a tool not in the catalog is `Takeover(OffPlan)`):
     ///    violations give `Malformed`, counted as a denial on the step.
     ///    A well-formed call to a catalog tool that no step uses is first amended in when its tier is at most the
-    ///    plan's `auto_max_tier` and fewer than `MAX_AMENDMENTS` amendments were made (see `try_amend`); it is then
-    ///    ruled on against the new step like any other. Otherwise it is `Takeover(OffPlan)`.
+    ///    plan's `auto_max_tier` and fewer than `MAX_AMENDMENTS` amendments were made (`MAX_READ_AMENDMENTS`, counted
+    ///    apart, for a read-only tool; see `try_amend`); it is then ruled on against the new step like any other.
+    ///    Otherwise it is `Takeover(OffPlan)`, except for a read-only tool, which is `Denied(OffPlan)` and counted.
     /// 3. Trace every argument (`trace::trace_arg`, with the vault's credentials for the DLP check), then
     ///    `policy::evaluate` with the task's band and the step's executed-call count.
     /// 4. `Allow`: execute. `Gray`: park the request and reply `Pending { needs: LlmReview }`. `ConfirmUser`:
@@ -615,6 +627,14 @@ impl Gate {
             }
             Outcome::Gray => self.park(&case, &ruling, Stage::LlmReview, "gray"),
             Outcome::ConfirmUser => self.park(&case, &ruling, Stage::User, "confirm_user"),
+            // An off-plan read (tier 0, no egress) can't send anything: it is denied and counted, not taken over,
+            // so one forgotten step doesn't end the task. A spinning agent still pauses after
+            // `MAX_DENIALS_PER_STEP` denials (invariant 10).
+            Outcome::Deny(DenyCode::OffPlan) if read_only(&manifest) => {
+                let mut reasons = ruling.reasons.clone();
+                reasons.push("plan.off_plan_read".to_owned());
+                self.finish_deny(&case, DenyCode::OffPlan, &reasons, false)
+            }
             Outcome::Deny(code) => self.finish_deny(&case, code, &ruling.reasons, true),
         }
     }
@@ -644,9 +664,21 @@ impl Gate {
         if task.plan.steps.iter().any(|s| s.tool == request.tool) {
             return Ok(None);
         }
-        let amended = task.plan.steps.len().saturating_sub(task.planned_steps);
+        let reads = read_only(manifest);
+        let amended = task
+            .plan
+            .steps
+            .iter()
+            .skip(task.planned_steps)
+            .filter(|s| self.catalog.get(&s.tool).is_some_and(read_only) == reads)
+            .count();
+        let cap = if reads {
+            MAX_READ_AMENDMENTS
+        } else {
+            MAX_AMENDMENTS
+        };
         if manifest.tier > task.plan.amendments.auto_max_tier
-            || amended >= MAX_AMENDMENTS as usize
+            || amended >= cap as usize
             || !self.tools.contains_key(&request.tool)
             || manifest
                 .credentials
@@ -1469,34 +1501,33 @@ impl Gate {
             }
         };
 
-        // Trust drops whether or not the ledger write below works, except when every delivered field is typed within
-        // the 64-bit budget (design spec section 8, "Readers"): labels keep their region trust, but context trust is
-        // spared and never raised (invariant 4), and `lowest` tracks only fields that lowered the context.
+        // Trust drops to `context_floor` whether or not the ledger write below works. Small typed values are spared
+        // within the 64-bit budget (design spec section 8, "Readers"; see `Delivered::context_floor`): labels keep
+        // their region trust, context trust is never raised (invariant 4), and `lowest` tracks only fields that
+        // lowered the context.
         if let Some(task) = self.tasks.get_mut(&request.task) {
             task.items.extend(crate::quarantine::items_of(
                 request.step,
                 &raw_output,
                 &delivered.labels,
             ));
-            if !delivered.typed_only {
-                for (field, label) in &delivered.labels {
-                    if task
-                        .instance
-                        .lowest
-                        .as_ref()
-                        .is_none_or(|(_, _, low)| label.trust < low.trust)
-                    {
-                        task.instance.lowest = Some((request.step, field.clone(), label.clone()));
-                    }
+            for (field, label) in delivered
+                .labels
+                .iter()
+                .filter(|(field, _)| delivered.lowering.contains(field))
+            {
+                if task
+                    .instance
+                    .lowest
+                    .as_ref()
+                    .is_none_or(|(_, _, low)| label.trust < low.trust)
+                {
+                    task.instance.lowest = Some((request.step, field.clone(), label.clone()));
                 }
             }
         }
-        let lowered = match (
-            self.tasks.get_mut(&request.task),
-            delivered.min_trust,
-            delivered.typed_only,
-        ) {
-            (Some(task), Some(min), false) => {
+        let lowered = match (self.tasks.get_mut(&request.task), delivered.context_floor) {
+            (Some(task), Some(min)) => {
                 let from = task.instance.context.trust();
                 task.instance
                     .context
@@ -1516,6 +1547,7 @@ impl Gate {
                 "quarantined": quarantined,
                 "min_trust": delivered.min_trust.map(Trust::value),
                 "typed_only": delivered.typed_only,
+                "context_floor": delivered.context_floor.map(Trust::value),
             }),
         ));
         if let Some((from, to)) = lowered {
