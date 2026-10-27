@@ -16,7 +16,10 @@ _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
       `amount_meaning` and a flag. No strings come back.
     - The per-field capacity rule in ingest.
     - Off-plan reads are denied, not halted, and read amendments have their own cap of 8.
-  - **Not yet measured:** `amount_meaning` (aimed at UT2 and UT12), and the attack phase with the new code.
+  - **Attack phase re-run on the new code, no human ($6.00):** ASR 0/144; utility under attack 63/144 → 78/144.
+    - The remaining losses: the agent stops when a Reader flags instructions (UT2 and UT12 on injected files),
+      and repeated `read_file` calls pause the task (UT13 and UT15).
+    - The simulated-user attack phase and the goals phase are from before the change.
 - **Full banking run under Munix, both modes: done, $13.06.** Write-up: `docs/redteam/agentdojo.md`.
   - **ASR:** 0/144 for bare, 0/144 with no human, 0/144 with the simulated user.
   - **Utility under attack:** bare 81.9%, no human 43.8%, simulated user 57.6%.
