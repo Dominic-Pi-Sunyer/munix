@@ -1,13 +1,14 @@
 //! `munix run [--plan <file>] --prompt <text> -- <agent command...>`,
 //! `munix bridge --manifests <dir> --ledger <file> [--plan <file>]` and
-//! `munix dashboard [--runs <dir>] [--port <n>]`; see [`munix_cli::run`], [`munix_cli::bridge`] and
-//! [`munix_cli::dashboard`].
+//! `munix dashboard [--runs <dir>] [--port <n>]` and `munix ledger [<file>]`; see [`munix_cli::run`],
+//! [`munix_cli::bridge`], [`munix_cli::dashboard`] and [`munix_cli::ledger`].
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("dashboard") => munix_cli::dashboard::main(args.into_iter().skip(1).collect()),
         Some("bridge") => munix_cli::bridge::main(args),
+        Some("ledger") => munix_cli::ledger::main(args.into_iter().skip(1).collect()),
         _ => munix_cli::run::main(args),
     }
 }

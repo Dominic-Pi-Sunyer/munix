@@ -5,4 +5,5 @@ pub mod bridge;
 pub mod confirm;
 pub mod dashboard;
 pub mod front;
+pub mod ledger;
 pub mod run;
