@@ -49,7 +49,7 @@ const USAGE: &str = "usage: munix run [--plan <plan.yaml>] --prompt <text> [--im
                      [--agent-dir <dir>] [--ledger <file>] -- <agent command...>";
 const DEFAULT_IMAGE: &str = "munix-demo-agent";
 const DEFAULT_AGENT_DIR: &str = "demo/agent";
-const DEFAULT_MODEL: &str = "muse-spark-1.3";
+pub(crate) const DEFAULT_MODEL: &str = "muse-spark-1.3";
 const DEFAULT_BOSS: &str = "boss@corp.example";
 const DEFAULT_HOST_GATEWAY: &str = "192.168.5.2";
 const DEFAULT_WEBSPEED_DIR: &str = "../web-speed-oss";
@@ -58,7 +58,7 @@ const GATEWAY_TIMEOUT: Duration = Duration::from_secs(120);
 /// How often the Integrity Seal's watcher re-checks the sealed files.
 const SEAL_POLL: Duration = Duration::from_millis(500);
 /// What the vault holds for a manifest's credential. The local mail sink takes any login.
-const PLACEHOLDER_CREDENTIAL: &str = "munix-placeholder-credential";
+pub(crate) const PLACEHOLDER_CREDENTIAL: &str = "munix-placeholder-credential";
 /// The defaults `SmtpEmail::from_env` uses, for when only one of the two variables is set.
 const DEFAULT_SMTP: &str = "127.0.0.1:1025";
 const DEFAULT_SMTP_FROM: &str = "agent@munix.example";
@@ -66,25 +66,25 @@ const DEFAULT_SMTP_FROM: &str = "agent@munix.example";
 /// Why a run did not start or did not finish cleanly. The message is one line and never holds the API key or any
 /// argument value.
 #[derive(Debug)]
-struct Failure {
+pub(crate) struct Failure {
     /// The process exit code: 2 for bad usage or config, 1 for a failure while running.
-    code: u8,
-    message: String,
+    pub(crate) code: u8,
+    pub(crate) message: String,
 }
 
 impl Failure {
-    fn usage(message: impl Into<String>) -> Self {
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
         Failure {
             code: 2,
             message: message.into(),
         }
     }
 
-    fn config(message: impl Into<String>) -> Self {
+    pub(crate) fn config(message: impl Into<String>) -> Self {
         Self::usage(message)
     }
 
-    fn failed(message: impl Into<String>) -> Self {
+    pub(crate) fn failed(message: impl Into<String>) -> Self {
         Failure {
             code: 1,
             message: message.into(),
@@ -184,14 +184,14 @@ fn parse_dotenv(text: &str) -> BTreeMap<String, String> {
 }
 
 /// Configuration: the process environment, then `.env` for what the environment does not set.
-struct Env {
+pub(crate) struct Env {
     file: BTreeMap<String, String>,
     process: fn(&str) -> Option<String>,
 }
 
 impl Env {
     /// The real environment plus `path` if it exists.
-    fn load(path: &Path) -> Result<Env, Failure> {
+    pub(crate) fn load(path: &Path) -> Result<Env, Failure> {
         let file = match std::fs::read_to_string(path) {
             Ok(text) => parse_dotenv(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
@@ -204,19 +204,19 @@ impl Env {
     }
 
     /// A variable already set in the environment wins over `.env`. An empty value counts as not set.
-    fn get(&self, key: &str) -> Option<String> {
+    pub(crate) fn get(&self, key: &str) -> Option<String> {
         (self.process)(key)
             .or_else(|| self.file.get(key).cloned())
             .filter(|v| !v.is_empty())
     }
 
-    fn get_or(&self, key: &str, default: &str) -> String {
+    pub(crate) fn get_or(&self, key: &str, default: &str) -> String {
         self.get(key).unwrap_or_else(|| default.to_owned())
     }
 }
 
 /// `bytes` random bytes from the operating system.
-fn random_bytes(bytes: usize) -> Result<Vec<u8>, Failure> {
+pub(crate) fn random_bytes(bytes: usize) -> Result<Vec<u8>, Failure> {
     let mut buf = vec![0u8; bytes];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut buf))
@@ -224,12 +224,17 @@ fn random_bytes(bytes: usize) -> Result<Vec<u8>, Failure> {
     Ok(buf)
 }
 
-fn random_hex(bytes: usize) -> Result<String, Failure> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String, Failure> {
     Ok(hex::encode(random_bytes(bytes)?))
 }
 
 /// The plan file's `task` and `plan` replaced by this run's ids, and its `prompt_hash` bound to the prompt.
-fn rewrite_plan(mut plan: Plan, task: TaskId, plan_id: PlanId, prompt_hash: Digest) -> Plan {
+pub(crate) fn rewrite_plan(
+    mut plan: Plan,
+    task: TaskId,
+    plan_id: PlanId,
+    prompt_hash: Digest,
+) -> Plan {
     plan.task = task;
     plan.plan = plan_id;
     plan.prompt_hash = prompt_hash;
@@ -237,7 +242,7 @@ fn rewrite_plan(mut plan: Plan, task: TaskId, plan_id: PlanId, prompt_hash: Dige
 }
 
 /// Every `*.yaml` in `dir`, in name order.
-fn load_catalog(dir: &Path) -> Result<Catalog, Failure> {
+pub(crate) fn load_catalog(dir: &Path) -> Result<Catalog, Failure> {
     let entries = std::fs::read_dir(dir)
         .map_err(|_| Failure::config(format!("cannot read {}", dir.display())))?;
     let mut files: Vec<PathBuf> = entries
@@ -436,7 +441,7 @@ pub fn main(args: Vec<String>) -> ExitCode {
 
 /// A Meta adapter for one Supervisor role, configured from `munix run`'s own lookup (the environment, then `.env`)
 /// rather than the process environment alone, so a key or effort set only in `.env` is used.
-fn supervisor_adapter(
+pub(crate) fn supervisor_adapter(
     env: &Env,
     model: &str,
     role: Role,
@@ -903,7 +908,7 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     Ok(outcome)
 }
 
-fn parse_id<T: std::str::FromStr>(text: &str) -> Result<T, Failure> {
+pub(crate) fn parse_id<T: std::str::FromStr>(text: &str) -> Result<T, Failure> {
     text.parse()
         .map_err(|_| Failure::failed("generated an invalid id"))
 }
