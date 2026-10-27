@@ -363,6 +363,51 @@ class SimulatedUserFlagTest(unittest.TestCase):
         )
 
 
+class BudgetTest(unittest.TestCase):
+    def test_supervisor_cost_sums_every_bridge_and_skips_missing_usage(self):
+        import run
+
+        summaries = [
+            {"supervisor_usage": {"calls": 2, "prompt_tokens": 1_000_000, "completion_tokens": 0}},
+            {"supervisor_usage": {"calls": 1, "prompt_tokens": 0, "completion_tokens": 1_000_000}},
+            {"error": "the bridge died"},  # no usage reported
+            {"supervisor_usage": None},
+        ]
+        self.assertAlmostEqual(run.supervisor_cost(summaries, 1.25, 4.25), 5.50)
+
+    def test_cases_stop_before_the_one_that_would_start_over_budget(self):
+        import run
+
+        spend = [0.0]
+        ran = []
+
+        def one(case):
+            ran.append(case)
+            spend[0] += 0.4
+
+        self.assertEqual(run.run_cases([1, 2, 3, 4], one, lambda: spend[0], 1.0), "budget")
+        self.assertEqual(ran, [1, 2, 3])  # 0.0, 0.4, 0.8 are under $1; 1.2 is not
+
+    def test_without_a_budget_every_case_runs(self):
+        import run
+
+        ran = []
+        self.assertIsNone(run.run_cases([1, 2], ran.append, lambda: 99.0, None))
+        self.assertEqual(ran, [1, 2])
+
+    def test_meta_runs_need_a_budget(self):
+        import subprocess
+
+        for extra in ([], ["--budget", "0"]):
+            done = subprocess.run(
+                [sys.executable, "-I", str(HERE.parent / "run.py"), "run", "--suite", "banking", "--phase", "utility",
+                 *extra],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(done.returncode, 2, done.stderr)
+            self.assertIn("--budget USD is required", done.stderr)
+
+
 class StartTest(unittest.TestCase):
     def setUp(self):
         mx.SUMMARIES.clear()
@@ -387,6 +432,7 @@ class StartTest(unittest.TestCase):
         self.assertTrue(one["ledger_verified"])
         self.assertIsNone(one["takeover"])
         self.assertEqual(one["ledger_entries"], 2)  # start + call
+        self.assertEqual(one["supervisor_usage"], {"calls": 1, "prompt_tokens": 1000, "completion_tokens": 100})
         self.assertEqual(len(one["prompt_sha256"]), 16)
         s.close()
         one, two = mx.SUMMARIES

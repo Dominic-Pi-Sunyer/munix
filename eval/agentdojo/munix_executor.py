@@ -257,7 +257,7 @@ class MunixSession:
         if "error" not in record:
             try:
                 ended = client.end()
-                for key in ("context_trust", "ledger_entries", "ledger_verified", "takeover"):
+                for key in ("context_trust", "ledger_entries", "ledger_verified", "takeover", "supervisor_usage"):
                     record[key] = ended.get(key)
             except BridgeError as e:
                 record["error"] = str(e)

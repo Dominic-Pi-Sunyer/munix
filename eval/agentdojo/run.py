@@ -7,7 +7,8 @@
     .venv/bin/python -I run.py report --suite banking
 
 Each run writes `results/<mode>-<suite>-<phase>[-<shard>].json` (scores, token usage and an estimated cost, no
-transcripts). Transcripts go to `runs/` (gitignored). Reads MODEL_API_KEY from the repo's .env and never prints it.
+transcripts). Against the Meta API `--budget USD` is required: the run stops before the next case once the agent's and
+Munix's Supervisor's estimated spend reaches it (it can go over by at most the one case that crosses it). Transcripts go to `runs/` (gitignored). Reads MODEL_API_KEY from the repo's .env and never prints it.
 `--mode munix` (banking only) sends every tool call through a Munix Gate via `munix bridge`; see BRIDGE.md.
 Spends Meta credit; the lead runs it.
 """
@@ -87,6 +88,25 @@ TAKEOVER_PARAGRAPH = (
 )
 
 
+def supervisor_cost(summaries: list[dict], input_per_m: float, output_per_m: float) -> float:
+    """What Munix's planner and reviewer spent, from each bridge's `ended` summary."""
+    total = 0.0
+    for record in summaries:
+        u = record.get("supervisor_usage") or {}
+        total += (u.get("prompt_tokens", 0) * input_per_m + u.get("completion_tokens", 0) * output_per_m) / 1_000_000
+    return total
+
+
+def run_cases(cases: list, run_one, spent, budget: float | None) -> str | None:
+    """Runs `run_one(case)` for each case in order. Before each one, stops if `spent()` has reached `budget`, and
+    returns "budget"; returns None when every case ran."""
+    for case in cases:
+        if budget is not None and spent() >= budget:
+            return "budget"
+        run_one(case)
+    return None
+
+
 def system_prompt(takeover: bool) -> str:
     text = load_system_message(None)
     return f"{text}\n\n{TAKEOVER_PARAGRAPH}" if takeover else text
@@ -152,6 +172,9 @@ def cmd_run(args) -> int:
         print("--simulated-user only applies to --mode munix", file=sys.stderr)
         return 2
     if args.base_url == META_URL:
+        if args.budget is None or args.budget <= 0:
+            print("--budget USD is required against the Meta API (a hard stop on estimated spend)", file=sys.stderr)
+            return 2
         key = env_value("MODEL_API_KEY")
         if not key:
             print("MODEL_API_KEY is not set in .env", file=sys.stderr)
@@ -177,44 +200,72 @@ def cmd_run(args) -> int:
             binary=binary,
             simulated_user=args.simulated_user,
         )
-        munix_executor.SUMMARIES.clear()
+    munix_executor.SUMMARIES.clear()
     pipe = make_pipeline(args, model, key, usage, session)
     suite = get_suite(BENCHMARK_VERSION, args.suite)
     user_ids = args.user_tasks.split(",") if args.user_tasks else sorted(suite.user_tasks, key=task_number)
     inj_ids = args.injection_tasks.split(",") if args.injection_tasks else sorted(suite.injection_tasks, key=task_number)
     logdir = HERE / "runs"
+    input_per_m = float(env_value("MUNIX_PRICE_INPUT_PER_M") or 1.25)
+    output_per_m = float(env_value("MUNIX_PRICE_OUTPUT_PER_M") or 4.25)
+    summaries = munix_executor.SUMMARIES
+
+    def spent() -> float:
+        return usage.cost(input_per_m, output_per_m) + supervisor_cost(summaries, input_per_m, output_per_m)
+
+    def close_bridge() -> None:
+        # The bridge reports the Supervisor's spend when its task ends, so end it before the next budget check.
+        if session is not None:
+            session.end_task()
+
+    budget = args.budget if args.base_url == META_URL else None
     started = time.monotonic()
     utility: dict[str, bool] = {}
     security: dict[str, bool] = {}
+
+    def user_case(uid: str) -> None:
+        ok, _ = run_task_without_injection_tasks(
+            suite, pipe, suite.get_user_task_by_id(uid), logdir, True, BENCHMARK_VERSION
+        )
+        utility[uid] = ok
+        close_bridge()
+        print(f"{args.suite} {uid}: utility={ok}  (spent about ${spent():.3f})", flush=True)
+
+    def goal_case(iid: str) -> None:
+        ok, _ = run_task_without_injection_tasks(
+            suite, pipe, suite.get_injection_task_by_id(iid), logdir, True, BENCHMARK_VERSION
+        )
+        utility[iid] = ok
+        close_bridge()
+        print(f"{args.suite} {iid} as a user task: utility={ok}  (spent about ${spent():.3f})", flush=True)
+
     with OutputLogger(str(logdir), live=None), (session or contextlib.nullcontext()):
         if args.phase == "utility":
-            for uid in shard_of(user_ids, args.shard):
-                ok, _ = run_task_without_injection_tasks(
-                    suite, pipe, suite.get_user_task_by_id(uid), logdir, True, BENCHMARK_VERSION
-                )
-                utility[uid] = ok
-                print(f"{args.suite} {uid}: utility={ok}", flush=True)
+            stopped = run_cases(shard_of(user_ids, args.shard), user_case, spent, budget)
         elif args.phase == "goals":
-            for iid in shard_of(inj_ids, args.shard):
-                ok, _ = run_task_without_injection_tasks(
-                    suite, pipe, suite.get_injection_task_by_id(iid), logdir, True, BENCHMARK_VERSION
-                )
-                utility[iid] = ok
-                print(f"{args.suite} {iid} as a user task: utility={ok}", flush=True)
+            stopped = run_cases(shard_of(inj_ids, args.shard), goal_case, spent, budget)
         else:
             attack = load_attack(ATTACK, suite, pipe)
-            for uid in shard_of(user_ids, args.shard):
+
+            # One (user task, injection task) pair at a time, so the budget is checked before every case.
+            def attack_case(pair: tuple[str, str]) -> None:
+                uid, iid = pair
                 u, s = run_task_with_injection_tasks(
-                    suite, pipe, suite.get_user_task_by_id(uid), attack, logdir, True, inj_ids, BENCHMARK_VERSION
+                    suite, pipe, suite.get_user_task_by_id(uid), attack, logdir, True, [iid], BENCHMARK_VERSION
                 )
                 for (ut, it), ok in u.items():
                     utility[f"{ut}|{it}"] = ok
                 for (ut, it), hit in s.items():
                     security[f"{ut}|{it}"] = hit
-                hits = sum(1 for (ut, _), hit in s.items() if hit)
-                print(f"{args.suite} {uid}: utility {sum(u.values())}/{len(u)}, attacks succeeded {hits}/{len(s)}", flush=True)
-    input_per_m = float(env_value("MUNIX_PRICE_INPUT_PER_M") or 1.25)
-    output_per_m = float(env_value("MUNIX_PRICE_OUTPUT_PER_M") or 4.25)
+                close_bridge()
+                hit = any(s.values())
+                print(f"{args.suite} {uid} x {iid}: utility={all(u.values())} attack_succeeded={hit}"
+                      f"  (spent about ${spent():.3f})", flush=True)
+
+            pairs = [(uid, iid) for uid in shard_of(user_ids, args.shard) for iid in inj_ids]
+            stopped = run_cases(pairs, attack_case, spent, budget)
+    if stopped:
+        print(f"stopped: the budget of ${budget:.2f} was reached (spent about ${spent():.3f})", file=sys.stderr)
     doc = {
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "mode": args.mode,
@@ -232,8 +283,15 @@ def cmd_run(args) -> int:
         "utility": utility,
         "security": security,
         "usage": {"calls": usage.calls, "prompt_tokens": usage.prompt, "completion_tokens": usage.completion},
-        # A local model costs no Meta credit.
-        "estimated_cost_usd": round(usage.cost(input_per_m, output_per_m), 4) if args.base_url == META_URL else 0.0,
+        "supervisor_usage": {
+            k: sum((r.get("supervisor_usage") or {}).get(k, 0) for r in summaries)
+            for k in ("calls", "prompt_tokens", "completion_tokens")
+        },
+        "budget_usd": budget,
+        "stopped": stopped,
+        # The agent's and Munix's Supervisor's spend. A local model costs no Meta credit, but Munix's Supervisor
+        # still runs on the Meta API.
+        "estimated_cost_usd": round(spent(), 4),
         "seconds": round(time.monotonic() - started, 1),
     }
     if args.mode == "munix":
@@ -241,7 +299,7 @@ def cmd_run(args) -> int:
     out = HERE / "results" / result_name(setup_tag(args.mode, args.takeover, model, args.simulated_user), args.suite, args.phase, args.shard)
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {out.relative_to(HERE)}: {usage.calls} calls, about ${doc['estimated_cost_usd']:.4f}")
+    print(f"wrote {out.relative_to(HERE)}: {usage.calls} agent calls, about ${doc['estimated_cost_usd']:.4f}")
     return 0
 
 
@@ -300,6 +358,8 @@ def main() -> int:
     r.add_argument("--user-tasks", help="comma-separated ids (default: all)")
     r.add_argument("--injection-tasks", help="comma-separated ids (default: all)")
     r.add_argument("--shard", help="i/n: run every n-th user task (or injection task for --phase goals)")
+    r.add_argument("--budget", type=float, help="USD: required against the Meta API; stops before the next case once "
+                   "the estimated spend (agent and Supervisor) reaches it")
     rp = sub.add_parser("report")
     rp.add_argument("--suite", required=True, choices=("banking", "slack"))
     args = ap.parse_args()

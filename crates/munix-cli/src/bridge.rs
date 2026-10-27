@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use munix_adapters::{ModelAdapter, Role};
+use munix_adapters::{Metered, ModelAdapter, Role};
 use munix_core::crypto::{Purpose, Signed, SigningKey};
 use munix_core::ids::{PlanId, SessionId, TaskId};
 use munix_core::manifest::Catalog;
@@ -311,6 +311,8 @@ struct Setup {
     reviewer: Option<Arc<dyn ModelAdapter>>,
     /// `--simulated-user`: the Console is `SimulatedUser`, not a flat no.
     simulated_user: bool,
+    /// The planner's and reviewer's adapters, metered, so `ended` can report what the Supervisor spent.
+    meters: Vec<Metered>,
     key: SigningKey,
     task: TaskId,
     session: SessionId,
@@ -509,12 +511,24 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         Ok(entries) => (entries, true),
         Err(_) => (0, false),
     };
+    let (mut calls, mut prompt_tokens, mut completion_tokens) = (0u64, 0u64, 0u64);
+    for meter in &setup.meters {
+        let (n, usage) = meter.total();
+        calls = calls.saturating_add(n);
+        prompt_tokens = prompt_tokens.saturating_add(usage.prompt_tokens);
+        completion_tokens = completion_tokens.saturating_add(usage.completion_tokens);
+    }
     lock(io).send(&json!({
         "op": "ended",
         "context_trust": context_trust,
         "ledger_entries": entries,
         "ledger_verified": verified,
         "takeover": takeover.as_ref().map(code_text),
+        "supervisor_usage": {
+            "calls": calls,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        },
     }));
     Ok(())
 }
@@ -548,6 +562,12 @@ fn model_config() -> Result<(Env, String, String), Failure> {
 fn run(args: &[String]) -> Result<(), Failure> {
     let opts = parse_args(args)?;
     let catalog = load_catalog(&opts.manifests)?;
+    let mut meters = Vec::new();
+    let mut metered = |adapter: Arc<dyn ModelAdapter>| -> Arc<dyn ModelAdapter> {
+        let meter = Metered::new(adapter);
+        meters.push(meter.clone());
+        Arc::new(meter)
+    };
     let (plan, reviewer) = match &opts.plan {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -562,14 +582,17 @@ fn run(args: &[String]) -> Result<(), Failure> {
             } else {
                 let (env, api_key, model) = model_config()?;
                 let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
-                (given, Some(reviewer))
+                (given, Some(metered(reviewer)))
             }
         }
         None => {
             let (env, api_key, model) = model_config()?;
             let planner = supervisor_adapter(&env, &model, Role::Planner, &api_key)?;
             let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
-            (PlanSource::Planner(planner), Some(reviewer))
+            (
+                PlanSource::Planner(metered(planner)),
+                Some(metered(reviewer)),
+            )
         }
     };
     let setup = Setup {
@@ -578,6 +601,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         plan,
         reviewer,
         simulated_user: opts.simulated_user,
+        meters,
         key: SigningKey::from_bytes(&random_bytes(32)?)
             .map_err(|e| Failure::failed(e.to_string()))?,
         task: parse_id(&format!("T-{}", random_hex(4)?))?,
@@ -705,12 +729,21 @@ amendments:
             .iter()
             .map(|y| ToolManifest::from_yaml(y).unwrap())
             .collect();
+        // Metered as in `run`, so `ended` reports the reviewer's calls.
+        let meters: Vec<Metered> = reviewer
+            .iter()
+            .map(|r| Metered::new(Arc::clone(r)))
+            .collect();
+        let reviewer = meters
+            .first()
+            .map(|m| Arc::new(m.clone()) as Arc<dyn ModelAdapter>);
         Setup {
             catalog: Catalog::from_manifests(manifests).unwrap(),
             ledger_path: dir.join("sub").join("ledger.jsonl"),
             plan: PlanSource::Given(Plan::from_yaml(plan).unwrap()),
             reviewer,
             simulated_user,
+            meters,
             key: SigningKey::from_bytes(&[9u8; 32]).unwrap(),
             task: "T-bridge1".parse().unwrap(),
             session: "S-bridge1".parse().unwrap(),
@@ -919,6 +952,8 @@ amendments:
         assert_eq!(run.out[3]["text"], "denied: user_denied");
         assert_eq!(run.out[3]["is_error"], true);
         assert_eq!(run.out[4]["takeover"], Value::Null);
+        // The reviewer's one call is reported, so the runner can count the Supervisor's spend.
+        assert_eq!(run.out[4]["supervisor_usage"]["calls"], 1);
     }
 
     #[test]
@@ -942,6 +977,7 @@ amendments:
         assert_eq!(run.out[3]["text"], "denied: user_denied");
         assert_eq!(run.out[3]["is_error"], true);
         assert_eq!(run.out[4]["takeover"], Value::Null);
+        assert_eq!(run.out[4]["supervisor_usage"]["calls"], 0);
     }
 
     #[test]

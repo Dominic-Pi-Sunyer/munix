@@ -65,6 +65,7 @@ def main() -> int:
                     "ledger_entries": entries,
                     "ledger_verified": True,
                     "takeover": None,
+                    "supervisor_usage": {"calls": 1, "prompt_tokens": 1000, "completion_tokens": 100},
                 }
             )
             return 0

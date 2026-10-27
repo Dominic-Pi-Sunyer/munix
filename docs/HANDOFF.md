@@ -6,8 +6,13 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Tue Oct 27, 2026, early morning PT, by Claude (Opus 5.5)._
+_Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
+- **In progress: the full banking run under Munix, both modes (owner approved, $15 total cap).**
+  - `run.py --budget USD` is now a hard stop, required against the Meta API. It's checked before every case, and
+    the run can go over by at most the one case that crosses it.
+  - Spend now includes Munix's planner and reviewer: the bridge's `ended` message reports `supervisor_usage`.
+    Before this, Munix runs under-reported cost.
 - **Options 1 and 3 done (offline, merged):**
   - **What changed:**
     - Transaction values are labeled by who wrote them: `paid_to` and `my_subjects` are bank and user records,

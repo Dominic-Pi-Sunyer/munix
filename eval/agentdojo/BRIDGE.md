@@ -37,8 +37,9 @@ munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewe
    - The bridge then sends the call's outcome: `{"op":"result","text":"<what the model sees>","is_error":bool}`.
      `text` is exactly what `call_tool` returns: delivered fields as JSON, or a coarse denial.
 4. **Python → bridge:** `{"op":"end"}`. The bridge answers
-   `{"op":"ended","context_trust":N,"ledger_entries":N,"ledger_verified":bool,"takeover":"<code>"|null}` and exits
-   with code 0.
+   `{"op":"ended","context_trust":N,"ledger_entries":N,"ledger_verified":bool,"takeover":"<code>"|null,
+   "supervisor_usage":{"calls":N,"prompt_tokens":N,"completion_tokens":N}}` and exits with code 0.
+   `supervisor_usage` totals the planner's and reviewer's model calls, so `run.py --budget` counts Munix's own spend.
 
 If stdin closes early, the bridge writes nothing more and exits 0. A malformed line gets `{"op":"error",…}` and
 exit code 2.
