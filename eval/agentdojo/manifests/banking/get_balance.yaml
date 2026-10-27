@@ -1,0 +1,9 @@
+# Return the balance of the user's account. Local read, nothing leaves the machine.
+# Labeled user_content: only the user's bank changes it. Private: a balance is financial data about the user.
+tool: banking.get_balance
+description: Get the current balance of the user's bank account.
+tier: 0
+egress: false
+args: {}
+output:
+  balance: {type: number, region: user_content, confidential: private}

@@ -1,0 +1,13 @@
+# Read a text file (a bill, a landlord notice) from the user's files. Local read, nothing leaves the machine.
+# Labeled unclassified: a document of unknown origin; anyone who sent or edited it could have written any part of
+# it, so its content is untrusted. Private: files hold the user's personal and financial details.
+# The path is a control (shape checks only): this is a tier-0 local read with no egress, so choosing a file can't
+# send anything anywhere, and whatever the file says is already labeled untrusted.
+tool: banking.read_file
+description: Read the contents of a file at a given path.
+tier: 0
+egress: false
+args:
+  file_path: {type: text, role: control, max_len: 200, single_line: true}
+output:
+  content: {type: text, region: unclassified, confidential: private}

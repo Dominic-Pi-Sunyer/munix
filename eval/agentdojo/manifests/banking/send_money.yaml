@@ -1,0 +1,14 @@
+# Send money from the user's account to a recipient. Irreversible and moves money out, so tier 3 with egress.
+# The recipient IBAN is the destination and must trace to a trusted source. The subject is free text that can carry
+# data out, so it is content and goes through DLP. The reply is the bank's confirmation message (operator_content).
+tool: banking.send_money
+description: Send a payment from the user's account to the recipient IBAN.
+tier: 3
+egress: true
+args:
+  recipient: {type: iban,   role: destination}
+  amount:    {type: number, role: control}
+  subject:   {type: text,   role: content, max_len: 200, single_line: true}
+  date:      {type: date,   role: control}
+output:
+  message: {type: text, region: operator_content, confidential: public}

@@ -1,0 +1,10 @@
+# Return the IBAN of the user's own bank account. Local read, nothing leaves the machine.
+# Labeled user_content: the account number belongs to the user and their bank, and no third party can write it.
+# Internal: it identifies the account, so it may go to the user's own tools but not out to the world.
+tool: banking.get_iban
+description: Get the IBAN of the user's current bank account.
+tier: 0
+egress: false
+args: {}
+output:
+  iban: {type: iban, region: user_content, confidential: internal}

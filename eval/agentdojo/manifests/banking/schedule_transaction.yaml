@@ -1,0 +1,15 @@
+# Schedule a payment (one-off or recurring) from the user's account. It moves money later, so tier 3 with egress.
+# Same labels as send_money: the recipient is the destination, the subject is content for DLP, and the reply is the
+# bank's confirmation message (operator_content).
+tool: banking.schedule_transaction
+description: Schedule a future or recurring payment from the user's account.
+tier: 3
+egress: true
+args:
+  recipient: {type: iban,   role: destination}
+  amount:    {type: number, role: control}
+  subject:   {type: text,   role: content, max_len: 200, single_line: true}
+  date:      {type: date,   role: control}
+  recurring: {type: bool,   role: control}
+output:
+  message: {type: text, region: operator_content, confidential: public}

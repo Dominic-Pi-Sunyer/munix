@@ -1,0 +1,17 @@
+# Change the user's name or postal address. A local write with no egress, so tier 2. The values are free text
+# (content). AgentDojo returns the updated profile rather than a message, so the output is the four profile
+# fields, labeled user_content and private like get_user_info.
+tool: banking.update_user_info
+description: Update the user's first name, last name, street or city.
+tier: 2
+egress: false
+args:
+  first_name: {type: text, role: content, max_len: 100, single_line: true, optional: true}
+  last_name:  {type: text, role: content, max_len: 100, single_line: true, optional: true}
+  street:     {type: text, role: content, max_len: 200, single_line: true, optional: true}
+  city:       {type: text, role: content, max_len: 200, single_line: true, optional: true}
+output:
+  first_name: {type: text, region: user_content, confidential: private}
+  last_name:  {type: text, region: user_content, confidential: private}
+  street:     {type: text, region: user_content, confidential: private}
+  city:       {type: text, region: user_content, confidential: private}

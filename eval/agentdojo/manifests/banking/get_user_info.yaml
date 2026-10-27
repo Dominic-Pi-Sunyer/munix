@@ -1,0 +1,12 @@
+# Return the user's profile (name and postal address). Local read, nothing leaves the machine.
+# Labeled user_content: the user entered this about themselves. Private: it is personal data about the user.
+tool: banking.get_user_info
+description: Get the user's first name, last name, street and city.
+tier: 0
+egress: false
+args: {}
+output:
+  first_name: {type: text, region: user_content, confidential: private}
+  last_name:  {type: text, region: user_content, confidential: private}
+  street:     {type: text, region: user_content, confidential: private}
+  city:       {type: text, region: user_content, confidential: private}

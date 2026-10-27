@@ -8,6 +8,13 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Mon Oct 26, 2026, ~11:30 PM PT, by Claude (Opus 5.5)._
 
+- **In progress: AgentDojo bridge, wave 1** (Sonnet builders; contract in `eval/agentdojo/BRIDGE.md`):
+  - **S1 (main checkout):** `Scalar::Iban` in core, plus IBAN extraction in the Gate's `prompt_values`.
+  - **S2 (worktree `../munix-bridge`, branch `agentdojo-bridge`):** `munix bridge` in `munix-cli`, reusing
+    `GateFront` with an always-no Console.
+  - **S3 (main checkout, Python only):** the banking manifests, output converters, `munix_executor.py` and
+    offline tests.
+  - **Baseline:** the lead runs the bare banking baseline (`eval/agentdojo/run.py`).
 - **AgentDojo prep (banking and Slack first):**
   - **Set up:** `eval/agentdojo/` pins `agentdojo==0.1.35` in its own `.venv`.
   - **Smoke test:** `smoke.py` ran banking UT3 on Muse Spark with `utility=True`; the Meta API accepts the

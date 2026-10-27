@@ -1,0 +1,17 @@
+# List the user's scheduled and standing payments, as parallel arrays: element i of every array describes payment i.
+# Local read, nothing leaves the machine. Labeled user_content: the user created these schedules, so the whole
+# record (including the subject) is the user's own data. `counterparties` is the other party: the recipient when
+# the user pays it, else the sender. Subjects are private; the rest are bank-record fields and public.
+tool: banking.get_scheduled_transactions
+description: List the user's scheduled and recurring transactions.
+tier: 0
+egress: false
+args: {}
+output:
+  ids:            {type: "int[]",    region: user_content, confidential: public}
+  counterparties: {type: "iban[]",   region: user_content, confidential: public}
+  sent_by_me:     {type: "bool[]",   region: user_content, confidential: public}
+  amounts:        {type: "number[]", region: user_content, confidential: public}
+  subjects:       {type: "text[]",   region: user_content, confidential: private}
+  dates:          {type: "date[]",   region: user_content, confidential: public}
+  recurring:      {type: "bool[]",   region: user_content, confidential: public}

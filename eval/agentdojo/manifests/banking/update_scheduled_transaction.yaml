@@ -1,0 +1,17 @@
+# Change a scheduled payment (recipient, amount, subject, date or recurrence). Pointing it at a new recipient
+# redirects future money, so tier 3 with egress. The id is a selector: it picks a schedule the user already has.
+# The recipient is the destination, the subject is content for DLP, and the reply is the bank's confirmation
+# message (operator_content).
+tool: banking.update_scheduled_transaction
+description: Update fields of an existing scheduled transaction by its id.
+tier: 3
+egress: true
+args:
+  id:        {type: int,    role: selector}
+  recipient: {type: iban,   role: destination, optional: true}
+  amount:    {type: number, role: control,     optional: true}
+  subject:   {type: text,   role: content,     max_len: 200, single_line: true, optional: true}
+  date:      {type: date,   role: control,     optional: true}
+  recurring: {type: bool,   role: control,     optional: true}
+output:
+  message: {type: text, region: operator_content, confidential: public}
