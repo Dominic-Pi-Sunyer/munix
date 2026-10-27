@@ -8,9 +8,13 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Mon Oct 26, 2026, ~5:30 PM PT, by Claude (Opus 5.5)._
 
-- **In progress (Gemini through `agy`):** fixing the seven review follow-ups in `crates/munix-gate` (facts, refs,
-  trace, gate, view, tests) and one planner test. Then a live `munix run` without `--plan`, then push `7d806c8`,
-  `f37ee74` and the fixes.
+- **Supervisor done and pushed:** review follow-ups fixed (`edb0438`).
+  - **Live `munix run` without `--plan` works:** Muse Spark wrote a 2-step plan; the recipient traced to
+    `store contacts.boss`; the prompt URL in the body traced to the prompt. 15 ledger entries, about $0.019.
+  - **To tune:** the planner reads only `ugc_review`, so the listing and editorial (price, specs) are withheld.
+  - **Ambiguous code:** a Console "no" reaches the agent as `denied: reviewer`, the same code as a reviewer deny.
+  - **Reviewer path:** the reviewer only runs at the Elevated and Restricted bands. The demo page drops trust to
+    15 (Lockdown), where a tier-3 email always goes to the user.
 
 - **Supervisor built (Day 5 code), not yet wired into `munix run`:**
   - **`Gate::review_view`** (Gemini G1) builds the redacted metadata view. Poison tests fill pages and requests with
@@ -143,12 +147,5 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 - `munix run` reads `.env` as a fallback layer, not into the process environment: `set_var` needs `unsafe`.
 - A tool name that can't become a `ToolName` is treated as a takeover but isn't written to the ledger, since there is
   no `Request` to log.
-- **Review follow-ups (Supervisor view):**
-  - The view re-guesses which ref a raw embed matched. Carry ref ids in `Traced` instead.
-  - `normalize_without_refs` duplicates the tracer's normalization.
-  - `value_scalar_type` infers type from ref-id prefixes.
-  - Content args are traced twice, and the embed lookup is quadratic.
-  - Add a poison-test case with agent-invented ref ids, and a planner floor test on `from` rules.
-  - `Task.lowest` must reset on recovery.
 - The live planner reads only `ugc_review`, so the listing and the editor's take (price, specs) are withheld. That's
   safe but thin; nudge the planner prompt to list every region the task needs.
