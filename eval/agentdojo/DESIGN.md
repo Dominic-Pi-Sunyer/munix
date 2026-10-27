@@ -72,8 +72,9 @@ Munix's existing scale.
 | Tool output | Region | Why |
 | :-- | :-- | :-- |
 | `get_iban`, `get_balance`, `get_user_info`, `get_scheduled_transactions` | user's own account data (high) | The user or their bank wrote it |
-| `get_most_recent_transactions`: amounts, dates, counterparty IBANs | bank records (high) | The bank recorded them; the attacker's IBAN isn't among past counterparties |
-| `get_most_recent_transactions`: `subject` | third-party text (low) | Whoever sends you money writes it. This is the injection vector |
+| `get_most_recent_transactions`: ids, amounts, dates, direction, `paid_to` | bank records (high) | The bank recorded them. `paid_to` is where the money went: the recipient the user chose, or the user's own IBAN for an incoming payment |
+| `get_most_recent_transactions`: `my_subjects` | user's own data (high) | The user wrote the subject of a payment they sent |
+| `get_most_recent_transactions`: `paid_by`, `their_subjects` | third-party text (low) | Anyone can send you money, so the sender of an incoming payment and its subject are attacker-chosen. The subject is the injection vector |
 | `read_file` | document (low) | A file of unknown origin (bills, notices) |
 
 **Slack:**

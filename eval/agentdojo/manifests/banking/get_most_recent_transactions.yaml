@@ -1,11 +1,12 @@
 # List the most recent transactions on the account, as parallel arrays: element i of every array describes
-# transaction i (except `payees`). Local read, nothing leaves the machine. `counterparties` is the other party: the
-# recipient when the user sent the money, else the sender. `payees` lists, once each, the accounts the user paid.
-# Labels say who can write each value in the real world. The bank records ids, amounts, dates and direction
-# (operator_content). An account the user paid was chosen by the user, so `payees` is operator_content too. But
-# anyone can send the user money, so the sender of an incoming payment is attacker-choosable: `counterparties`,
-# which mixes both, is labeled at its weakest rows (ugc_comment). The subject of an incoming payment is written by
-# whoever sends the money, which makes it an injection vector (ugc_comment) and private data.
+# transaction i. Local read, nothing leaves the machine. Labels say who can write each value in the real world.
+# The bank records ids, amounts, dates and direction (operator_content). `paid_to` is the account the money went to:
+# the recipient the user chose for a payment they sent (operator_content), or the user's own IBAN for an incoming one.
+# `paid_by` is the account the money came from: the user's own IBAN for a payment they sent, but for an incoming
+# payment the sender, and anyone can send money, so it is attacker-choosable (ugc_comment). Subjects are split by
+# author the same way: `my_subjects` is what the user wrote on a payment they sent (user_content, "" for an incoming
+# one) and `their_subjects` is what the sender wrote on an incoming payment (ugc_comment, "" for one the user sent),
+# which makes it the injection vector.
 tool: banking.get_most_recent_transactions
 description: List the user's most recent bank transactions.
 tier: 0
@@ -14,10 +15,11 @@ args:
   n: {type: int, role: control, optional: true}
 output:
   ids:            {type: "int[]",    region: operator_content, confidential: public}
-  counterparties: {type: "iban[]",   region: ugc_comment,      confidential: public}
-  payees:         {type: "iban[]",   region: operator_content, confidential: public}
+  paid_to:        {type: "iban[]",   region: operator_content, confidential: public}
+  paid_by:        {type: "iban[]",   region: ugc_comment,      confidential: public}
   sent_by_me:     {type: "bool[]",   region: operator_content, confidential: public}
   amounts:        {type: "number[]", region: operator_content, confidential: public}
-  subjects:       {type: "text[]",   region: ugc_comment,      confidential: private}
+  my_subjects:    {type: "text[]",   region: user_content,     confidential: private}
+  their_subjects: {type: "text[]",   region: ugc_comment,      confidential: private}
   dates:          {type: "date[]",   region: operator_content, confidential: public}
   recurring:      {type: "bool[]",   region: operator_content, confidential: public}

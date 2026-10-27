@@ -50,6 +50,7 @@ class BridgeClient:
         binary: Path | str | Sequence[str] = DEFAULT_BINARY,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         env: dict[str, str] | None = None,
+        simulated_user: bool = False,
     ) -> None:
         self.manifests = Path(manifests)
         self.ledger = Path(ledger)
@@ -57,6 +58,9 @@ class BridgeClient:
         self.command = [str(c) for c in binary] if isinstance(binary, (list, tuple)) else [str(binary)]
         self.read_timeout = read_timeout
         self.env = env
+        # With it, the bridge's Console approves a request only when every destination and selector traces to the
+        # prompt, a store or a record at trust >= 80 (a stand-in for a careful human); without it, it always says no.
+        self.simulated_user = simulated_user
         self.calls = 0
         self.denials = 0
         self.tools_run = 0
@@ -70,6 +74,8 @@ class BridgeClient:
     def _spawn(self) -> None:
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
         cmd = [*self.command, "bridge", "--manifests", str(self.manifests), "--ledger", str(self.ledger)]
+        if self.simulated_user:
+            cmd.append("--simulated-user")
         env = {**os.environ, **(self.env or {})}
         self._stderr_file = open(self._stderr_path, "wb")
         try:
@@ -210,6 +216,7 @@ class MunixSession:
         binary: Path | str | Sequence[str] = DEFAULT_BINARY,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         env: dict[str, str] | None = None,
+        simulated_user: bool = False,
     ) -> None:
         self.ledger_dir = Path(ledger_dir)
         self.tag = tag
@@ -217,6 +224,7 @@ class MunixSession:
         self.binary = binary
         self.read_timeout = read_timeout
         self.env = env
+        self.simulated_user = simulated_user
         self.tasks = 0
         self.client: BridgeClient | None = None
         self._record: dict | None = None
@@ -227,7 +235,9 @@ class MunixSession:
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         ledger = self.ledger_dir / f"{self.tag}-{self.tasks:04d}-{digest}.jsonl"
         self._record = {"index": self.tasks, "prompt_sha256": digest, "ledger": str(ledger)}
-        client = BridgeClient(self.manifests, ledger, self.binary, self.read_timeout, self.env)
+        client = BridgeClient(
+            self.manifests, ledger, self.binary, self.read_timeout, self.env, self.simulated_user
+        )
         self.client = client
         try:
             started = client.start(prompt)
@@ -310,7 +320,7 @@ class MunixToolsExecutor(ToolsExecutor):
             if error is not None:
                 return {"ok": False, "error": _short(error)}
             try:
-                return {"ok": True, "output": convert.to_fields(name, result)}
+                return {"ok": True, "output": convert.to_fields(name, result, env)}
             except (KeyError, ValueError, TypeError) as e:
                 return {"ok": False, "error": _short(f"{type(e).__name__}: {e}")}
 

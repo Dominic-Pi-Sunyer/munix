@@ -78,41 +78,71 @@ class ConvertTest(unittest.TestCase):
             with self.subTest(tool=name):
                 result, error = rt.run_function(env, name, args)
                 self.assertIsNone(error)
-                fields = convert.to_fields(name, result)
+                fields = convert.to_fields(name, result, env)
                 self.assertEqual(set(fields), set(convert.MANIFESTS[name]["output"]))
-                self.assertEqual(fields, convert.to_fields("banking." + name, result))
+                self.assertEqual(fields, convert.to_fields("banking." + name, result, env))
                 json.dumps(fields)  # plain JSON values only
-                # Every per-row array has one element per transaction; `payees` is a deduplicated list.
-                lists = [v for k, v in fields.items() if isinstance(v, list) and k != "payees"]
+                # Every per-row array has one element per transaction.
+                lists = [v for k, v in fields.items() if isinstance(v, list)]
                 self.assertEqual(len({len(v) for v in lists}), 1 if lists else 0)
 
-    def test_transactions_are_parallel_arrays_with_real_counterparties(self):
+    def test_recent_transactions_are_labeled_by_who_wrote_each_value(self):
         env, rt = new_env(), runtime()
-        for name in ("get_most_recent_transactions", "get_scheduled_transactions"):
-            with self.subTest(tool=name):
-                result, _ = rt.run_function(env, name, {})
-                fields = convert.to_fields(name, result)
-                self.assertEqual(len(fields["ids"]), len(result))
-                self.assertGreater(len(result), 0)
-                for iban in fields["counterparties"]:
-                    self.assertNotEqual(iban, "me")
-                    self.assertRegex(iban, IBAN)
-                for date in fields["dates"]:
-                    self.assertRegex(date, DATE)
-                self.assertTrue(all(isinstance(a, float) for a in fields["amounts"]))
-        recent, _ = rt.run_function(env, "get_most_recent_transactions", {})
-        fields = convert.to_fields("get_most_recent_transactions", recent)
-        # transaction 5 is the incoming payment: the counterparty is its sender
+        me = env.bank_account.iban
+        result, _ = rt.run_function(env, "get_most_recent_transactions", {})
+        self.assertGreater(len(result), 0)
+        fields = convert.to_fields("get_most_recent_transactions", result, env)
+        self.assertEqual(
+            set(fields),
+            {"ids", "paid_to", "paid_by", "sent_by_me", "amounts", "my_subjects", "their_subjects", "dates", "recurring"},
+        )
+        for key, values in fields.items():
+            self.assertEqual(len(values), len(result), key)  # parallel arrays
+        for field in ("paid_to", "paid_by"):
+            for iban in fields[field]:
+                self.assertNotEqual(iban, "me")
+                self.assertRegex(iban, IBAN)
+        for date in fields["dates"]:
+            self.assertRegex(date, DATE)
+        self.assertTrue(all(isinstance(a, float) for a in fields["amounts"]))
+        # transaction 1 was sent by the user: the user chose the recipient and wrote the subject
+        i = fields["ids"].index(1)
+        self.assertTrue(fields["sent_by_me"][i])
+        self.assertEqual(fields["paid_to"][i], "CH9300762011623852957")
+        self.assertEqual(fields["paid_by"][i], me)
+        self.assertEqual(fields["my_subjects"][i], "Pizza party")
+        self.assertEqual(fields["their_subjects"][i], "")
+        # transaction 5 is the incoming payment: the sender is paid_by, the user's own IBAN is paid_to, and the
+        # subject is the sender's
         i = fields["ids"].index(5)
         self.assertFalse(fields["sent_by_me"][i])
-        self.assertEqual(fields["counterparties"][i], "GB29NWBK60161331926819")
-        self.assertTrue(fields["sent_by_me"][0])
-        self.assertEqual(fields["counterparties"][0], "CH9300762011623852957")
-        # Only accounts the user paid are payees: the sender of the incoming payment is not one.
-        self.assertIn("CH9300762011623852957", fields["payees"])
-        self.assertNotIn("GB29NWBK60161331926819", [p for p in fields["payees"] if p not in
-            [c for c, mine in zip(fields["counterparties"], fields["sent_by_me"]) if mine]])
-        self.assertEqual(len(fields["payees"]), len(set(fields["payees"])))
+        self.assertEqual(fields["paid_by"][i], "GB29NWBK60161331926819")
+        self.assertEqual(fields["paid_to"][i], me)
+        self.assertEqual(fields["my_subjects"][i], "")
+        self.assertEqual(fields["their_subjects"][i], "Sushi dinner")
+        # every subject is in exactly one of the two arrays
+        for mine, my, their, subject in zip(
+            fields["sent_by_me"], fields["my_subjects"], fields["their_subjects"], [t.subject for t in result]
+        ):
+            self.assertEqual((my, their), (subject, "") if mine else ("", subject))
+
+    def test_recent_transactions_need_the_environment_for_the_users_iban(self):
+        env, rt = new_env(), runtime()
+        result, _ = rt.run_function(env, "get_most_recent_transactions", {})
+        with self.assertRaises(ValueError):
+            convert.to_fields("get_most_recent_transactions", result)
+
+    def test_scheduled_transactions_are_the_users_own_records(self):
+        env, rt = new_env(), runtime()
+        result, _ = rt.run_function(env, "get_scheduled_transactions", {})
+        fields = convert.to_fields("get_scheduled_transactions", result)  # needs no env
+        self.assertEqual(
+            set(fields), {"ids", "counterparties", "sent_by_me", "amounts", "subjects", "dates", "recurring"}
+        )
+        self.assertEqual(fields["ids"], [t.id for t in result])
+        self.assertEqual(fields["counterparties"], [t.recipient for t in result])
+        for iban in fields["counterparties"]:
+            self.assertRegex(iban, IBAN)
 
     def test_values(self):
         env, rt = new_env(), runtime()
@@ -177,13 +207,27 @@ class ManifestTest(unittest.TestCase):
 
     def test_untrusted_regions(self):
         recent = convert.MANIFESTS["get_most_recent_transactions"]["output"]
-        self.assertEqual(recent["subjects"]["region"], "ugc_comment")
         self.assertEqual(convert.MANIFESTS["read_file"]["output"]["content"]["region"], "unclassified")
-        # Anyone can send the user money, so per-row counterparties are only as trusted as their weakest rows;
-        # the accounts the user paid are bank records.
-        self.assertEqual(recent["counterparties"]["region"], "ugc_comment")
-        for field in ("ids", "payees", "sent_by_me", "amounts", "dates", "recurring"):
+        # Labels follow who wrote each value: anyone can send the user money, so the sender and the subject of an
+        # incoming payment are third-party; where the user's own money went and what the user wrote are not.
+        expected = {
+            "paid_to": ("operator_content", "iban[]", "public"),
+            "paid_by": ("ugc_comment", "iban[]", "public"),
+            "my_subjects": ("user_content", "text[]", "private"),
+            "their_subjects": ("ugc_comment", "text[]", "private"),
+        }
+        for field, (region, ty, confidential) in expected.items():
+            self.assertEqual(
+                (recent[field]["region"], recent[field]["type"], recent[field]["confidential"]),
+                (region, ty, confidential),
+                field,
+            )
+        for field in ("ids", "sent_by_me", "amounts", "dates", "recurring"):
             self.assertEqual(recent[field]["region"], "operator_content")
+        for gone in ("counterparties", "payees", "subjects"):
+            self.assertNotIn(gone, recent)
+        scheduled = convert.MANIFESTS["get_scheduled_transactions"]["output"]
+        self.assertEqual({spec["region"] for spec in scheduled.values()}, {"user_content"})
 
 
 class ExecutorTest(unittest.TestCase):
@@ -224,6 +268,8 @@ class ExecutorTest(unittest.TestCase):
         fields = json.loads(msg["content"][0]["content"])
         self.assertEqual(fields["ids"], [4, 5])
         self.assertEqual(fields["sent_by_me"], [True, False])
+        self.assertEqual(fields["paid_by"], [env.bank_account.iban, "GB29NWBK60161331926819"])
+        self.assertEqual(fields["paid_to"], ["US122000000121212121212", env.bank_account.iban])
 
     def test_denied_call_is_an_error_and_changes_nothing(self):
         env, s = new_env(), self.session(MUNIX_FAKE_DENY="send_money")
@@ -258,6 +304,63 @@ class ExecutorTest(unittest.TestCase):
         self.assertIsNone(msg["error"])
         self.assertEqual(env.user_account.city, "Oakland")
         self.assertEqual(env.user_account.first_name, "Emma")
+
+
+class SimulatedUserFlagTest(unittest.TestCase):
+    """The flag reaches the `munix bridge` command line, and only when asked for."""
+
+    def setUp(self):
+        mx.SUMMARIES.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.argv_out = Path(self.tmp.name) / "argv.json"
+        self.spy = Path(self.tmp.name) / "spy.py"
+        self.spy.write_text(
+            "import json, os, runpy, sys\n"
+            "open(os.environ['ARGV_OUT'], 'w').write(json.dumps(sys.argv[1:]))\n"
+            f"runpy.run_path({str(HERE / 'fake_bridge.py')!r}, run_name='__main__')\n",
+            encoding="utf-8",
+        )
+        self.binary = [sys.executable, str(self.spy)]
+
+    def bridge_argv(self, simulated_user):
+        client = mx.BridgeClient(
+            convert.MANIFEST_DIR, Path(self.tmp.name) / "l.jsonl", self.binary, 20.0,
+            env={"ARGV_OUT": str(self.argv_out)}, simulated_user=simulated_user,
+        )
+        try:
+            client.start("hello")
+            client.end()
+        finally:
+            client.kill()
+        return json.loads(self.argv_out.read_text())
+
+    def test_client_passes_the_flag_only_when_asked(self):
+        self.assertNotIn("--simulated-user", self.bridge_argv(False))
+        argv = self.bridge_argv(True)
+        self.assertEqual(argv[0], "bridge")
+        self.assertIn("--simulated-user", argv)
+
+    def test_session_passes_the_flag_to_every_bridge(self):
+        s = mx.MunixSession(
+            ledger_dir=self.tmp.name, tag="t", binary=self.binary, read_timeout=20,
+            env={"ARGV_OUT": str(self.argv_out)}, simulated_user=True,
+        )
+        self.addCleanup(s.close)
+        s.start_task("a task")
+        self.assertIn("--simulated-user", json.loads(self.argv_out.read_text()))
+
+    def test_run_py_tags_the_setup_and_leaves_existing_names_alone(self):
+        import run
+
+        self.assertEqual(run.setup_tag("munix", False, run.DEFAULT_MODEL), "munix")
+        self.assertEqual(run.setup_tag("munix", True, run.DEFAULT_MODEL), "munix-takeover")
+        self.assertEqual(run.setup_tag("bare", False, run.DEFAULT_MODEL), "bare")
+        self.assertEqual(run.setup_tag("munix", False, run.DEFAULT_MODEL, simulated_user=True), "munix-simuser")
+        self.assertEqual(run.setup_tag("munix", True, run.DEFAULT_MODEL, True), "munix-takeover-simuser")
+        self.assertEqual(
+            run.result_name("munix-simuser", "banking", "utility", None), "munix-simuser--banking-utility.json"
+        )
 
 
 class StartTest(unittest.TestCase):

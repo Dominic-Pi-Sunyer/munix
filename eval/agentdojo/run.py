@@ -107,9 +107,10 @@ def use_system_role() -> None:
     openai_llm._message_to_openai = patched
 
 
-def setup_tag(mode: str, takeover: bool, model: str) -> str:
-    """Names a setup in result files and pipeline names: `bare`, `munix-takeover`, `bare-takeover-llama-3.2-3b`."""
-    tag = mode + ("-takeover" if takeover else "")
+def setup_tag(mode: str, takeover: bool, model: str, simulated_user: bool = False) -> str:
+    """Names a setup in result files and pipeline names: `bare`, `munix-takeover`, `munix-simuser`,
+    `bare-takeover-llama-3.2-3b`."""
+    tag = mode + ("-takeover" if takeover else "") + ("-simuser" if simulated_user else "")
     if model != DEFAULT_MODEL:
         tag += "-" + "".join(c if c.isalnum() or c in ".-" else "-" for c in model.split("/")[-1].lower())
     return tag
@@ -130,7 +131,7 @@ def make_pipeline(args, model: str, key: str, usage: Usage, session) -> AgentPip
         pipe = AgentPipeline([*head, munix_executor.MunixStart(session), llm, loop])
     # AgentDojo requires a registered model key in the name ("local"); the attack text then calls the model
     # "Local model", the same for every setup we compare.
-    pipe.name = f"local-{setup_tag(args.mode, args.takeover, model)}-{args.effort}"
+    pipe.name = f"local-{setup_tag(args.mode, args.takeover, model, args.simulated_user)}-{args.effort}"
     return pipe
 
 
@@ -146,6 +147,9 @@ def shard_of(items: list[str], shard: str | None) -> list[str]:
 def cmd_run(args) -> int:
     if args.mode == "munix" and args.suite != "banking":
         print(f"--mode munix has manifests for the banking suite only, not {args.suite}", file=sys.stderr)
+        return 2
+    if args.simulated_user and args.mode != "munix":
+        print("--simulated-user only applies to --mode munix", file=sys.stderr)
         return 2
     if args.base_url == META_URL:
         key = env_value("MODEL_API_KEY")
@@ -171,6 +175,7 @@ def cmd_run(args) -> int:
             tag=f"{args.suite}-{args.phase}-{shard_tag}-{stamp}",
             manifests=HERE / "manifests" / args.suite,
             binary=binary,
+            simulated_user=args.simulated_user,
         )
         munix_executor.SUMMARIES.clear()
     pipe = make_pipeline(args, model, key, usage, session)
@@ -218,7 +223,8 @@ def cmd_run(args) -> int:
         "shard": args.shard,
         "benchmark_version": BENCHMARK_VERSION,
         "attack": ATTACK if args.phase == "attack" else None,
-        "setup": setup_tag(args.mode, args.takeover, model),
+        "setup": setup_tag(args.mode, args.takeover, model, args.simulated_user),
+        "simulated_user": args.simulated_user,
         "takeover": args.takeover,
         "model": model,
         "base_url": args.base_url,
@@ -232,7 +238,7 @@ def cmd_run(args) -> int:
     }
     if args.mode == "munix":
         doc["munix"] = list(munix_executor.SUMMARIES)
-    out = HERE / "results" / result_name(setup_tag(args.mode, args.takeover, model), args.suite, args.phase, args.shard)
+    out = HERE / "results" / result_name(setup_tag(args.mode, args.takeover, model, args.simulated_user), args.suite, args.phase, args.shard)
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out.relative_to(HERE)}: {usage.calls} calls, about ${doc['estimated_cost_usd']:.4f}")
@@ -284,6 +290,8 @@ def main() -> int:
     r.add_argument("--mode", default="bare", choices=("bare", "munix"))
     r.add_argument("--model", help="default: MUNIX_WORKER_MODEL from .env, else muse-spark-1.3")
     r.add_argument("--munix-bin", default=str(munix_executor.DEFAULT_BINARY), help="the munix binary (--mode munix)")
+    r.add_argument("--simulated-user", action="store_true",
+                   help="--mode munix: the bridge's Console approves like a careful human would (default: always no)")
     r.add_argument("--effort", default="low", choices=("minimal", "low", "medium", "high"))
     r.add_argument("--takeover", action="store_true", help="add the labeled simulated takeover to the system prompt")
     r.add_argument("--base-url", default=META_URL, help="OpenAI-compatible endpoint (default: the Meta Model API)")
