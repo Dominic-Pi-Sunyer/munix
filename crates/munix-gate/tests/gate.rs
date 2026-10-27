@@ -19,7 +19,8 @@ use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{Request, ViolationCode};
 use munix_core::validate::Scalar;
 use munix_gate::gate::{
-    AMENDMENT_BUDGET, Gate, GateError, MAX_READ_AMENDMENTS, Reply, Store, StoreValue, TaskBrief,
+    AMENDMENT_BUDGET, Gate, GateError, MAX_READ_AMENDMENTS, READ_AMENDMENT_BUDGET, Reply, Store,
+    StoreValue, TaskBrief,
 };
 use munix_gate::policy::DenyCode;
 use munix_gate::tool::{Tool, ToolFailure};
@@ -2739,7 +2740,8 @@ fn an_off_plan_tier_0_read_is_amended_and_runs_like_any_step() {
     assert_eq!(plan.steps.len(), 3);
     assert_eq!(plan.steps[2].id, 3);
     assert_eq!(plan.steps[2].tool.as_str(), "news.read");
-    assert_eq!(plan.steps[2].budget, AMENDMENT_BUDGET);
+    // news.read only reads, so its amended step gets the read budget.
+    assert_eq!(plan.steps[2].budget, READ_AMENDMENT_BUDGET);
     assert!(plan.steps[2].args.is_empty());
     // The signed plan and its digest are untouched, and the brief keeps the planned steps only.
     assert_eq!(h.plan.body.digest().unwrap(), signed_digest);
@@ -2760,7 +2762,7 @@ fn an_off_plan_tier_0_read_is_amended_and_runs_like_any_step() {
         amended_events(&h),
         [json!({
             "event": "amended", "task": "T-demo", "step": 3, "tool": "news.read", "tier": 0,
-            "budget": 3, "reason": "auto_tier",
+            "budget": READ_AMENDMENT_BUDGET, "reason": "auto_tier",
             "request_hash": original_hash.as_str(),
             "amended_request_hash": amended_hash.as_str(),
             "plan_digest": started_digest,
@@ -2784,7 +2786,7 @@ fn the_amended_step_has_a_budget_and_running_out_is_not_a_takeover() {
         h.gate.submit(&req(0, "news.read", json!({}))),
         Reply::Delivered(_)
     ));
-    for _ in 1..AMENDMENT_BUDGET {
+    for _ in 1..READ_AMENDMENT_BUDGET {
         assert!(matches!(
             h.gate.submit(&req(3, "news.read", json!({}))),
             Reply::Delivered(_)
@@ -2794,7 +2796,7 @@ fn the_amended_step_has_a_budget_and_running_out_is_not_a_takeover() {
         h.gate.submit(&req(3, "news.read", json!({}))),
         Reply::Denied(DenyCode::BudgetExhausted)
     );
-    // Still running, and only one amendment was made for the three calls.
+    // Still running, and only one amendment was made for all those calls.
     assert!(matches!(
         h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
         Reply::Delivered(_)

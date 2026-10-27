@@ -227,6 +227,10 @@ fn read_only(manifest: &ToolManifest) -> bool {
 /// The budget of an amended step.
 pub const AMENDMENT_BUDGET: u32 = 3;
 
+/// The budget of an amended read-only step (tier 0, no egress). A read can't send anything, and an agent that keeps
+/// calling past it is still denied and paused (invariant 10).
+pub const READ_AMENDMENT_BUDGET: u32 = 8;
+
 /// Recoveries per task before it pauses and the user is asked (design spec 6, "Recovery").
 pub const MAX_RECOVERIES: u32 = 2;
 
@@ -714,11 +718,16 @@ impl Gate {
             };
             args.insert(name.clone(), rule);
         }
+        let budget = if reads {
+            READ_AMENDMENT_BUDGET
+        } else {
+            AMENDMENT_BUDGET
+        };
         let step = Step {
             id,
             tool: request.tool.clone(),
             args,
-            budget: AMENDMENT_BUDGET,
+            budget,
         };
         let mut candidate = task.plan.clone();
         candidate.steps.push(step.clone());
@@ -741,7 +750,7 @@ impl Gate {
             "step": id,
             "tool": request.tool.as_str(),
             "tier": manifest.tier,
-            "budget": AMENDMENT_BUDGET,
+            "budget": budget,
             "reason": "auto_tier",
         }));
         if !logged {

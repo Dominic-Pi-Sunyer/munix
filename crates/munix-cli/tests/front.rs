@@ -830,9 +830,11 @@ fn a_low_tier_tool_the_plan_lacks_is_amended_in_and_later_calls_use_its_step() {
     let first = front.call("news_read", &json!({}));
     assert!(!first.is_error, "{first:?}");
     assert!(first.text.contains("A quiet day"), "{first:?}");
+    // No refs in this output, so no note about them.
+    assert!(!first.text.contains("Munix refs"), "{first:?}");
     assert!(!front.should_stop());
-    // Later calls map to the amended step, which has a budget of 3.
-    for _ in 0..2 {
+    // Later calls map to the amended step. It is a read, so its budget is READ_AMENDMENT_BUDGET (8).
+    for _ in 0..7 {
         let again = front.call("news_read", &json!({}));
         assert!(!again.is_error, "{again:?}");
     }
@@ -853,7 +855,7 @@ fn a_low_tier_tool_the_plan_lacks_is_amended_in_and_later_calls_use_its_step() {
     assert_eq!(plan.steps.len(), 3);
     assert_eq!(plan.steps[2].id, 3);
     assert_eq!(plan.steps[2].tool.as_str(), "news.read");
-    assert_eq!(h.gate.calls_made(&task, 3), Some(3));
+    assert_eq!(h.gate.calls_made(&task, 3), Some(8));
     // The brief the agent was given is untouched.
     assert_eq!(h.brief.plan.steps.len(), 2);
 }

@@ -522,5 +522,24 @@ fn delivered_text(delivered: &Delivered) -> String {
     if blocks.is_empty() {
         return "(no output)".to_owned();
     }
+    if delivered.fields.values().any(has_ref) {
+        blocks.push(REFS_NOTE.to_owned());
+    }
     blocks.join("\n\n")
+}
+
+/// Added to any output that shows refs, so an agent that was never told about them (AgentDojo's, whose tool
+/// descriptions are its own) doesn't go looking for their values.
+pub const REFS_NOTE: &str = "Note: the values above that start with \"ref\" and a colon are Munix refs, handles \
+for account numbers, links and addresses whose values are hidden from you. Pass a ref unchanged as an argument \
+wherever you need that value. No tool reveals what a ref holds, so don't try to look one up.";
+
+/// True when `value` is, or is a list holding, a Gate ref. Delivered text can't spell one: ingest rewrites `ref:` in
+/// text to `ref-`.
+fn has_ref(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s.starts_with("ref:"),
+        Value::Array(items) => items.iter().any(has_ref),
+        _ => false,
+    }
 }

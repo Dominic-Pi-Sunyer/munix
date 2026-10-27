@@ -865,6 +865,8 @@ amendments:
         // An address in an untrusted output is only ever shown as a ref.
         assert!(!text.contains("a@b.example"), "{text}");
         assert_eq!(refs_in(text).len(), 1, "{text}");
+        // An output with refs says what they are, without naming one.
+        assert!(text.ends_with(crate::front::REFS_NOTE), "{text}");
 
         let ended = &run.out[3];
         assert_eq!(ended["takeover"], Value::Null);
