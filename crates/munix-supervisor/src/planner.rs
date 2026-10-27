@@ -42,7 +42,8 @@ this step's tool to null). Each rule object has:
 embed refs or values from earlier steps or prompt; \"min_trust\" is required when \"from\" includes \
 a \"step.<id>\" source) or null;
     - \"forbid\": true to forbid an optional argument (when true, all other fields on that rule \
-must be null), or null;
+must be null), or null. Never forbid control arguments (counts, dates, flags): they carry no \
+destination or data;
   - \"budget\": maximum calls for this step (integer 1 to 10).
 - \"amendments\": {\"auto_max_tier\": 0 or 1}.
 
@@ -149,6 +150,25 @@ pub const MAX_STEPS: usize = 8;
 /// from a user review into an email) is raised to this.
 pub const MIN_STEP_TRUST: u8 = 60;
 
+/// Drops a `forbid` the model wrote on a control argument (a count, a date, a flag). Control arguments are checked
+/// for shape only and carry no destination or data, so forbidding one adds no protection and only makes honest
+/// calls fail (the live planner forbade an optional `date`, which denied a legitimate payment update). Forbids on
+/// destination, selector and content arguments stay.
+fn allow_control_args(plan: &mut Plan, catalog: &Catalog) {
+    for step in &mut plan.steps {
+        let Some(manifest) = catalog.get(&step.tool) else {
+            continue;
+        };
+        step.args.retain(|name, rule| {
+            let control = manifest
+                .args
+                .get(name)
+                .is_some_and(|spec| spec.role == ArgRole::Control);
+            !(control && rule.is_forbidden())
+        });
+    }
+}
+
 /// Raises every `min_trust` the model set on a step source to at least [`MIN_STEP_TRUST`]. Tighten-only; a missing
 /// `min_trust` is left for the validator to reject.
 fn raise_step_trust_floors(plan: &mut Plan) {
@@ -251,6 +271,7 @@ impl Planner {
                 amendments: draft.amendments,
             };
             raise_step_trust_floors(&mut plan);
+            allow_control_args(&mut plan, catalog);
             match check_plan(&plan, catalog, stores) {
                 Ok(()) => {
                     return Signed::sign(&self.key, Purpose::Plan, plan)
@@ -603,6 +624,63 @@ mod tests {
             ],
             "amendments": {"auto_max_tier": 1}
         })
+    }
+
+    #[test]
+    fn forbids_on_control_args_are_dropped_and_others_kept() {
+        let manifest = munix_core::manifest::ToolManifest::from_yaml(
+            "
+tool: bank.update
+description: Update a scheduled payment.
+tier: 3
+egress: true
+args:
+  id:        {type: int,  role: selector}
+  recipient: {type: iban, role: destination, optional: true}
+  date:      {type: date, role: control, optional: true}
+  recurring: {type: bool, role: control, optional: true}
+  note:      {type: text, role: content, optional: true}
+output:
+  message: {type: text, region: operator_content, confidential: public}
+",
+        )
+        .unwrap();
+        let catalog = Catalog::from_manifests([manifest]).unwrap();
+        let mut plan = Plan::from_yaml(&format!(
+            "
+plan: P-1
+task: T-1
+prompt_hash: \"{}\"
+reads: [operator_content]
+steps:
+  - id: 1
+    tool: bank.update
+    args:
+      id:        {{from: [prompt]}}
+      recipient: {{forbid: true}}
+      date:      {{forbid: true}}
+      recurring: {{forbid: true}}
+      note:      {{forbid: true}}
+    budget: 1
+amendments:
+  auto_max_tier: 0
+",
+            prompt().digest().unwrap().as_str()
+        ))
+        .unwrap();
+        allow_control_args(&mut plan, &catalog);
+        let args = &plan.steps[0].args;
+        assert!(
+            !args.contains_key("date"),
+            "a control arg's forbid is dropped"
+        );
+        assert!(!args.contains_key("recurring"));
+        assert!(
+            args["recipient"].is_forbidden(),
+            "a destination stays forbidden"
+        );
+        assert!(args["note"].is_forbidden(), "content stays forbidden");
+        assert!(args["id"].from.is_some(), "other rules are untouched");
     }
 
     #[test]
