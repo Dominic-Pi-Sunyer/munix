@@ -6,8 +6,31 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~10:15 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~11:30 PM PT, by Claude (Opus 5.5)._
 
+- **AgentDojo prep (banking and Slack first):**
+  - **Set up:** `eval/agentdojo/` pins `agentdojo==0.1.35` in its own `.venv`.
+  - **Smoke test:** `smoke.py` ran banking UT3 on Muse Spark with `utility=True`; the Meta API accepts the
+    `developer` role.
+  - **Design:** `eval/agentdojo/DESIGN.md` covers the suite facts, a real Gate behind a `munix bridge` JSON-lines
+    subcommand with a `MunixToolsExecutor` seam, honest labels, and the phases.
+  - **Next:**
+    - the bare baseline (lead, about $3–6);
+    - then the bridge (Sonnet builders, no credit);
+    - then Munix runs (about $5–10).
+- **Red-team against Munix done (rough):** `docs/redteam/munix.md`.
+  - **Takeover switch on, 10 variants:**
+    - no Munix: 8 hijacked and 2 tainted;
+    - Munix with raw reviews: 0 reached the attacker, but no email at all, because the Console was unattended;
+    - Munix with the Readers plan: 10 clean to the boss.
+    - About $0.58 for all three.
+  - **Escape probe** (`demo/agent/probe.py`): 9 of 9 pass.
+  - **Coverage map:** `docs/redteam/munix-coverage.md`, the design spec's 14 attacks against the existing tests.
+    Top gaps:
+    - encoded or split data in DLP;
+    - `TracedValue` quarantine ignores trust;
+    - links planted in high-trust regions.
+  - **Who built it:** the runner, probe and map are by Gemini (reviewed); builders are now Sonnet again.
 - **Rough dashboard works, as a debugging tool only.** The owner decided it stays out of the video and pitch: it
   would read as a generic agent dashboard. Run `cargo run -p munix-cli -- dashboard`, then open
   http://127.0.0.1:8090.
@@ -51,7 +74,7 @@ _Last updated: Mon Oct 26, 2026, ~10:15 PM PT, by Claude (Opus 5.5)._
   - `demo/services.sh` starts Mailpit and the mock site.
   - `demo/right.sh` runs the same prompt under `munix run` (`PLAN=`, `TAKEOVER=1`).
   - `demo/left.sh` also takes `TAKEOVER=1`.
-- **Next (rough-draft pass):** red-team against Munix, README draft.
+- **Next (rough-draft pass):** README draft, then AgentDojo.
 
 - **Day 6 works live, with the takeover switch on.**
   - **Instance 1** emailed `hacker@evil.com` (takeover). Recovery 1 withheld exactly `step 1 reviews[1]` (cause
@@ -101,7 +124,8 @@ _Last updated: Mon Oct 26, 2026, ~10:15 PM PT, by Claude (Opus 5.5)._
   - **Left (no Munix):** emailed `hacker@evil.com` "Compromised" / "youve been pawned". Mailpit caught it. About $0.009.
   - **Right (`munix run`):** the Gate denied it by code (`to.trace_untrusted`) and halted the task as a takeover. Mailpit
     stayed empty, and the ledger has 10 entries with the chain verified. About $0.007.
-- **Builders are Gemini 4 Argon** through `agy` (see "How we work"). Claude writes briefs and reviews every diff.
+- **Builders are Sonnet subagents again** (Oct 26 evening: Gemini usage ran out). Claude writes briefs and reviews
+  every diff.
 
 ## Done (all on `main`, CI green)
 
@@ -137,7 +161,8 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 
 - **Planning, contracts and reviews:** Claude (the lead) writes the contracts as public signatures and doc comments
   with `todo!()` bodies, and reviews every diff before committing.
-- **Builders:** Gemini 4 Argon through the Antigravity CLI. From the repo root, run
+- **Builders:** Sonnet subagents (the Agent tool, `model: sonnet`), as in the early milestones. Gemini 4 Argon is
+  the fallback when the owner asks for it. For Gemini, from the repo root, run
   `agy --model gemini-4-argon-medium --mode auto --print-timeout 900s -p "<brief>"`. Put `-p` last, because it takes
   the next token as the prompt. `--mode plan` is read-only.
 - **Briefs:** each one names the files the builder owns, the decisions already made, the done-checks and a short

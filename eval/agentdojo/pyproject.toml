@@ -1,0 +1,9 @@
+[project]
+name = "munix-agentdojo"
+version = "0.1.0"
+description = "Munix on the AgentDojo benchmark (banking and slack suites first)"
+requires-python = ">=3.12,<3.13"
+dependencies = ["agentdojo==0.1.35"]
+
+[tool.uv]
+package = false
