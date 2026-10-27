@@ -914,6 +914,41 @@ impl Gate {
         })
     }
 
+    /// Where each destination and selector argument of `request` came from, for the operator's terminal when a
+    /// call is blocked: the value as it would have been sent (refs resolved; the raw text when a ref doesn't
+    /// resolve) and its sources, in the Console's words (`step 1 reviews (ugc_review, trust 15)`,
+    /// `store contacts.boss (trust 100)`, `untraced`). Never shown to the agent or the Supervisor's model.
+    pub fn describe_destinations(
+        &self,
+        task: &TaskId,
+        request: &Request,
+    ) -> Option<Vec<PendingArg>> {
+        let t = self.tasks.get(task)?;
+        let manifest = self.catalog.get(&request.tool)?;
+        let resolved = resolve_args(manifest, &request.args, &t.refs);
+        let args = request
+            .args
+            .iter()
+            .filter(|(name, _)| {
+                manifest.args.get(*name).is_some_and(|spec| {
+                    matches!(spec.role, ArgRole::Destination | ArgRole::Selector)
+                })
+            })
+            .map(|(name, raw)| {
+                let shown = resolved.as_ref().and_then(|r| r.get(name)).unwrap_or(raw);
+                PendingArg {
+                    name: name.clone(),
+                    value: match shown {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                    sources: describe_sources(raw, &t.refs),
+                }
+            })
+            .collect();
+        Some(args)
+    }
+
     // ---- private helpers ----
 
     /// Appends one event. False means the write failed and the caller must fail closed.

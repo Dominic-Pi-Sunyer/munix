@@ -76,6 +76,7 @@ pub struct GateFront<'a, C: Confirmer> {
     reviewer: Option<(Reviewer, PromptEnvelope)>,
     progress: Option<Arc<FrontProgress>>,
     takeover: Option<DenyCode>,
+    operator_log: bool,
 }
 
 impl<'a, C: Confirmer> GateFront<'a, C> {
@@ -89,7 +90,15 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
             reviewer: None,
             progress: None,
             takeover: None,
+            operator_log: false,
         }
+    }
+
+    /// Prints one block on stderr (the operator's terminal, never the agent) each time the Gate denies a call:
+    /// what was blocked, why, and where each destination came from. `munix run` turns it on.
+    pub fn with_operator_log(mut self) -> Self {
+        self.operator_log = true;
+        self
     }
 
     /// Attaches the Supervisor's gray-zone reviewer for `Stage::LlmReview` requests.
@@ -342,12 +351,61 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
             args,
         };
         let reply = self.gate.submit(&request);
+        if self.operator_log {
+            let blocked = match &reply {
+                Reply::Takeover(code) => Some((code, true)),
+                Reply::Denied(code) => Some((code, false)),
+                _ => None,
+            };
+            if let Some((code, takeover)) = blocked {
+                let args = self
+                    .gate
+                    .describe_destinations(&request.task, &request)
+                    .unwrap_or_default();
+                for line in blocked_lines(&request.tool, code, takeover, &args) {
+                    eprintln!("{line}");
+                }
+            }
+        }
         self.answer(reply)
     }
 
     fn should_stop(&self) -> bool {
         self.takeover.is_some()
     }
+}
+
+/// The operator's lines for a denied call, e.g.
+/// `munix: BLOCKED email.send (untrusted_destination): takeover, the task is halted` then
+/// `munix:   to = hacker@evil.com  <- step 1 reviews (ugc_review, trust 15)`.
+pub fn blocked_lines(
+    tool: &ToolName,
+    code: &DenyCode,
+    takeover: bool,
+    args: &[munix_gate::gate::PendingArg],
+) -> Vec<String> {
+    let what = if takeover {
+        "takeover, the task is halted"
+    } else {
+        "denied"
+    };
+    let mut lines = vec![format!(
+        "munix: BLOCKED {} ({}): {what}",
+        tool.as_str(),
+        code_text(code)
+    )];
+    for arg in args {
+        let sources = if arg.sources.is_empty() {
+            "untraced".to_owned()
+        } else {
+            arg.sources.join(", ")
+        };
+        lines.push(format!(
+            "munix:   {} = {}  <- {sources}",
+            arg.name, arg.value
+        ));
+    }
+    lines
 }
 
 /// The MCP name of a tool: `web.open` is `web_open`.

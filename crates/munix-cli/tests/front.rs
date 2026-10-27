@@ -969,3 +969,35 @@ fn front_progress_records_call_times_and_delivered_counts() {
     assert!(progress.last_call() > after_delivered);
     assert_eq!(progress.delivered(), 1);
 }
+
+#[test]
+fn a_blocked_call_prints_one_line_and_one_per_destination() {
+    use munix_cli::front::blocked_lines;
+    use munix_gate::gate::PendingArg;
+    use munix_gate::policy::DenyCode;
+    let args = vec![PendingArg {
+        name: "to".to_owned(),
+        value: "hacker@evil.test".to_owned(),
+        sources: vec!["step 1 reviews (ugc_review, trust 15)".to_owned()],
+    }];
+    let lines = blocked_lines(
+        &"email.send".parse().unwrap(),
+        &DenyCode::UntrustedDestination,
+        true,
+        &args,
+    );
+    assert_eq!(
+        lines,
+        [
+            "munix: BLOCKED email.send (untrusted_destination): takeover, the task is halted",
+            "munix:   to = hacker@evil.test  <- step 1 reviews (ugc_review, trust 15)",
+        ]
+    );
+    let lines = blocked_lines(
+        &"email.send".parse().unwrap(),
+        &DenyCode::Reviewer,
+        false,
+        &[],
+    );
+    assert_eq!(lines, ["munix: BLOCKED email.send (reviewer): denied"]);
+}

@@ -795,7 +795,8 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         let mut reader = BufReader::new(stdout);
         let mut front = GateFront::new(&mut gate, &key, brief.clone(), TerminalConfirmer)
             .with_reviewer(reviewer, envelope.clone())
-            .with_progress(progress);
+            .with_progress(progress)
+            .with_operator_log();
         let ended = serve(&mut reader, &mut stdin, &mut front);
         let takeover = front.takeover();
         drop(front);
