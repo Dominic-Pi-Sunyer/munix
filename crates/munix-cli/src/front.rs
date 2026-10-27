@@ -113,7 +113,8 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
         self.takeover
     }
 
-    /// The tool a call names: the plan's tool whose MCP name matches, else the name with `_` read as `.`.
+    /// The tool a call names: the plan's tool whose MCP name matches, else the name with `_` read as `.`. Only the
+    /// brief's planned steps are searched, so amended tools are never advertised or preferred.
     fn tool_named(&self, name: &str) -> Option<ToolName> {
         let in_plan = self
             .brief
@@ -128,11 +129,13 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
         }
     }
 
-    /// The first plan step with this tool that still has budget, else the last one with it, else step 0.
+    /// The first step with this tool that still has budget, else the last one with it, else step 0. Steps come from
+    /// the Gate's current plan for the task, so a step the Gate amended in earlier is found like a planned one.
     fn step_for(&self, tool: &ToolName) -> u32 {
-        let steps: Vec<&Step> = self
-            .brief
-            .plan
+        let Some(plan) = self.gate.plan(&self.brief.task) else {
+            return 0;
+        };
+        let steps: Vec<&Step> = plan
             .steps
             .iter()
             .filter(|step| &step.tool == tool)
@@ -303,8 +306,9 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     /// - The name maps back by replacing `_` with `.`. A name that isn't a valid tool name, or any tool, is still
     ///   submitted (with step 0 when no plan step uses it), so the Gate rules on it and logs it. A name that can't
     ///   become a `ToolName` at all is answered `denied: off_plan` and treated as a takeover.
-    /// - The step is the first plan step with that tool whose budget isn't used up (`Gate::calls_made`), else the
-    ///   last step with that tool.
+    /// - The step is the first step of the Gate's current plan (planned or amended) with that tool whose budget isn't
+    ///   used up (`Gate::calls_made`), else the last step with that tool. A tool no step uses is sent as step 0 and
+    ///   the Gate may amend a step in for it (low tiers only).
     /// - `arguments` must be an object (`null` counts as `{}`); anything else is answered `denied: wrong_type`.
     ///
     /// Replies, as text (`is_error` for everything but `Delivered`):

@@ -146,6 +146,8 @@ struct Options {
     allow_cc: bool,
     /// Adds a second `web.open` step (id 4, budget 2) after the first one.
     second_open: bool,
+    /// Gives `news.read` this tier instead of 0 (the demo plan amends in tools up to tier 1 by itself).
+    news_tier: Option<u8>,
 }
 
 fn harness() -> Harness {
@@ -159,7 +161,9 @@ fn build(options: &Options) -> Harness {
         ToolManifest::from_yaml(EMAIL_SEND).unwrap(),
     ];
     if options.news {
-        manifests.push(ToolManifest::from_yaml(NEWS_READ).unwrap());
+        let tier = options.news_tier.unwrap_or(0);
+        let yaml = NEWS_READ.replace("tier: 0", &format!("tier: {tier}"));
+        manifests.push(ToolManifest::from_yaml(&yaml).unwrap());
     }
     let digests: Vec<_> = manifests.iter().map(|m| m.digest().unwrap()).collect();
     let catalog = Catalog::from_manifests(manifests).unwrap();
@@ -771,9 +775,10 @@ fn an_unknown_tool_is_a_takeover() {
 #[test]
 fn a_tool_in_the_catalog_but_not_in_the_plan_is_a_takeover() {
     // news.read is in the catalog and registered, but this plan has no step for it. The front still submits it
-    // (on step 0), and the Gate rules.
+    // (on step 0), and the Gate rules. At tier 2 it is above the plan's auto_max_tier, so it is not amended in.
     let mut h = build(&Options {
         news: true,
+        news_tier: Some(2),
         ..Options::default()
     });
     let before = h.ledger_len();
@@ -790,6 +795,50 @@ fn a_tool_in_the_catalog_but_not_in_the_plan_is_a_takeover() {
     assert_eq!(front.takeover(), Some(DenyCode::OffPlan));
     drop(front);
     assert!(h.ledger_len() > before);
+}
+
+#[test]
+fn a_low_tier_tool_the_plan_lacks_is_amended_in_and_later_calls_use_its_step() {
+    let mut h = build(&Options {
+        news: true,
+        ..Options::default()
+    });
+    let task = h.task.clone();
+    let script = Script::default();
+    let mut front = h.front(&script);
+    let names: Vec<String> = front.tools().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["web_open", "email_send"]);
+
+    // First call: the Gate amends step 3 in and the read runs.
+    let first = front.call("news_read", &json!({}));
+    assert!(!first.is_error, "{first:?}");
+    assert!(first.text.contains("A quiet day"), "{first:?}");
+    assert!(!front.should_stop());
+    // Later calls map to the amended step, which has a budget of 3.
+    for _ in 0..2 {
+        let again = front.call("news_read", &json!({}));
+        assert!(!again.is_error, "{again:?}");
+    }
+    refused(
+        &front.call("news_read", &json!({})),
+        "denied: budget_exhausted",
+    );
+    assert!(
+        !front.should_stop(),
+        "an exhausted budget is not a takeover"
+    );
+    // Still not advertised, and the brief's tool list is unchanged.
+    let names: Vec<String> = front.tools().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["web_open", "email_send"]);
+    drop(front);
+
+    let plan = h.gate.plan(&task).unwrap();
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.steps[2].id, 3);
+    assert_eq!(plan.steps[2].tool.as_str(), "news.read");
+    assert_eq!(h.gate.calls_made(&task, 3), Some(3));
+    // The brief the agent was given is untouched.
+    assert_eq!(h.brief.plan.steps.len(), 2);
 }
 
 #[test]
