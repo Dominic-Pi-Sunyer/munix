@@ -1,6 +1,9 @@
 //! The Gate's MCP front: what the agent sees as its tools, and how each call becomes a Gate request.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use munix_core::crypto::{Digest, Purpose, Signed, SigningKey};
 use munix_core::decision::{Decision, Stage, Verdict};
@@ -21,6 +24,49 @@ use serde_json::{Map, Value, json};
 
 use crate::confirm::Confirmer;
 
+/// Progress on one agent instance's MCP channel, read by the watchdog.
+pub struct FrontProgress {
+    last_call: Mutex<Instant>,
+    delivered: AtomicU64,
+}
+
+impl Default for FrontProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrontProgress {
+    pub fn new() -> Self {
+        FrontProgress {
+            last_call: Mutex::new(Instant::now()),
+            delivered: AtomicU64::new(0),
+        }
+    }
+
+    pub fn last_call(&self) -> Instant {
+        *self
+            .last_call
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn delivered(&self) -> u64 {
+        self.delivered.load(Ordering::Relaxed)
+    }
+
+    fn note_call(&self) {
+        *self
+            .last_call
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+
+    fn note_delivered(&self) {
+        self.delivered.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Serves one task's tools to one agent instance.
 pub struct GateFront<'a, C: Confirmer> {
     gate: &'a mut Gate,
@@ -28,6 +74,7 @@ pub struct GateFront<'a, C: Confirmer> {
     brief: TaskBrief,
     confirmer: C,
     reviewer: Option<(Reviewer, PromptEnvelope)>,
+    progress: Option<Arc<FrontProgress>>,
     takeover: Option<DenyCode>,
 }
 
@@ -40,6 +87,7 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
             brief,
             confirmer,
             reviewer: None,
+            progress: None,
             takeover: None,
         }
     }
@@ -51,6 +99,12 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
         prompt: munix_core::prompt::PromptEnvelope,
     ) -> Self {
         self.reviewer = Some((reviewer, prompt));
+        self
+    }
+
+    /// Records tool call timing and delivered step counts for the watchdog.
+    pub fn with_progress(mut self, p: Arc<FrontProgress>) -> Self {
+        self.progress = Some(p);
         self
     }
 
@@ -148,7 +202,12 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
     /// The text for a reply that is not waiting for anyone.
     fn settled(&mut self, reply: Reply) -> CallResult {
         match reply {
-            Reply::Delivered(delivered) => ok(delivered_text(&delivered)),
+            Reply::Delivered(delivered) => {
+                if let Some(p) = &self.progress {
+                    p.note_delivered();
+                }
+                ok(delivered_text(&delivered))
+            }
             Reply::Malformed(violations) => {
                 let codes: Vec<String> = violations.iter().map(|v| code_text(&v.code)).collect();
                 refused(format!("denied: {}", codes.join(", ")))
@@ -263,6 +322,9 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     /// - `Takeover(code)`: `denied: <code>`; records the code so `should_stop` ends the session.
     /// - `Halted`: `denied: task halted`. `Failed(f)`: `tool failed: <f>`.
     fn call(&mut self, name: &str, arguments: &Value) -> CallResult {
+        if let Some(p) = &self.progress {
+            p.note_call();
+        }
         let Some(tool) = self.tool_named(name) else {
             self.takeover = Some(DenyCode::OffPlan);
             return refused(format!("denied: {}", code_text(&DenyCode::OffPlan)));

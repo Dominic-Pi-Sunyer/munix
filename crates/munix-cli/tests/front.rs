@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use munix_adapters::{AdapterError, MockAdapter};
 use munix_cli::confirm::Confirmer;
-use munix_cli::front::GateFront;
+use munix_cli::front::{FrontProgress, GateFront};
 use munix_core::context::Band;
 use munix_core::crypto::{Purpose, Signed, SigningKey};
 use munix_core::decision::Stage;
@@ -932,4 +932,40 @@ fn the_email_budget_is_one() {
     );
     drop(front);
     assert_eq!(h.emails().len(), 1);
+}
+
+#[test]
+fn front_progress_records_call_times_and_delivered_counts() {
+    let mut h = harness();
+    let url_ref = h.brief.refs[0].id.to_string();
+    let script = Script::default();
+    let progress = Arc::new(FrontProgress::new());
+    let initial_time = progress.last_call();
+    assert_eq!(progress.delivered(), 0);
+
+    let mut front = h.front(&script).with_progress(Arc::clone(&progress));
+
+    // A denied / malformed call updates the last call time, but does not bump the delivered count.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    refused(&front.call("web_open", &json!({})), "denied: missing_arg");
+    let after_denied = progress.last_call();
+    assert!(after_denied > initial_time);
+    assert_eq!(progress.delivered(), 0);
+
+    // A delivered call updates the last call time and bumps the delivered count.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let ok_res = front.call("web_open", &json!({"url": url_ref}));
+    assert!(!ok_res.is_error, "{ok_res:?}");
+    let after_delivered = progress.last_call();
+    assert!(after_delivered > after_denied);
+    assert_eq!(progress.delivered(), 1);
+
+    // A user-denied call after reading untrusted content updates the time, not the delivered count.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    refused(
+        &front.call("email_send", &email("Summary")),
+        "denied: user_denied",
+    );
+    assert!(progress.last_call() > after_delivered);
+    assert_eq!(progress.delivered(), 1);
 }

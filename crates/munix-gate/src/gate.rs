@@ -617,6 +617,30 @@ impl Gate {
         Reply::Halted
     }
 
+    /// Halts a running task for a takeover the MCP front saw before any request could be built (a tool name that
+    /// isn't a valid tool name). Writes `takeover` with the code and no request. A task that is not running is left
+    /// as it is. Nothing traces, so the next recovery uses the low-trust fallback.
+    pub fn halt_for_takeover(&mut self, task: &TaskId, code: DenyCode) {
+        let running = self
+            .tasks
+            .get(task)
+            .is_some_and(|t| matches!(t.status, Status::Running));
+        if !running {
+            return;
+        }
+        let _ = self.log(json!({
+            "event": "takeover",
+            "task": task.as_str(),
+            "code": code,
+            "request": null,
+        }));
+        if let Some(t) = self.tasks.get_mut(task) {
+            t.status = Status::Halted;
+            t.pending.clear();
+            t.blocked.clear();
+        }
+    }
+
     /// Starts a fresh agent instance on the same signed plan after a takeover or a watchdog trip.
     ///
     /// - **When:** only for a `Halted` task (else `NotHalted`), at most `MAX_RECOVERIES` times. The next attempt

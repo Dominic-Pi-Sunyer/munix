@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::sync::Arc;
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use munix_adapters::{MetaAdapter, ModelAdapter, Pricing, ReasoningEffort, Role, Usage};
@@ -25,13 +25,16 @@ use munix_core::manifest::{Catalog, ToolManifest};
 use munix_core::plan::Plan;
 use munix_core::prompt::PromptEnvelope;
 use munix_core::validate::Scalar;
-use munix_gate::gate::{Gate, Store, StoreValue};
+use munix_gate::gate::{Gate, QuarantineNote, RecoverError, Store, StoreValue, TripReason};
+use munix_gate::policy::DenyCode;
+use munix_gate::quarantine::Cause;
 use munix_gate::tool::Tool;
 use munix_gate::vault::{Credential, Vault};
 use munix_ledger::Ledger;
 use munix_runtime::gateway::{ApiKey, Gateway, GatewayConfig};
 use munix_runtime::mcp::{ServeEnd, serve};
 use munix_runtime::sandbox::{Sandbox, SandboxSpec};
+use munix_runtime::watchdog::{Limits, Snapshot, SystemClock, Trip, Watchdog};
 use munix_supervisor::planner::Planner;
 use munix_supervisor::reviewer::Reviewer;
 use munix_tools::email::SmtpEmail;
@@ -39,7 +42,7 @@ use munix_tools::site::SiteTemplates;
 use munix_tools::webspeed::{WebSpeedConfig, WebSpeedOpen};
 
 use crate::confirm::TerminalConfirmer;
-use crate::front::{GateFront, code_text};
+use crate::front::{FrontProgress, GateFront, code_text};
 
 const USAGE: &str = "usage: munix run [--plan <plan.yaml>] --prompt <text> [--image <image>] \
                      [--agent-dir <dir>] [--ledger <file>] -- <agent command...>";
@@ -309,9 +312,63 @@ enum Outcome {
     Stopped(String),
 }
 
+/// What to do after one agent instance ends, given any takeover signal from the front and any trip from the
+/// watchdog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextStep {
+    /// The agent finished without a takeover or a trip.
+    Finish,
+    /// The front saw a takeover (`Gate::submit` already halted the task): recover.
+    RecoverFromTakeover,
+    /// The watchdog tripped: call `Gate::trip` with this reason, then recover.
+    TripAndRecover(TripReason),
+}
+
+fn trip_reason(trip: Trip) -> TripReason {
+    match trip {
+        Trip::Liveness => TripReason::Liveness,
+        Trip::Deadline => TripReason::Deadline,
+        Trip::SpinBudget => TripReason::SpinBudget,
+    }
+}
+
+/// Decides what to do after one agent instance ends. A takeover recorded by the front takes precedence over a
+/// watchdog trip because the Gate has already halted the task with the blocked values.
+fn decide_after_instance(takeover: Option<DenyCode>, trip: Option<Trip>) -> NextStep {
+    if takeover.is_some() {
+        NextStep::RecoverFromTakeover
+    } else if let Some(t) = trip {
+        NextStep::TripAndRecover(trip_reason(t))
+    } else {
+        NextStep::Finish
+    }
+}
+
+/// Words one quarantine note for the summary line, never including the item's text.
+fn format_quarantine_note(note: &QuarantineNote) -> String {
+    let where_it_was = match note.index {
+        Some(idx) => format!("step {} {}[{idx}]", note.step, note.field),
+        None => format!("step {} {}", note.step, note.field),
+    };
+    let why = match note.cause {
+        Cause::TracedValue => "contained the destination of a blocked request",
+        Cause::LowTrustFallback => "low-trust content read before a stall or off-plan call",
+    };
+    format!(
+        "withheld: {where_it_was} ({}, trust {}): {why}",
+        code_text(&note.region),
+        note.trust.value()
+    )
+}
+
+/// Container and network base name for one agent instance of `task`.
+fn instance_sandbox_name(task: &TaskId, instance: u32) -> String {
+    format!("{}-{instance}", task.as_str().to_lowercase())
+}
+
 /// Parses `args` (without the program name or the `run` word handled here) and runs. Exit codes: 0 when the agent
-/// finished, 1 on a takeover or a failure, 2 on bad usage or config. Errors are one line on stderr and never
-/// contain the API key.
+/// finished, 1 on a unrecovered takeover, paused recovery limit, or failure, 2 on bad usage or config. Errors are
+/// one line on stderr and never contain the API key.
 ///
 /// Steps:
 /// 1. `run` as the first argument, then the flags above; `--` starts the agent command. Defaults: image
@@ -320,7 +377,7 @@ enum Outcome {
 ///    win). Require `MODEL_API_KEY`. Also read `MUNIX_WORKER_MODEL` (default `muse-spark-1.3`), `MUNIX_WORKER_EFFORT`,
 ///    `MUNIX_SUPERVISOR_MODEL` (default `muse-spark-1.3`), `MUNIX_BOSS_EMAIL` (default `boss@corp.example`),
 ///    `MUNIX_HOST_GATEWAY` (default `192.168.5.2`, Colima), `WEBSPEED_OSS_DIR` (default `../web-speed-oss`),
-///    `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`.
+///    `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`, `MUNIX_LIVENESS_SECS`, `MUNIX_DEADLINE_SECS`.
 /// 3. A fresh 32-byte signing key from `/dev/urandom`. Random hex ids: task `T-<8>`, session `S-<8>`, plan `P-<8>`,
 ///    nonce 32 hex characters.
 /// 4. The catalog from `manifests/*.yaml`, the site templates from `sites/`, the tools (`web.open` through Web
@@ -334,15 +391,22 @@ enum Outcome {
 ///    internal).
 /// 6. Start the model gateway on `127.0.0.1:0` for upstream `https://api.meta.ai/v1`, allowing only the worker
 ///    model, with a 120 s timeout.
-/// 7. Launch the sandbox: name from the task id (lowercase), the image, the agent dir (absolute), the command,
-///    env `MUNIX_WORKER_MODEL`, `MUNIX_WORKER_EFFORT` (if set), `MUNIX_BOSS_EMAIL`, the host gateway, the gateway's
-///    port, and this crate's sibling `munix-runtime/relay/relay.py` and `munix-runtime/shim/munix_shim.py` (found
-///    from `CARGO_MANIFEST_DIR` at build time).
-/// 8. `munix_runtime::mcp::serve` on the agent's stdout and stdin with a `GateFront` (with the `Reviewer` attached)
-///    and `TerminalConfirmer`.
-/// 9. When it ends, kill the sandbox and print a summary to stderr: the outcome (finished, or the takeover code),
-///    the context trust, the ledger path and entry count, and the gateway's token usage with an estimated cost
-///    (`munix_adapters::Pricing::from_env`).
+/// 7. Loop over agent instances (1, 2, ...):
+///    - Launch a fresh sandbox named `<task>-<instance>` (lowercase) with the image, the agent dir (absolute), the
+///      command, env `MUNIX_WORKER_MODEL`, `MUNIX_WORKER_EFFORT` (if set), `MUNIX_BOSS_EMAIL`, the host gateway,
+///      the gateway's port, and this crate's sibling `munix-runtime/relay/relay.py` and
+///      `munix-runtime/shim/munix_shim.py`.
+///    - Start a `Watchdog` polling the gateway's usage and activity together with the `GateFront`'s `FrontProgress`
+///      (killing the agent container if a limit trips), and run `munix_runtime::mcp::serve` on the agent's stdout
+///      and stdin with a fresh `GateFront` (with the current `TaskBrief`, `Reviewer`, and `FrontProgress`) and
+///      `TerminalConfirmer`.
+///    - After `serve` returns, stop the watchdog and kill the sandbox. On a takeover or watchdog trip, call
+///      `Gate::trip` (when tripped) and `Gate::recover`: if recovered, print `munix: recovering (attempt N):
+///      withheld K item(s)` and continue the loop with the recovery's brief; if `LimitReached`, print `munix:
+///      paused: the task used its recoveries; the user must decide` and exit 1. Otherwise the agent finished and the
+///      loop ends.
+/// 8. Print a summary to stderr: the outcome, the context trust, any quarantined items (`gate.quarantined`, without
+///    item text), the ledger path and entry count, and the gateway's token usage with an estimated cost.
 pub fn main(args: Vec<String>) -> ExitCode {
     match run(&args) {
         Ok(Outcome::Finished) => ExitCode::SUCCESS,
@@ -396,6 +460,28 @@ fn pricing_from(env: &Env) -> Result<Pricing, Failure> {
     })
 }
 
+/// Watchdog limits from `watchdog::Limits::default()`, with `MUNIX_LIVENESS_SECS` and `MUNIX_DEADLINE_SECS`
+/// overriding the two durations when set in the environment or `.env`.
+fn limits_from(env: &Env) -> Result<Limits, Failure> {
+    let secs = |key: &str, default: Duration| -> Result<Duration, Failure> {
+        match env.get(key) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<u64>()
+                .ok()
+                .filter(|s| *s > 0)
+                .map(Duration::from_secs)
+                .ok_or_else(|| Failure::config(format!("{key} must be a positive integer"))),
+        }
+    };
+    let defaults = Limits::default();
+    Ok(Limits {
+        liveness: secs("MUNIX_LIVENESS_SECS", defaults.liveness)?,
+        deadline: secs("MUNIX_DEADLINE_SECS", defaults.deadline)?,
+        ..defaults
+    })
+}
+
 fn run(args: &[String]) -> Result<Outcome, Failure> {
     let opts = parse_args(args)?;
     let env = Env::load(Path::new(".env"))?;
@@ -408,6 +494,7 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let boss_email = env.get_or("MUNIX_BOSS_EMAIL", DEFAULT_BOSS);
     let host_gateway = env.get_or("MUNIX_HOST_GATEWAY", DEFAULT_HOST_GATEWAY);
     let pricing = pricing_from(&env)?;
+    let limits = limits_from(&env)?;
 
     // Identity: a fresh signing key and random ids for this run.
     let key =
@@ -470,7 +557,6 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         }
     };
     let reviewer_adapter = supervisor_adapter(&env, &supervisor_model, Role::Reviewer, &api_key)?;
-    let reviewer = Reviewer::new(reviewer_adapter, key.clone());
     let prompt = Signed::sign(&key, Purpose::Prompt, envelope.clone()).map_err(sign_failed)?;
     let store: Store = BTreeMap::from([(
         "contacts".to_owned(),
@@ -483,21 +569,23 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             },
         )]),
     )]);
-    let brief = gate
+    let mut brief = gate
         .start_task(&prompt, &plan, &store)
         .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
 
     // The model gateway: the only holder of the API key.
-    let gateway = Gateway::start(GatewayConfig {
-        upstream: UPSTREAM.to_owned(),
-        api_key: ApiKey::new(api_key),
-        models: BTreeSet::from([worker_model.clone()]),
-        bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-        timeout: GATEWAY_TIMEOUT,
-    })
-    .map_err(|e| Failure::failed(format!("cannot start the model gateway: {e}")))?;
+    let gateway = Arc::new(
+        Gateway::start(GatewayConfig {
+            upstream: UPSTREAM.to_owned(),
+            api_key: ApiKey::new(api_key),
+            models: BTreeSet::from([worker_model.clone()]),
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            timeout: GATEWAY_TIMEOUT,
+        })
+        .map_err(|e| Failure::failed(format!("cannot start the model gateway: {e}")))?,
+    );
 
-    // The sandbox.
+    // Sandbox configuration shared across instances.
     let agent_dir = std::path::absolute(&opts.agent_dir)
         .ok()
         .filter(|dir| dir.is_dir())
@@ -518,54 +606,138 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     if let Some(effort) = worker_effort {
         sandbox_env.insert("MUNIX_WORKER_EFFORT".to_owned(), effort);
     }
-    let spec = SandboxSpec {
-        name: task.as_str().to_lowercase(),
-        image: opts.image.clone(),
-        agent_dir,
-        command: opts.command.clone(),
-        env: sandbox_env,
-        host_gateway,
-        gateway_port: gateway.addr().port(),
-        relay_script: runtime_dir.join("relay").join("relay.py"),
-        shim_script: runtime_dir.join("shim").join("munix_shim.py"),
-    };
     eprintln!(
         "munix: task {task}, ledger {}, starting the sandbox",
         ledger_path.display()
     );
-    let mut sandbox = Sandbox::launch(spec)
-        .map_err(|e| Failure::failed(format!("cannot start the sandbox: {e}")))?;
-    let channel = (sandbox.child.stdout.take(), sandbox.child.stdin.take());
-    let (Some(stdout), Some(mut stdin)) = channel else {
-        let _ = sandbox.kill();
-        return Err(Failure::failed("the sandbox has no stdio to serve"));
-    };
 
-    // The agent's MCP channel, served by the Gate.
-    let mut reader = BufReader::new(stdout);
-    let mut front =
-        GateFront::new(&mut gate, &key, brief, TerminalConfirmer).with_reviewer(reviewer, envelope);
-    let ended = serve(&mut reader, &mut stdin, &mut front);
-    let takeover = front.takeover();
-    drop(front);
-    drop(stdin);
-    drop(reader);
-    let killed = sandbox.kill();
+    let mut instance_num: u32 = 0;
+    let (ended, killed, outcome) = loop {
+        instance_num = instance_num.saturating_add(1);
+        let spec = SandboxSpec {
+            name: instance_sandbox_name(&task, instance_num),
+            image: opts.image.clone(),
+            agent_dir: agent_dir.clone(),
+            command: opts.command.clone(),
+            env: sandbox_env.clone(),
+            host_gateway: host_gateway.clone(),
+            gateway_port: gateway.addr().port(),
+            relay_script: runtime_dir.join("relay").join("relay.py"),
+            shim_script: runtime_dir.join("shim").join("munix_shim.py"),
+        };
+        let container_name = spec.network();
+        let mut sandbox = Sandbox::launch(spec)
+            .map_err(|e| Failure::failed(format!("cannot start the sandbox: {e}")))?;
+        let channel = (sandbox.child.stdout.take(), sandbox.child.stdin.take());
+        let (Some(stdout), Some(mut stdin)) = channel else {
+            let _ = sandbox.kill();
+            return Err(Failure::failed("the sandbox has no stdio to serve"));
+        };
+
+        let progress = Arc::new(FrontProgress::new());
+        let progress_for_watchdog = Arc::clone(&progress);
+        let gateway_for_watchdog = Arc::clone(&gateway);
+        let tripped: Arc<Mutex<Option<Trip>>> = Arc::new(Mutex::new(None));
+        let tripped_slot = Arc::clone(&tripped);
+        let watchdog = Watchdog::start(
+            limits,
+            Duration::from_secs(1),
+            Arc::new(SystemClock),
+            Arc::new(move || {
+                let usage = gateway_for_watchdog.usage();
+                let gw_last = gateway_for_watchdog.last_activity();
+                let front_last = progress_for_watchdog.last_call();
+                Snapshot {
+                    last_activity: gw_last.max(front_last),
+                    model_calls: usage.calls,
+                    model_tokens: usage.prompt_tokens.saturating_add(usage.completion_tokens),
+                    steps_completed: progress_for_watchdog.delivered(),
+                }
+            }),
+            Box::new(move |trip| {
+                *tripped_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(trip);
+                let _ = Command::new("docker")
+                    .args(["kill", &container_name])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }),
+        );
+
+        let reviewer = Reviewer::new(Arc::clone(&reviewer_adapter), key.clone());
+        let mut reader = BufReader::new(stdout);
+        let mut front = GateFront::new(&mut gate, &key, brief.clone(), TerminalConfirmer)
+            .with_reviewer(reviewer, envelope.clone())
+            .with_progress(progress);
+        let ended = serve(&mut reader, &mut stdin, &mut front);
+        let takeover = front.takeover();
+        drop(front);
+        drop(stdin);
+        drop(reader);
+        watchdog.stop();
+        let killed = sandbox.kill();
+        let trip = *tripped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        match decide_after_instance(takeover, trip) {
+            NextStep::Finish => {
+                let outcome = match &ended {
+                    Ok(ServeEnd::Closed) => Outcome::Finished,
+                    Ok(ServeEnd::Stopped) => Outcome::Stopped("stopped by the Gate".to_owned()),
+                    Err(_) => Outcome::Stopped("the agent's channel failed".to_owned()),
+                };
+                break (ended, killed, outcome);
+            }
+            NextStep::RecoverFromTakeover => {
+                // A takeover the front saw before it could build a request leaves the task running; halt it so
+                // recovery can start. Already halted (the usual case): no change.
+                if let Some(code) = takeover {
+                    gate.halt_for_takeover(&task, code);
+                }
+            }
+            NextStep::TripAndRecover(reason) => {
+                let _ = gate.trip(&task, reason);
+            }
+        }
+
+        if let Err(e) = killed {
+            return Err(Failure::failed(format!(
+                "could not remove the sandbox: {e}"
+            )));
+        }
+        match gate.recover(&task) {
+            Ok(recovery) => {
+                eprintln!(
+                    "munix: recovering (attempt {}): withheld {} item(s)",
+                    recovery.attempt,
+                    recovery.quarantined.len()
+                );
+                brief = recovery.brief;
+            }
+            Err(RecoverError::LimitReached) => {
+                return Err(Failure::failed(
+                    "paused: the task used its recoveries; the user must decide",
+                ));
+            }
+            Err(e) => {
+                return Err(Failure::failed(format!("cannot recover: {e}")));
+            }
+        }
+    };
 
     // The summary.
     let trust = gate.context_trust(&task);
+    let quarantined = gate.quarantined(&task);
     drop(gate);
     let usage = gateway.usage();
     let tokens = Usage {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         reasoning_tokens: usage.reasoning_tokens,
-    };
-    let outcome = match (&ended, takeover) {
-        (_, Some(code)) => Outcome::Stopped(format!("takeover ({})", code_text(&code))),
-        (Ok(ServeEnd::Closed), None) => Outcome::Finished,
-        (Ok(ServeEnd::Stopped), None) => Outcome::Stopped("stopped by the Gate".to_owned()),
-        (Err(_), None) => Outcome::Stopped("the agent's channel failed".to_owned()),
     };
     let result = match &outcome {
         Outcome::Finished => "finished".to_owned(),
@@ -575,6 +747,9 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     match trust {
         Some(trust) => eprintln!("munix: context trust {}", trust.value()),
         None => eprintln!("munix: context trust unknown"),
+    }
+    for note in &quarantined {
+        eprintln!("munix: {}", format_quarantine_note(note));
     }
     match munix_ledger::verify_file(&ledger_path) {
         Ok(entries) => eprintln!(
@@ -828,5 +1003,110 @@ mod tests {
         assert!(catalog.get_str("web.open").is_some());
         assert!(catalog.get_str("email.send").is_some());
         assert!(load_catalog(Path::new("/no/such/dir")).is_err());
+    }
+
+    #[test]
+    fn decide_after_instance_handles_takeover_trip_and_clean_finish() {
+        assert_eq!(decide_after_instance(None, None), NextStep::Finish);
+        assert_eq!(
+            decide_after_instance(Some(DenyCode::UntrustedDestination), None),
+            NextStep::RecoverFromTakeover
+        );
+        assert_eq!(
+            decide_after_instance(None, Some(Trip::Liveness)),
+            NextStep::TripAndRecover(TripReason::Liveness)
+        );
+        assert_eq!(
+            decide_after_instance(None, Some(Trip::Deadline)),
+            NextStep::TripAndRecover(TripReason::Deadline)
+        );
+        assert_eq!(
+            decide_after_instance(None, Some(Trip::SpinBudget)),
+            NextStep::TripAndRecover(TripReason::SpinBudget)
+        );
+        // If both happened (e.g. a trip raced with a takeover), the takeover already halted the task.
+        assert_eq!(
+            decide_after_instance(Some(DenyCode::OffPlan), Some(Trip::Liveness)),
+            NextStep::RecoverFromTakeover
+        );
+    }
+
+    #[test]
+    fn quarantine_notes_are_worded_without_item_text() {
+        use munix_core::label::{RegionType, Trust};
+
+        let traced = QuarantineNote {
+            step: 1,
+            field: "reviews".to_owned(),
+            index: Some(1),
+            region: RegionType::UgcReview,
+            trust: Trust::new(15),
+            cause: Cause::TracedValue,
+            hash: Digest::of_bytes(b"SECRET-INJECTION-TEXT"),
+        };
+        let line = format_quarantine_note(&traced);
+        assert_eq!(
+            line,
+            "withheld: step 1 reviews[1] (ugc_review, trust 15): contained the destination of a blocked request"
+        );
+        assert!(!line.contains("SECRET"));
+
+        let fallback = QuarantineNote {
+            step: 2,
+            field: "page".to_owned(),
+            index: None,
+            region: RegionType::Unclassified,
+            trust: Trust::new(10),
+            cause: Cause::LowTrustFallback,
+            hash: Digest::of_bytes(b"OTHER-INJECTION-TEXT"),
+        };
+        let line = format_quarantine_note(&fallback);
+        assert_eq!(
+            line,
+            "withheld: step 2 page (unclassified, trust 10): low-trust content read before a stall or off-plan call"
+        );
+        assert!(!line.contains("OTHER"));
+    }
+
+    #[test]
+    fn instance_sandbox_names_include_task_and_instance_number() {
+        let task: TaskId = "T-0a1b2c3d".parse().unwrap();
+        assert_eq!(instance_sandbox_name(&task, 1), "t-0a1b2c3d-1");
+        assert_eq!(instance_sandbox_name(&task, 2), "t-0a1b2c3d-2");
+    }
+
+    #[test]
+    fn watchdog_limits_default_and_override_from_env() {
+        let defaults = Limits::default();
+        let empty = Env {
+            file: BTreeMap::new(),
+            process: |_| None,
+        };
+        assert_eq!(limits_from(&empty).unwrap(), defaults);
+
+        let custom = Env {
+            file: parse_dotenv("MUNIX_LIVENESS_SECS=15\nMUNIX_DEADLINE_SECS=120\n"),
+            process: |_| None,
+        };
+        assert_eq!(
+            limits_from(&custom).unwrap(),
+            Limits {
+                liveness: Duration::from_secs(15),
+                deadline: Duration::from_secs(120),
+                ..defaults
+            }
+        );
+
+        for bad_var in [
+            "MUNIX_LIVENESS_SECS=0",
+            "MUNIX_LIVENESS_SECS=abc",
+            "MUNIX_DEADLINE_SECS=0",
+        ] {
+            let bad = Env {
+                file: parse_dotenv(bad_var),
+                process: |_| None,
+            };
+            assert!(limits_from(&bad).is_err(), "{bad_var}");
+        }
     }
 }

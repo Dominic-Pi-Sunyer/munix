@@ -2250,3 +2250,22 @@ fn recovery_after_body_embeds_low_trust_page_link_ref_quarantines_that_item_by_t
     assert_eq!(remaining_links.len(), 1);
     assert_ledger_clean(&h);
 }
+
+#[test]
+fn halt_for_takeover_lets_a_front_detected_takeover_recover() {
+    let mut h = harness();
+    h.start();
+    // Running: halts, and recovery can start (nothing traced, so only the fallback applies).
+    h.gate.halt_for_takeover(&task_id(), DenyCode::OffPlan);
+    assert_eq!(
+        h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
+        Reply::Halted
+    );
+    let recovery = h.gate.recover(&task_id()).unwrap();
+    assert_eq!(recovery.attempt, 1);
+    // A recovered, running task is halted again only by a new takeover; a halted one is left alone.
+    h.gate.halt_for_takeover(&task_id(), DenyCode::OffPlan);
+    h.gate.halt_for_takeover(&task_id(), DenyCode::OffPlan);
+    assert_eq!(h.gate.recover(&task_id()).unwrap().attempt, 2);
+    assert!(h.events().contains(&"takeover".to_owned()));
+}
