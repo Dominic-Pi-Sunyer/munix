@@ -167,6 +167,8 @@ struct Task {
     plan: Plan,
     /// How many steps the signed plan had. Steps after these are amendments.
     planned_steps: usize,
+    /// Digest of the signed plan, as written in `task_started`; the `amended` event repeats it.
+    plan_digest: Digest,
     /// Names of the operator stores this task holds refs for (what an amended step may take values from).
     store_names: BTreeSet<String>,
     brief_refs: Vec<BriefRef>,
@@ -301,6 +303,12 @@ impl Gate {
             "new": tamper.new,
             "tasks": tasks,
         }));
+    }
+
+    /// How many steps the task's signed plan had; steps after these were added by automatic amendment.
+    /// `None` for an unknown task.
+    pub fn signed_steps(&self, task: &TaskId) -> Option<usize> {
+        self.tasks.get(task).map(|t| t.planned_steps)
     }
 
     /// The first tamper recorded on this Gate, if any.
@@ -455,6 +463,7 @@ impl Gate {
             Task {
                 plan: body.clone(),
                 planned_steps: body.steps.len(),
+                plan_digest: plan_digest.clone(),
                 store_names,
                 brief_refs,
                 instance: Instance {
@@ -555,7 +564,7 @@ impl Gate {
         }
         // A well-formed call to a catalog tool that no step covers: low tiers are amended in automatically
         // (design spec 7.4); everything else falls through to the plan check, which takes it over as off plan.
-        let amended = match self.try_amend(request, &manifest) {
+        let amended = match self.try_amend(request, &manifest, &hash) {
             Ok(amended) => amended,
             Err(reply) => return reply,
         };
@@ -601,14 +610,18 @@ impl Gate {
     /// Anything else is `Ok(None)` and the request is ruled on as it stands (off plan).
     ///
     /// The step goes into the Gate's own copy of the plan only (the signed plan is untouched), after an `amended`
-    /// ledger entry (a failed write is `Failed(Internal)` and changes nothing). Its rules are the tightest a
-    /// planned step could have: destination and selector arguments may come from the prompt, user data and the
-    /// stores the task holds, never from a step's output; content arguments of an egress tool get `dlp: no_secret`
-    /// and no `may_embed`. Returns the request re-aimed at the new step.
+    /// ledger entry (a failed write is `Failed(Internal)` and changes nothing). The entry carries the original
+    /// request's hash (`request_hash`, the one the preceding `request` event logged), the rewritten request's hash
+    /// (`amended_request_hash`, the one the `ruling` and `executed` events use) and the signed plan's digest
+    /// (`plan_digest`), so an auditor can follow `request` -> `amended` -> `ruling`. The step's rules are fixed, not
+    /// planned: destination and selector arguments may come from the prompt, user data and the stores the task
+    /// holds, never from a step's output; content arguments of an egress tool get `dlp: no_private` (stricter than
+    /// `no_secret`, looser than `public_only`) and no `may_embed`. Returns the request re-aimed at the new step.
     fn try_amend(
         &mut self,
         request: &Request,
         manifest: &ToolManifest,
+        original_hash: &Digest,
     ) -> Result<Option<Request>, Reply> {
         let Some(task) = self.tasks.get(&request.task) else {
             return Err(Reply::Halted);
@@ -647,7 +660,7 @@ impl Gate {
                     ..ArgRule::default()
                 },
                 ArgRole::Content if manifest.egress => ArgRule {
-                    dlp: Some(Dlp::NoSecret),
+                    dlp: Some(Dlp::NoPrivate),
                     ..ArgRule::default()
                 },
                 ArgRole::Content | ArgRole::Control => continue,
@@ -665,9 +678,19 @@ impl Gate {
         if candidate.validate(&self.catalog).is_err() {
             return Ok(None);
         }
+        let plan_digest = task.plan_digest.clone();
+        let Ok(amended_request_hash) = crypto::digest(&Request {
+            step: id,
+            ..request.clone()
+        }) else {
+            return Err(Reply::Failed(ToolFailure::Internal));
+        };
         let logged = self.log(json!({
             "event": "amended",
             "task": request.task.as_str(),
+            "request_hash": original_hash.as_str(),
+            "amended_request_hash": amended_request_hash.as_str(),
+            "plan_digest": plan_digest.as_str(),
             "step": id,
             "tool": request.tool.as_str(),
             "tier": manifest.tier,

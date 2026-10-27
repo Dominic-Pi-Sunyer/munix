@@ -7,3 +7,4 @@ pub mod dashboard;
 pub mod front;
 pub mod ledger;
 pub mod run;
+pub mod term;

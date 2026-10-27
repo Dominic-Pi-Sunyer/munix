@@ -44,6 +44,7 @@ use munix_tools::webspeed::{WebSpeedConfig, WebSpeedOpen};
 
 use crate::confirm::TerminalConfirmer;
 use crate::front::{FrontProgress, GateFront, code_text};
+use crate::term::terminal_safe;
 
 const USAGE: &str = "usage: munix run [--plan <plan.yaml>] --prompt <text> [--image <image>] \
                      [--agent-dir <dir>] [--ledger <file>] -- <agent command...>";
@@ -433,7 +434,7 @@ pub fn main(args: Vec<String>) -> ExitCode {
         Ok(Outcome::Finished) => ExitCode::SUCCESS,
         Ok(Outcome::Stopped(_)) => ExitCode::from(1),
         Err(failure) => {
-            eprintln!("munix: {}", failure.message);
+            eprintln!("munix: {}", terminal_safe(&failure.message));
             ExitCode::from(failure.code)
         }
     }
@@ -540,7 +541,7 @@ fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path) -> Vec<Root> {
 fn tamper_message(tamper: &Tamper) -> String {
     format!(
         "Munix's own files changed during the task ({}); every task was stopped and nothing resumes. Start a new run",
-        tamper.path
+        terminal_safe(&tamper.path)
     )
 }
 
@@ -704,7 +705,7 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             Box::new(move |tamper| {
                 eprintln!(
                     "munix: TAMPER: {} changed; stopping every task",
-                    tamper.path
+                    terminal_safe(&tamper.path)
                 );
                 *slot
                     .lock()
@@ -891,7 +892,7 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         Outcome::Finished => "finished".to_owned(),
         Outcome::Stopped(why) => format!("stopped: {why}"),
     };
-    eprintln!("munix: {result}");
+    eprintln!("munix: {}", terminal_safe(&result));
     match trust {
         Some(trust) => eprintln!("munix: context trust {}", trust.value()),
         None => eprintln!("munix: context trust unknown"),

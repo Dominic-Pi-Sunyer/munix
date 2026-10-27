@@ -285,11 +285,21 @@ impl Catalog {
         Catalog::default()
     }
 
-    /// Adds a validated manifest. A second manifest for the same tool is an error.
+    /// Adds a validated manifest. A second manifest for the same tool is an error, and so is one whose MCP name
+    /// (the tool name with `.` replaced by `_`, which is what the agent calls it by) equals another tool's: the
+    /// agent could not tell the two apart.
     pub fn insert(&mut self, manifest: ToolManifest) -> Result<()> {
         manifest.validate()?;
         if self.tools.contains_key(&manifest.tool) {
             return Err(invalid("duplicate tool in catalog"));
+        }
+        let mcp = manifest.tool.as_str().replace('.', "_");
+        if self
+            .tools
+            .keys()
+            .any(|other| other.as_str().replace('.', "_") == mcp)
+        {
+            return Err(invalid("tool names collide in catalog"));
         }
         self.tools.insert(manifest.tool.clone(), manifest);
         Ok(())
@@ -656,6 +666,26 @@ output:
         bad.tier = 9;
         assert!(cat.insert(bad).is_err(), "invalid manifest");
         assert_eq!(cat.iter().count(), 1);
+    }
+
+    #[test]
+    fn tools_with_the_same_mcp_name_cannot_share_a_catalog() {
+        let tool = |name: &str| {
+            ToolManifest::from_yaml(&format!(
+                "tool: {name}\ndescription: A read.\ntier: 0\noutput:\n  value: {{type: int, region: user_content, confidential: public}}\n"
+            ))
+            .unwrap()
+        };
+        // `a.b_c` and `a_b.c` are both `a_b_c` to the agent; so are `web.open` and `web_open`.
+        for (first, second) in [("a.b_c", "a_b.c"), ("web.open", "web_open")] {
+            let mut cat = Catalog::new();
+            cat.insert(tool(first)).unwrap();
+            assert!(cat.insert(tool(second)).is_err(), "{first} / {second}");
+            assert_eq!(cat.len(), 1);
+            assert!(Catalog::from_manifests([tool(second), tool(first)]).is_err());
+        }
+        // Different MCP names are fine.
+        assert!(Catalog::from_manifests([tool("web.open"), tool("web.read")]).is_ok());
     }
 }
 
