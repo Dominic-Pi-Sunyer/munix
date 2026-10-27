@@ -8,25 +8,15 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
-- **In progress: the utility fixes (owner asked: typed Readers, and off-plan reads that don't halt; then re-run the
-  utility phase in both modes, capped at $1.50).**
-  - **Done, offline, on main:**
-    - **Per-field capacity rule.** `OutputSpec::delivered_bits` and `Delivered::context_floor`: typed fields below
-      the Clean band are spared from lowering context trust while what they carried in the call fits 64 bits. A
-      field shown as refs counts ceil(log2 k) bits per element for k distinct values.
-    - **Off-plan reads.** An off-plan read (tier 0, no egress) is `Denied(OffPlan)`, not a takeover. The task pauses
-      after 3 such denials.
-    - **Separate read cap.** Read amendments have their own cap, `MAX_READ_AMENDMENTS` = 8.
-  - **Left:**
-    1. **Banking Readers** in `munix-readers` (a new `banking.rs`), wired in the bridge around the remote tools.
-       - `get_most_recent_transactions`: `their_subjects` becomes `their_subject_kinds` (an enum[]) and
-         `their_subject_flags` (a bool[]).
-       - `read_file`: `content` becomes `kind` (an enum), `amount` (a number with a max, on the 0.1 grid) and
-         `flagged_instructions` (a bool).
-       - No strings come back. With no Reader model (oracle / `--no-reviewer`), the raw field is withheld.
-       - Update the manifests, the `convert.py` mapping and `test_munix`.
-    2. The security review of the capacity rule.
-    3. The paid re-run of utility (needs `credit.py` state, which is set).
+- **Utility fixes: done (Oct 27 evening), $1.26 for the utility re-run.** Write-up: the "After the utility
+  fixes" section of `docs/redteam/agentdojo.md`.
+  - **Utility, no attack:** no human 7/16 → 9/16; simulated user 8/16 → 10/16; offline audit 9/16 → 12/16.
+  - **Built:**
+    - `munix-readers::banking`: strangers' subjects become kinds and flags; files become a kind, `amount_cents`,
+      `amount_meaning` and a flag. No strings come back.
+    - The per-field capacity rule in ingest.
+    - Off-plan reads are denied, not halted, and read amendments have their own cap of 8.
+  - **Not yet measured:** `amount_meaning` (aimed at UT2 and UT12), and the attack phase with the new code.
 - **Full banking run under Munix, both modes: done, $13.06.** Write-up: `docs/redteam/agentdojo.md`.
   - **ASR:** 0/144 for bare, 0/144 with no human, 0/144 with the simulated user.
   - **Utility under attack:** bare 81.9%, no human 43.8%, simulated user 57.6%.

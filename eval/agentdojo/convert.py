@@ -20,7 +20,7 @@ BENCHMARK_VERSION = "v1.2.2"
 # tool -> (the raw field `to_fields` returns, its region, the typed fields the Reader puts in its place).
 READER_FIELDS = {
     "get_most_recent_transactions": ("their_subjects", "ugc_comment", {"their_subject_kinds", "their_subject_flags"}),
-    "read_file": ("content", "unclassified", {"kind", "amount_cents", "flagged_instructions"}),
+    "read_file": ("content", "unclassified", {"kind", "amount_cents", "amount_meaning", "flagged_instructions"}),
 }
 
 
