@@ -61,10 +61,11 @@ class PlanTest(unittest.TestCase):
     def test_iban_from_the_transaction_history_comes_from_the_step_that_listed_it(self):
         plan, traces, _ = plan_for("user_task_15")
         send = step(plan, "send_money")
-        # GB29... is not in the prompt; the history lists it as a counterparty AND as someone the user paid. The
-        # plan names the more trustworthy field (payees, bank records), with min_trust 60.
+        # GB29... is not in the prompt; the history lists it as someone the user paid (paid_to) AND as the sender of
+        # an incoming payment (paid_by). The plan names the more trustworthy field (paid_to, bank records), with
+        # min_trust 60.
         self.assertEqual(send["id"], 5)
-        self.assertEqual(send["args"]["recipient"], {"from": ["step.4.payees"], "min_trust": 60})
+        self.assertEqual(send["args"]["recipient"], {"from": ["step.4.paid_to"], "min_trust": 60})
         self.assertEqual(
             send["args"]["subject"]["may_embed"],
             {"from": ["prompt", "step.1", "step.2", "step.3", "step.4"], "min_trust": 60},
@@ -73,7 +74,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(update["args"]["id"], {"from": ["step.2.ids"], "min_trust": 60})  # a selector
         self.assertEqual(update["args"]["recipient"], {"from": ["prompt"]})
         source = traces[4]["args"]["recipient"][0]
-        self.assertEqual((source["step"], source["field"]), (4, "payees"))
+        self.assertEqual((source["step"], source["field"]), (4, "paid_to"))
         self.assertNotIn("untraceable", source)
 
     def test_a_value_only_in_a_file_comes_from_the_files_text(self):
@@ -92,7 +93,7 @@ class PlanTest(unittest.TestCase):
             ("send_money", {"recipient": "CH9300762011623852957", "amount": 1.0, "subject": "x", "date": "2022-01-01"}),
             ("get_most_recent_transactions", {}),
         ]
-        outputs = [None, {"payees": ["CH9300762011623852957"], "counterparties": ["CH9300762011623852957"]}]
+        outputs = [None, {"paid_to": ["CH9300762011623852957"], "paid_by": ["CH9300762011623852957"]}]
         plan, traces = oracle.build_plan("Pay.", calls, outputs)
         self.assertTrue(traces[0]["args"]["recipient"][0]["untraceable"])
         self.assertEqual([s["id"] for s in plan["steps"]], [1, 2])
@@ -123,11 +124,43 @@ class PlanTest(unittest.TestCase):
         plan, _, _ = plan_for("user_task_13")
         self.assertEqual(step(plan, "update_user_info")["args"], {})
 
-    def test_reads_are_every_region_the_manifests_use(self):
-        plan, _, _ = plan_for("user_task_1")
+    def test_all_reads_is_every_region_the_manifests_use(self):
+        task = SUITE.user_tasks["user_task_1"]
+        sim = oracle.simulate(SUITE, task)
+        plan, _ = oracle.build_plan(task.PROMPT, sim.calls, sim.outputs, all_reads=True)
         regions = {spec["region"] for doc in convert.MANIFESTS.values() for spec in doc["output"].values()}
         self.assertEqual(set(plan["reads"]), regions)
         self.assertIn("ugc_comment", plan["reads"])
+        self.assertIn("unclassified", plan["reads"])
+
+    def test_least_reads_of_a_task_using_only_payee_ibans_excludes_third_party_text(self):
+        # UT15 sends money to an IBAN the history lists as paid_to (bank records): nothing third-party is needed.
+        plan, _, _ = plan_for("user_task_15")
+        self.assertEqual(plan["reads"], ["operator_content", "user_content"])
+        for task_id in ("user_task_1", "user_task_3", "user_task_7"):  # read the history, use prompt values
+            with self.subTest(task=task_id):
+                plan, _, _ = plan_for(task_id)
+                self.assertNotIn("ugc_comment", plan["reads"])
+                self.assertNotIn("unclassified", plan["reads"])
+
+    def test_least_reads_of_a_task_that_reads_a_file_includes_unclassified(self):
+        for task_id in ("user_task_0", "user_task_13"):  # UT13 reads a file but takes no value from it
+            with self.subTest(task=task_id):
+                plan, _, _ = plan_for(task_id)
+                self.assertEqual(plan["reads"], ["operator_content", "unclassified", "user_content"])
+                self.assertNotIn("ugc_comment", plan["reads"])
+
+    def test_a_value_sourced_from_third_party_text_adds_its_region(self):
+        # The only copy of the IBAN is the sender of an incoming payment (paid_by, ugc_comment).
+        calls = [
+            ("get_most_recent_transactions", {}),
+            ("send_money", {"recipient": "GB11ONLYSENDER000000001", "amount": 1.0, "subject": "x", "date": "2022-01-01"}),
+        ]
+        outputs = [{"paid_by": ["GB11ONLYSENDER000000001"], "paid_to": ["DE89370400440532013000"]}, None]
+        plan, traces = oracle.build_plan("Pay back the last sender.", calls, outputs)
+        self.assertEqual(traces[1]["args"]["recipient"][0]["field"], "paid_by")
+        self.assertEqual(plan["reads"], ["operator_content", "ugc_comment", "user_content"])
+        plan, _ = oracle.build_plan("Pay back the last sender.", calls, outputs, all_reads=True)
         self.assertIn("unclassified", plan["reads"])
 
     def test_every_plan_is_valid_yaml_shaped_like_the_demo_plan(self):
@@ -200,6 +233,15 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual((s["trust_after"], s["lowered_by"]), (15, "banking.get_most_recent_transactions"))
         self.assertIsNone(oracle.cause_of({"allowed": True}))
 
+    def test_a_simulated_user_approval_is_counted_only_with_its_reason(self):
+        approve = {"event": "decision", "stage": "user", "verdict": "approve", "reasons": ["console.simulated_user"]}
+        self.assertTrue(oracle.summarize_events([approve], 100)["console_approved"])
+        deny = {**approve, "verdict": "deny"}
+        self.assertFalse(oracle.summarize_events([deny], 100)["console_approved"])
+        other = {**approve, "reasons": ["console.user"]}
+        self.assertFalse(oracle.summarize_events([other], 100)["console_approved"])
+        self.assertFalse(oracle.summarize_events([{"event": "ruling", "outcome": "allow"}], 100)["console_approved"])
+
     def test_causes(self):
         deny = {"allowed": False, "text": "denied: untrusted_destination", "ruling": {"outcome": "deny", "code": "untrusted_destination", "band": "0-19"}}
         self.assertEqual(oracle.cause_of(deny), "untrusted_destination")
@@ -236,38 +278,94 @@ class AuditWithFakeBridgeTest(unittest.TestCase):
             argv = json.loads(argv_out.read_text())
             self.assertEqual(argv[0], "bridge")
             self.assertEqual(argv[-3:], ["--plan", "p.yaml", "--no-reviewer"])
+            self.assertNotIn("--simulated-user", argv)
 
-    def test_audit_of_one_task_end_to_end(self):
+    def test_simulated_user_flag_reaches_the_bridge_through_run_through_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            argv_out = tmp / "argv.json"
+            script = tmp / "spy.py"
+            script.write_text(
+                "import json, os, runpy, sys\n"
+                "open(os.environ['ARGV_OUT'], 'w').write(json.dumps(sys.argv[1:]))\n"
+                f"runpy.run_path({str(HERE / 'fake_bridge.py')!r}, run_name='__main__')\n",
+                encoding="utf-8",
+            )
+            task = SUITE.user_tasks["user_task_3"]
+            sim = oracle.simulate(SUITE, task)
+            plan, _ = oracle.build_plan(task.PROMPT, sim.calls, sim.outputs)
+            plan_path = tmp / "p.yaml"
+            plan_path.write_text(oracle.plan_yaml(plan), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"ARGV_OUT": str(argv_out), "MUNIX_FAKE_DENY": ""}):
+                for simulated, expected_mode in ((False, "no_human"), (True, "simulated_user")):
+                    run = oracle.run_through_bridge(
+                        SUITE, task, sim.calls, plan_path, tmp / "l.jsonl",
+                        [sys.executable, str(script)], read_timeout=30.0, simulated_user=simulated,
+                    )
+                    argv = json.loads(argv_out.read_text())
+                    self.assertEqual("--simulated-user" in argv, simulated)
+                    self.assertEqual(argv[-3:], ["--plan", str(plan_path), "--no-reviewer"])
+                    self.assertEqual(run["mode"], expected_mode)
+
+    def test_audit_of_one_task_end_to_end_in_both_modes(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MUNIX_FAKE_DENY": "send_money"}):
             out = Path(tmp) / "oracle.json"
             doc = oracle.run_audit(["user_task_3"], FAKE, out, read_timeout=30.0)
             self.assertEqual(json.loads(out.read_text()), doc)
+        self.assertEqual(doc["modes"], ["no_human", "simulated_user"])
         (task,) = doc["tasks"]
         self.assertEqual(task["task"], "user_task_3")
         self.assertEqual(task["plan"]["steps"][1]["args"]["recipient"], {"from": ["prompt"]})
+        self.assertEqual(task["plan"]["reads"], ["operator_content", "user_content"])
         self.assertIn("recipient:", task["plan_yaml"])
-        for label in ("clean", "injected"):
-            run = task["runs"][label]
-            self.assertEqual((run["allowed"], run["total"]), (1, 2), label)
-            self.assertEqual(run["first_blocked"]["tool"], "send_money")
-            self.assertFalse(run["utility"])  # the refund never happened
-            self.assertFalse(run["completes"])
-            self.assertEqual([c["allowed"] for c in run["calls"]], [True, False])
-        self.assertEqual(doc["summary"]["clean"]["tasks_complete"], 0)
+        self.assertEqual(set(task["runs"]), {"no_human", "simulated_user"})
+        for mode in ("no_human", "simulated_user"):
+            for label in ("clean", "injected"):
+                run = task["runs"][mode][label]
+                self.assertEqual(run["mode"], mode)
+                self.assertEqual((run["allowed"], run["total"]), (1, 2), (mode, label))
+                self.assertEqual(run["console_approvals"], 0)
+                self.assertEqual(run["first_blocked"]["tool"], "send_money")
+                self.assertFalse(run["utility"])  # the refund never happened
+                self.assertFalse(run["completes"])
+                self.assertEqual([c["allowed"] for c in run["calls"]], [True, False])
+            self.assertEqual(doc["summary"][mode]["clean"]["tasks_complete"], 0)
+            self.assertEqual(doc["summary"][mode]["clean"]["calls_total"], 2)
         table = oracle.format_table(doc["tasks"])
         self.assertIn("UT3", table)
-        self.assertIn("1/2", table)
-        self.assertIn("send_money", table)
+        self.assertIn("1/2 / 1/2", table)
+        self.assertIn("no-human allowed", table)
+        self.assertIn("sim-user approvals", table)
+        self.assertIn("total", table)
+
+    def test_one_mode_only(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MUNIX_FAKE_DENY": ""}):
+            doc = oracle.run_audit(
+                ["user_task_3"], FAKE, Path(tmp) / "o.json", read_timeout=30.0, modes=(oracle.MODE_SIMULATED_USER,)
+            )
+        self.assertEqual(list(doc["tasks"][0]["runs"]), ["simulated_user"])
+        self.assertEqual(list(doc["summary"]), ["simulated_user"])
+        self.assertIn("sim-user", oracle.format_table(doc["tasks"]))
+
+    def test_all_reads_reaches_the_plan(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MUNIX_FAKE_DENY": ""}):
+            doc = oracle.run_audit(
+                ["user_task_3"], FAKE, Path(tmp) / "o.json", read_timeout=30.0,
+                modes=(oracle.MODE_NO_HUMAN,), all_reads=True,
+            )
+        self.assertIn("ugc_comment", doc["tasks"][0]["plan"]["reads"])
+        self.assertIn("unclassified", doc["tasks"][0]["plan"]["reads"])
 
     def test_an_honest_run_the_gate_allows_completes_the_task(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MUNIX_FAKE_DENY": ""}):
             doc = oracle.run_audit(["user_task_3"], FAKE, Path(tmp) / "o.json", read_timeout=30.0)
-        run = doc["tasks"][0]["runs"]["clean"]
-        self.assertEqual((run["allowed"], run["total"]), (2, 2))
-        self.assertIsNone(run["first_blocked"])
-        self.assertTrue(run["utility"])
-        self.assertTrue(run["completes"])
-        self.assertEqual(doc["summary"]["clean"]["tasks_complete"], 1)
+        for mode in ("no_human", "simulated_user"):
+            run = doc["tasks"][0]["runs"][mode]["clean"]
+            self.assertEqual((run["allowed"], run["total"]), (2, 2))
+            self.assertIsNone(run["first_blocked"])
+            self.assertTrue(run["utility"])
+            self.assertTrue(run["completes"])
+            self.assertEqual(doc["summary"][mode]["clean"]["tasks_complete"], 1)
 
     def test_secrets_are_redacted_in_the_results(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MUNIX_FAKE_DENY": ""}):
@@ -282,8 +380,10 @@ class AuditWithFakeBridgeTest(unittest.TestCase):
 class RealBridgeTest(unittest.TestCase):
     def test_the_real_gate_accepts_the_oracle_plan_and_denies_a_gray_zone_call_without_a_reviewer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            doc = oracle.run_audit(["user_task_3"], REAL_BINARY, Path(tmp) / "o.json", read_timeout=60.0)
-        run = doc["tasks"][0]["runs"]["clean"]
+            doc = oracle.run_audit(
+                ["user_task_3"], REAL_BINARY, Path(tmp) / "o.json", read_timeout=60.0, modes=(oracle.MODE_NO_HUMAN,)
+            )
+        run = doc["tasks"][0]["runs"]["no_human"]["clean"]
         self.assertEqual((run["allowed"], run["total"]), (1, 2))
         blocked = run["first_blocked"]
         self.assertEqual(blocked["ruling"]["outcome"], "confirm_user")
