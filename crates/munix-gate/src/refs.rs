@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use munix_core::ids::RefId;
 use munix_core::label::Label;
 use munix_core::validate::Scalar;
+use serde_json::Value;
 
 use crate::facts::{Match, Origin};
 
@@ -36,6 +37,26 @@ impl RefEntry {
 pub struct RefTable {
     entries: BTreeMap<RefId, RefEntry>,
     next: u32,
+    /// Non-string scalar values (int, number, bool, enum) the Gate delivered from tool outputs, by canonical JSON
+    /// text. They get no ref (the agent types the value itself), so this is how a selector such as a schedule id
+    /// is traced back to the step that delivered it.
+    scalars: BTreeMap<String, Vec<ScalarSite>>,
+}
+
+/// Where one non-string scalar value was delivered: the origin (step and field) and the field's label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScalarSite {
+    origin: Origin,
+    label: Label,
+}
+
+/// The key a scalar value is stored and looked up under: its canonical JSON text. `None` for anything that is not
+/// a bool, number or string (those are never recorded and never match).
+fn scalar_key(value: &Value) -> Option<String> {
+    match value {
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => serde_json::to_string(value).ok(),
+        _ => None,
+    }
 }
 
 impl RefTable {
@@ -79,6 +100,41 @@ impl RefTable {
             },
         );
         id
+    }
+
+    /// Remembers that `value` (a bool, number, or enum string; anything else is ignored) was delivered from
+    /// `origin` under `label`. The same value from the same origin is kept once.
+    pub fn record_scalar(&mut self, value: &Value, origin: Origin, label: Label) {
+        let Some(key) = scalar_key(value) else {
+            return;
+        };
+        let sites = self.scalars.entry(key).or_default();
+        let site = ScalarSite { origin, label };
+        if !sites.contains(&site) {
+            sites.push(site);
+        }
+    }
+
+    /// Every place a value equal to `value` (exact canonical JSON equality) was delivered, in delivery order.
+    /// Empty when no tool output carried it, which counts as untraced.
+    pub fn find_scalar(&self, value: &Value) -> Vec<Match> {
+        let Some(key) = scalar_key(value) else {
+            return Vec::new();
+        };
+        self.scalars
+            .get(&key)
+            .map(|sites| {
+                sites
+                    .iter()
+                    .map(|s| Match {
+                        id: None,
+                        origin: s.origin.clone(),
+                        trust: s.label.trust,
+                        confidential: s.label.confidential,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn get(&self, id: &RefId) -> Option<&RefEntry> {
@@ -330,5 +386,59 @@ mod tests {
         );
         assert!(two.get(&id).is_none());
         assert!(two.is_empty());
+    }
+
+    #[test]
+    fn scalars_are_found_by_exact_canonical_json() {
+        let mut t = RefTable::new();
+        t.record_scalar(
+            &serde_json::json!(7),
+            step(1, "ids"),
+            label(80, Confidential::Public),
+        );
+        t.record_scalar(
+            &serde_json::json!(7),
+            step(1, "ids"),
+            label(80, Confidential::Public),
+        );
+        t.record_scalar(
+            &serde_json::json!(7),
+            step(2, "other"),
+            label(20, Confidential::Public),
+        );
+        t.record_scalar(
+            &serde_json::json!("weekly"),
+            step(1, "mode"),
+            label(80, Confidential::Public),
+        );
+        t.record_scalar(
+            &serde_json::json!(true),
+            step(1, "flag"),
+            label(80, Confidential::Public),
+        );
+        // Not scalars: ignored.
+        t.record_scalar(
+            &serde_json::json!(null),
+            step(1, "x"),
+            label(80, Confidential::Public),
+        );
+        t.record_scalar(
+            &serde_json::json!([7]),
+            step(1, "x"),
+            label(80, Confidential::Public),
+        );
+        let found = t.find_scalar(&serde_json::json!(7));
+        assert_eq!(found.len(), 2, "same origin is kept once");
+        assert!(found.iter().all(|m| m.id.is_none()));
+        assert_eq!(found[0].origin, step(1, "ids"));
+        assert_eq!(found[1].trust.value(), 20);
+        assert_eq!(t.find_scalar(&serde_json::json!("weekly")).len(), 1);
+        assert_eq!(t.find_scalar(&serde_json::json!(true)).len(), 1);
+        // A string "7", a float 7.0 and a different number are other values.
+        assert!(t.find_scalar(&serde_json::json!("7")).is_empty());
+        assert!(t.find_scalar(&serde_json::json!(7.5)).is_empty());
+        assert!(t.find_scalar(&serde_json::json!(8)).is_empty());
+        assert!(t.find_scalar(&serde_json::json!(null)).is_empty());
+        assert!(t.is_empty(), "scalars issue no refs");
     }
 }

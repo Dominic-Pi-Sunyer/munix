@@ -2,7 +2,7 @@
 //!
 //! Runs after `Request::check_shape`, so every value already has the manifest's shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -35,7 +35,11 @@ use crate::vault::Credential;
 ///   labelled `private` or `secret` (at least 8 characters long) are also found base64 or hex encoded, and
 ///   raise `confidential` to their level exactly like a plain copy.
 /// - Content `ref`/`ref[]` values (such as attachments) resolve like embedded refs.
-/// - Everything else (control arguments, numbers, bools, enums) gives default facts.
+/// - Destination and selector arguments of a non-string type (int, number, bool, enum): each value (each list
+///   element) is matched exactly (canonical JSON equality) against the scalar values the Gate delivered from tool
+///   outputs (`RefTable::find_scalar`), so a numeric id must have come from a step output to pass a `from` rule.
+///   A value nothing delivered is traced as untraced. Prompt numerals are not recorded.
+/// - Everything else (control arguments, content numbers, bools, enums) gives default facts.
 pub fn trace_arg(
     spec: &ArgSpec,
     value: &Value,
@@ -45,6 +49,13 @@ pub fn trace_arg(
     let mut facts = ArgFacts::default();
     let scalar = spec.ty.scalar;
     if !scalar.is_string_shaped() {
+        if matches!(spec.role, ArgRole::Destination | ArgRole::Selector) {
+            for item in scalar_items(value) {
+                facts.values.push(Traced {
+                    matches: refs.find_scalar(item),
+                });
+            }
+        }
         return facts;
     }
     match spec.role {
@@ -86,6 +97,16 @@ fn items(value: &Value) -> Vec<Option<&str>> {
         Value::String(s) => vec![Some(s.as_str())],
         Value::Array(a) => a.iter().map(Value::as_str).collect(),
         _ => vec![None],
+    }
+}
+
+/// The values of a non-string argument: one for a scalar, one per element for a list. `null` gives nothing.
+/// An element that is not a scalar is still listed (it matches nothing, so it is untraced).
+fn scalar_items(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::Array(a) => a.iter().collect(),
+        other => vec![other],
     }
 }
 
@@ -194,12 +215,12 @@ impl View {
     }
 }
 
-/// Lowercases `text` and drops ASCII white space and the invisible format characters that core refuses in free
+/// Lowercases `text` and drops white space (any Unicode white space, as [`View::compact`] does) and the invisible format characters that core refuses in free
 /// text (zero-width, bidi, tag and similar), so that a copy that differs only in case, spacing or hidden
 /// characters reads the same as the original.
 fn normalize(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_ascii_whitespace() && !is_hidden_format_char(*c))
+        .filter(|c| !c.is_whitespace() && !is_hidden_format_char(*c))
         .flat_map(char::to_lowercase)
         .collect()
 }
@@ -342,7 +363,7 @@ fn text_has_credential(views: &[View], credentials: &[&Credential], min_plain: u
 
 /// The orders in which `n` pieces of text are joined to look for a split value: every order for up to
 /// [`MAX_PERMUTED_PIECES`] pieces (an attacker picks which argument carries which half), otherwise name order and
-/// its reverse.
+/// its reverse (every ordered pair is checked separately, see [`trace_request`]).
 fn orderings(n: usize) -> Vec<Vec<usize>> {
     let mut all: Vec<Vec<usize>> = vec![Vec::new()];
     if n > MAX_PERMUTED_PIECES {
@@ -364,23 +385,170 @@ fn orderings(n: usize) -> Vec<Vec<usize>> {
     all
 }
 
-/// The split check is skipped when the content pieces of a request add up to more bytes than this.
+/// Above this many total bytes of content text the split check does not run; the request's content arguments are
+/// raised to `Secret` instead (it cannot be shown clean), so one request cannot cost more than a bounded amount of
+/// scanning and a split cannot hide behind padding.
 const MAX_SPLIT_CHECK_BYTES: usize = 64 * 1024;
 
 /// Up to this many pieces of content text are joined in every order (at most 24 orders).
 const MAX_PERMUTED_PIECES: usize = 4;
 
+/// What the split check looks for, prepared once per request: the needles of every credential and of every
+/// `private` or `secret` table entry that is not found whole inside a single piece (those are per-argument
+/// business), the strongest first, and what has been found so far.
+struct SplitScan<'a> {
+    credentials: Vec<Needle<'a>>,
+    known: Vec<(Confidential, Needle<'a>)>,
+    credential: bool,
+    level: Option<Confidential>,
+}
+
+impl<'a> SplitScan<'a> {
+    fn new(refs: &'a RefTable, credentials: &[&'a Credential], alone: &[Vec<View>]) -> Self {
+        let whole = |n: &Needle<'_>| alone.iter().any(|v| n.in_views(v));
+        let credentials = credentials
+            .iter()
+            .map(|c| Needle::new(c.expose_secret(), MIN_SPLIT_LEN, true))
+            .filter(|n| !whole(n))
+            .collect();
+        let mut known: Vec<(Confidential, Needle<'a>)> = refs
+            .iter()
+            .filter(|(_, e)| e.label.confidential >= Confidential::Private)
+            .map(|(_, e)| {
+                (
+                    e.label.confidential,
+                    Needle::new(&e.value, MIN_SPLIT_LEN, true),
+                )
+            })
+            .filter(|(_, n)| !whole(n))
+            .collect();
+        known.sort_by_key(|(level, _)| std::cmp::Reverse(*level));
+        SplitScan {
+            credentials,
+            known,
+            credential: false,
+            level: None,
+        }
+    }
+
+    /// Looks for the prepared needles in the views of one join.
+    fn scan(&mut self, views: &[View]) {
+        if !self.credential {
+            self.credential = self.credentials.iter().any(|n| n.in_views(views));
+        }
+        for (level, needle) in &self.known {
+            // Strongest first: once a level is found, nothing weaker can add to it.
+            if self.level.is_some_and(|found| found >= *level) {
+                break;
+            }
+            if needle.in_views(views) {
+                self.level = Some(*level);
+            }
+        }
+    }
+}
+
+/// Pair pre-filter. A value that is in a join of two pieces but not inside either alone must cross the join, so
+/// two bytes that are next to each other in the value sit at the join: the last byte of the first piece and the
+/// first byte of the second (or, in the space-separated join, the space and one of them). So a pair can be skipped
+/// when no such byte pair is adjacent in any prepared needle of the matching kind. It is a necessary condition
+/// only, so skipping is always safe; a pair that passes still gets the full check. This keeps the cost of
+/// checking every ordered pair of up to 100 pieces to a few lookups per pair instead of a search per needle.
+struct EdgeFilter {
+    /// Adjacent byte pairs of the plain needles (checked against `Forms::text`).
+    text: BTreeSet<(u8, u8)>,
+    /// Of the base64 needles (`Forms::compact`).
+    compact: BTreeSet<(u8, u8)>,
+    /// Of the hex needles (`Forms::compact_lower`).
+    compact_lower: BTreeSet<(u8, u8)>,
+    /// Of the normalized needles (`Forms::norm`).
+    norm: BTreeSet<(u8, u8)>,
+}
+
+impl EdgeFilter {
+    fn new(scan: &SplitScan<'_>) -> EdgeFilter {
+        let mut filter = EdgeFilter {
+            text: BTreeSet::new(),
+            compact: BTreeSet::new(),
+            compact_lower: BTreeSet::new(),
+            norm: BTreeSet::new(),
+        };
+        let needles = scan
+            .credentials
+            .iter()
+            .chain(scan.known.iter().map(|(_, n)| n));
+        for needle in needles {
+            add_pairs(&mut filter.text, needle.plain);
+            add_pairs(&mut filter.norm, needle.norm.as_deref());
+            add_pairs(&mut filter.compact_lower, needle.hex.as_deref());
+            for b64 in &needle.base64 {
+                add_pairs(&mut filter.compact, Some(b64));
+            }
+        }
+        filter
+    }
+
+    /// False only when no needle can sit across the join of `a` then `b` in any reading the join check builds.
+    fn may_cross(&self, a: &Part, b: &Part) -> bool {
+        if a.risky || b.risky {
+            return true;
+        }
+        if self.forms_may_cross(&a.raw, &b.raw) {
+            return true;
+        }
+        (a.marked || b.marked)
+            && self.forms_may_cross(
+                a.decoded.as_ref().unwrap_or(&a.raw),
+                b.decoded.as_ref().unwrap_or(&b.raw),
+            )
+    }
+
+    fn forms_may_cross(&self, a: &Forms, b: &Forms) -> bool {
+        let at = |set: &BTreeSet<(u8, u8)>, x: &str, y: &str| -> bool {
+            x.as_bytes()
+                .last()
+                .zip(y.as_bytes().first())
+                .is_some_and(|(l, f)| set.contains(&(*l, *f)))
+        };
+        let next_to_space = |x: &str, y: &str| -> bool {
+            x.as_bytes()
+                .last()
+                .is_some_and(|l| self.text.contains(&(*l, b' ')))
+                || y.as_bytes()
+                    .first()
+                    .is_some_and(|f| self.text.contains(&(b' ', *f)))
+        };
+        at(&self.text, &a.text, &b.text)
+            || next_to_space(&a.text, &b.text)
+            || at(&self.compact, &a.compact, &b.compact)
+            || at(&self.compact_lower, &a.compact_lower, &b.compact_lower)
+            || at(&self.norm, &a.norm, &b.norm)
+    }
+}
+
+fn add_pairs(set: &mut BTreeSet<(u8, u8)>, needle: Option<&str>) {
+    if let Some(n) = needle {
+        set.extend(n.as_bytes().windows(2).map(|w| (w[0], w[1])));
+    }
+}
+
 /// Traces every argument of one request, and additionally looks for a value split across its content arguments.
 ///
 /// Each argument with a spec gets [`trace_arg`] facts. Then the text of all content arguments (string-shaped,
-/// not refs; list elements in order) is joined in argument-name order, once with no separator and once with a
-/// single space (in every order when there are at most four pieces, so it does not matter which argument carries
-/// which half; otherwise in name order and in reverse), and the joined text is checked for credentials and for table entries labelled `private` or
-/// `secret` (plain, percent-decoded, base64 or hex; values shorter than 8 characters are ignored). Only a value
-/// that is not found whole inside any single piece counts as split. A hit raises
-/// EVERY content argument to that level (`contains_credential` for a credential), so the strictest `dlp` rule
-/// among them decides. Needs at least two non-empty pieces of content text, and is skipped when the pieces add up
-/// to more than 64 KiB (the per-argument checks still ran).
+/// not refs; list elements in order) is joined, once with no separator and once with a single space, and the
+/// joined text is checked for credentials and for table entries labelled `private` or `secret` (plain,
+/// percent-decoded, base64 or hex; values shorter than 8 characters are ignored). The joins are every order of
+/// the pieces when there are at most four, so it does not matter which argument carries which half; with more
+/// pieces they are name order, its reverse, and every ordered pair of two pieces (at most 100 pieces, so at most
+/// 9,900 pairs, each cut down to the text near the piece ends, reusing needles prepared once). Only a value that
+/// is not found whole inside any single piece counts as split. A hit raises EVERY content argument to that level
+/// (`contains_credential` for a credential), so the strictest `dlp` rule among them decides. Needs at least two
+/// non-empty pieces of content text.
+///
+/// Fail closed on size: when the pieces add up to more than 64 KiB the split check does not run, and instead every
+/// content argument is raised to `Secret` and marked `split_unchecked` (the policy then records the fixed reason
+/// `<arg>.split_unchecked`), because a request that large cannot be shown free of a split value. Rules with
+/// `no_secret` or stricter deny it; the per-argument checks still ran.
 pub fn trace_request(
     specs: &BTreeMap<String, ArgSpec>,
     args: &BTreeMap<String, Value>,
@@ -403,12 +571,40 @@ pub fn trace_request(
             pieces.extend(items(value).into_iter().flatten().filter(|t| !t.is_empty()));
         }
     }
-    // The split check joins pieces in many orders; past this much text it is skipped (the per-argument checks
-    // above still ran), so one request cannot cost more than a bounded amount of scanning.
-    let total: usize = pieces.iter().map(|p| p.len()).sum();
-    if pieces.len() < 2 || total > MAX_SPLIT_CHECK_BYTES {
+    if pieces.len() < 2 {
         return out;
     }
+    let total: usize = pieces.iter().map(|p| p.len()).sum();
+    if total > MAX_SPLIT_CHECK_BYTES {
+        for name in content_names {
+            if let Some(facts) = out.get_mut(name) {
+                facts.confidential = facts.confidential.max(Confidential::Secret);
+                facts.split_unchecked = true;
+            }
+        }
+        return out;
+    }
+    let (credential, level) = split_hits(&pieces, refs, credentials, true);
+    for name in content_names {
+        if let Some(facts) = out.get_mut(name) {
+            facts.contains_credential |= credential;
+            if let Some(level) = level {
+                facts.confidential = facts.confidential.max(level);
+            }
+        }
+    }
+    out
+}
+
+/// Looks for credentials and `private`/`secret` table entries split across `pieces` (at least two, within the size
+/// bound). Returns whether a credential and which confidentiality level was found. `prefilter` turns the pair
+/// pre-filter on (always on outside tests, which compare it with the unfiltered check).
+fn split_hits(
+    pieces: &[&str],
+    refs: &RefTable,
+    credentials: &[&Credential],
+    prefilter: bool,
+) -> (bool, Option<Confidential>) {
     // A value found whole inside one piece is that argument's own business (`trace_arg`), not a split.
     let alone: Vec<Vec<View>> = pieces.iter().map(|p| views_of(p)).collect();
     // A value that is not inside one piece but is inside a join must cross a boundary, so only the text near each
@@ -426,24 +622,30 @@ pub fn trace_request(
         .zip(&alone)
         .map(|(piece, views)| Part::new(piece, views, width))
         .collect();
+    let mut scan = SplitScan::new(refs, credentials, &alone);
+    let edges = (prefilter && pieces.len() > MAX_PERMUTED_PIECES).then(|| EdgeFilter::new(&scan));
     let mut views = Vec::new();
+    let mut check = |order: &[usize]| {
+        views.clear();
+        join_views(pieces, &parts, order, &mut views);
+        scan.scan(&views);
+    };
     for order in orderings(pieces.len()) {
-        join_views(&pieces, &parts, &order, &mut views);
+        check(&order);
     }
-    let credential = credentials.iter().any(|c| {
-        let needle = Needle::new(c.expose_secret(), MIN_SPLIT_LEN, true);
-        needle.in_views(&views) && !alone.iter().any(|v| needle.in_views(v))
-    });
-    let level = known_value_level(&views, refs, MIN_SPLIT_LEN, Confidential::Private, &alone);
-    for name in content_names {
-        if let Some(facts) = out.get_mut(name) {
-            facts.contains_credential |= credential;
-            if let Some(level) = level {
-                facts.confidential = facts.confidential.max(level);
+    if pieces.len() > MAX_PERMUTED_PIECES {
+        for i in 0..pieces.len() {
+            for j in 0..pieces.len() {
+                let skip = edges
+                    .as_ref()
+                    .is_some_and(|e| !e.may_cross(&parts[i], &parts[j]));
+                if i != j && !skip {
+                    check(&[i, j]);
+                }
             }
         }
     }
-    out
+    (scan.credential, scan.level)
 }
 
 /// Extra bytes kept on each side of a cropped piece, beyond twice the longest value looked for (room for
@@ -1619,7 +1821,16 @@ mod tests {
                 ArgRole::Control,
             ] {
                 let facts = trace_arg(&spec(scalar, false, role), &json!(5), &refs, &[&c]);
-                assert_eq!(facts, default, "{scalar:?} {role:?}");
+                if matches!(role, ArgRole::Destination | ArgRole::Selector) {
+                    // Traced against the delivered scalars; nothing delivered 5, so it is one untraced value.
+                    let want = ArgFacts {
+                        values: vec![Traced::untraced()],
+                        ..ArgFacts::default()
+                    };
+                    assert_eq!(facts, want, "{scalar:?} {role:?}");
+                } else {
+                    assert_eq!(facts, default, "{scalar:?} {role:?}");
+                }
             }
         }
     }
@@ -1808,6 +2019,117 @@ mod tests {
     fn percent_decode_is_not_recursive() {
         assert_eq!(percent_decode("%2541"), "%41");
         assert_eq!(percent_decode("%252B"), "%2B");
+    }
+
+    // ---- review 2: Unicode white space and the split check ----
+
+    #[test]
+    fn unicode_white_space_does_not_hide_a_known_value() {
+        let refs = table("alice-salary-185000", Confidential::Secret);
+        for gap in ['\u{a0}', '\u{2003}', '\u{3000}', '\u{2009}', '\u{1680}'] {
+            let spaced: String = "alice-salary-185000"
+                .chars()
+                .flat_map(|c| [c, gap])
+                .collect();
+            let facts = text_facts(&format!("see {spaced} ok"), &refs, &[]);
+            assert_eq!(facts.confidential, Confidential::Secret, "{gap:?}");
+        }
+        assert_eq!(normalize("A\u{a0}b\u{3000}C\u{2003}"), "abc");
+    }
+
+    #[test]
+    fn oversize_requests_are_raised_to_secret_and_marked() {
+        let refs = RefTable::new();
+        let specs: BTreeMap<String, ArgSpec> = ["a", "b"]
+            .into_iter()
+            .map(|n| (n.to_owned(), spec(Scalar::Text, false, ArgRole::Content)))
+            .collect();
+        let pad = "z".repeat(MAX_SPLIT_CHECK_BYTES / 2 + 1);
+        let args = BTreeMap::from([
+            ("a".to_owned(), json!(pad.clone())),
+            ("b".to_owned(), json!(pad)),
+        ]);
+        let facts = trace_request(&specs, &args, &refs, &[]);
+        assert!(facts.values().all(|f| f.split_unchecked));
+        assert!(
+            facts
+                .values()
+                .all(|f| f.confidential == Confidential::Secret)
+        );
+    }
+
+    /// A tiny deterministic generator, so the comparison below is repeatable.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            usize::try_from(self.0 >> 33).unwrap() % n
+        }
+    }
+
+    #[test]
+    fn the_pair_prefilter_never_changes_what_the_split_check_finds() {
+        let value = "Alice-Salary 185000-x";
+        let cred = cred("sk-live-ABCDEFGHIJ");
+        let mut refs = RefTable::new();
+        refs.issue(
+            value,
+            Scalar::Text,
+            step(1, "v"),
+            label(20, Confidential::Secret),
+        );
+        refs.issue(
+            "other\u{a0}private value",
+            Scalar::Text,
+            step(2, "v"),
+            label(20, Confidential::Private),
+        );
+        // Fragments of the values in several shapes: plain, split anywhere, spaced, lower case, percent
+        // escapes, white space, hidden characters, and filler.
+        let mut fragments: Vec<String> = Vec::new();
+        for v in [value, "sk-live-ABCDEFGHIJ", "other\u{a0}private value"] {
+            for at in 1..v.len() {
+                if v.is_char_boundary(at) {
+                    fragments.push(v[..at].to_owned());
+                    fragments.push(v[at..].to_owned());
+                    fragments.push(v[..at].to_lowercase());
+                    fragments.push(format!("{}\u{200b}", &v[..at]));
+                    fragments.push(format!(" {}", &v[at..]));
+                    fragments.push(v[..at].replace('-', "%2D").replace(' ', "+"));
+                    fragments.push(v[at..].replace('-', "%2D").replace(' ', "+"));
+                    fragments.push(format!("{}%", &v[..at]));
+                }
+            }
+        }
+        fragments.extend(["filler text", "", " ", "%", "%2", "+", "\n", "zz"].map(String::from));
+        let mut rng = Lcg(7);
+        let (mut hits, mut cases) = (0, 0);
+        for _ in 0..400 {
+            let n = 5 + rng.next(8);
+            let pieces: Vec<String> = (0..n)
+                .map(|_| fragments[rng.next(fragments.len())].clone())
+                .collect();
+            let refs_to_pieces: Vec<&str> = pieces
+                .iter()
+                .map(String::as_str)
+                .filter(|p| !p.is_empty())
+                .collect();
+            if refs_to_pieces.len() < 5 {
+                continue;
+            }
+            cases += 1;
+            let with = split_hits(&refs_to_pieces, &refs, &[&cred], true);
+            let without = split_hits(&refs_to_pieces, &refs, &[&cred], false);
+            assert_eq!(with, without, "{refs_to_pieces:?}");
+            if with.0 || with.1.is_some() {
+                hits += 1;
+            }
+        }
+        assert!(cases > 300, "{cases}");
+        assert!(hits > 20, "the comparison should include real hits: {hits}");
     }
 
     // ---- DLP encodings ----

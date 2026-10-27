@@ -102,6 +102,9 @@ pub struct ArgFacts {
     pub confidential: Confidential,
     /// True when the text contains a Vault credential, plain or encoded.
     pub contains_credential: bool,
+    /// True when this content argument was raised to `Secret` because the request was too large for the split
+    /// check (see `trace::trace_request`).
+    pub split_unchecked: bool,
 }
 
 impl Default for ArgFacts {
@@ -113,6 +116,7 @@ impl Default for ArgFacts {
             raw_destinations: 0,
             confidential: Confidential::Public,
             contains_credential: false,
+            split_unchecked: false,
         }
     }
 }

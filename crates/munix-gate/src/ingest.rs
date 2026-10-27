@@ -190,7 +190,18 @@ fn label_for(spec: &OutputSpec, source: &Source) -> Label {
     }
 }
 
-/// Replaces url, email and phone values with refs, and defuses `ref:` in every other string.
+/// Remembers a delivered int, number, bool or enum value in the ref table (they get no ref), so a request that
+/// names the same value as a destination or selector can be traced to this step and field.
+fn note_scalar(value: &Value, step: u32, field: &str, label: &Label, refs: &mut RefTable) {
+    let origin = Origin::Step {
+        step,
+        field: field.to_owned(),
+    };
+    refs.record_scalar(value, origin, label.clone());
+}
+
+/// Replaces url, email and phone values with refs, defuses `ref:` in every other string, and records delivered
+/// int, number, bool and enum values in the table.
 fn swap(
     value: Value,
     scalar: Scalar,
@@ -213,14 +224,24 @@ fn swap(
             let id = refs.issue(&s, scalar, origin, label.clone());
             Value::String(id.as_str().to_owned())
         }
-        Value::String(s) => Value::String(s.replace("ref:", "ref-")),
+        Value::String(s) => {
+            if scalar == Scalar::Enum {
+                note_scalar(&Value::String(s.clone()), step, field, label, refs);
+            }
+            Value::String(s.replace("ref:", "ref-"))
+        }
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
                 .map(|v| swap(v, scalar, step, field, label, refs))
                 .collect(),
         ),
-        other => other,
+        other => {
+            if !scalar.is_string_shaped() {
+                note_scalar(&other, step, field, label, refs);
+            }
+            other
+        }
     }
 }
 
@@ -928,6 +949,55 @@ mod tests {
             run(&m, &web(1), &all, out(&[("l", Value::Array(too_many))])),
             Err(IngestError::BadValue)
         );
+    }
+
+    #[test]
+    fn delivered_ints_numbers_bools_and_enums_are_recorded_with_their_origin() {
+        let m = manifest(&[
+            "ids: {type: \"int[]\", region: editorial}",
+            "n: {type: int, region: ugc_review}",
+            "x: {type: number, region: editorial}",
+            "ok: {type: bool, region: editorial}",
+            "mode: {type: enum, values: [a, b], region: editorial}",
+            "hidden_n: {type: int, region: hidden}",
+            "note: {type: text, region: editorial}",
+        ]);
+        let mut refs = RefTable::new();
+        ingest(
+            &m,
+            4,
+            &tool_source(),
+            &reads(&[RegionType::Editorial, RegionType::UgcReview]),
+            out(&[
+                ("ids", json!([3, 5])),
+                ("n", json!(9)),
+                ("x", json!(1.5)),
+                ("ok", json!(true)),
+                ("mode", json!("b")),
+                ("hidden_n", json!(77)),
+                ("note", json!("12")),
+            ]),
+            &mut refs,
+        )
+        .unwrap();
+        let at = |v: Value| refs.find_scalar(&v);
+        assert_eq!(
+            at(json!(5))[0].origin,
+            Origin::Step {
+                step: 4,
+                field: "ids".into()
+            }
+        );
+        assert_eq!(at(json!(5))[0].trust, Trust::new(75));
+        assert_eq!(at(json!(9))[0].trust, Trust::UNKNOWN_AUTHOR);
+        assert_eq!(at(json!(1.5)).len(), 1);
+        assert_eq!(at(json!(true)).len(), 1);
+        assert_eq!(at(json!("b")).len(), 1);
+        // Withheld fields and plain text are not recorded; refs are only issued for ref-able strings.
+        assert!(at(json!(77)).is_empty());
+        assert!(at(json!("12")).is_empty());
+        assert!(at(json!(4)).is_empty());
+        assert!(refs.is_empty());
     }
 
     // ---- tests that depend on RefTable::issue / find_value ----

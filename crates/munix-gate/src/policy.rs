@@ -222,6 +222,9 @@ fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<(), Den
                 Dlp::PublicOnly => arg.confidential > Confidential::Public,
             };
             if too_much {
+                if arg.split_unchecked {
+                    reasons.push(format!("{name}.split_unchecked"));
+                }
                 reasons.push(format!("{name}.confidential"));
                 return Err(DenyCode::ConfidentialData);
             }
@@ -874,6 +877,21 @@ args:
             to.unknown_refs = 1;
         });
         assert_eq!(denied(&email(Band::Clean, &a)), DenyCode::UnknownRef);
+    }
+
+    #[test]
+    fn an_untraced_value_never_satisfies_a_from_rule() {
+        // No matches at all (a value nothing delivered) fails `from`, alone or next to a traced value.
+        for values in [
+            vec![Traced::untraced()],
+            vec![boss(), Traced::untraced()],
+            vec![Traced::untraced(), boss()],
+        ] {
+            let a = email_with(|a| a.get_mut("to").unwrap().values = values.clone());
+            let r = email(Band::Clean, &a);
+            assert_eq!(denied(&r), DenyCode::UntrustedDestination);
+            assert!(has_reason(&r, "to.trace_untrusted"));
+        }
     }
 
     #[test]
