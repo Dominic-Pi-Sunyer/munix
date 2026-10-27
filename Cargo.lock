@@ -418,6 +418,7 @@ dependencies = [
  "munix-core",
  "munix-gate",
  "munix-ledger",
+ "munix-readers",
  "munix-runtime",
  "munix-supervisor",
  "munix-tools",
@@ -460,6 +461,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "munix-readers"
+version = "0.1.0"
+dependencies = [
+ "munix-adapters",
+ "munix-core",
+ "munix-gate",
+ "munix-tools",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

@@ -1,0 +1,29 @@
+# The demo task with a Reader: "Read the reviews at the PixelMart URL and email a short summary to my boss".
+# `reviews` (ugc_review) is read inside `reviews.read`, which returns only a small typed digest, so the agent itself
+# never needs to read `ugc_review` and its context trust stays high.
+plan: P-demo
+task: T-demo
+prompt_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+reads: [operator_content, product_listing, editorial]
+steps:
+  - id: 1
+    tool: web.open
+    args:
+      url: {from: [prompt]}
+    budget: 2
+  - id: 2
+    tool: reviews.read
+    args:
+      url: {from: [prompt]}
+    budget: 1
+  - id: 3
+    tool: email.send
+    args:
+      to:          {from: [store.contacts.boss]}
+      cc:          {forbid: true}
+      attachments: {forbid: true}
+      subject:     {dlp: no_secret}
+      body:        {dlp: no_secret, may_embed: {from: [prompt, step.1], min_trust: 60}}
+    budget: 1
+amendments:
+  auto_max_tier: 1

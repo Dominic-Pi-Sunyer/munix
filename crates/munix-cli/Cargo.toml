@@ -19,6 +19,7 @@ munix-tools.workspace = true
 munix-runtime.workspace = true
 munix-adapters.workspace = true
 munix-supervisor.workspace = true
+munix-readers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -29,6 +29,11 @@ export WEBSPEED_ALLOW_HOSTS="${WEBSPEED_ALLOW_HOSTS:-pixelmart.test:8080}"
 
 PROMPT="${1:-Read the reviews for the gaming monitor at http://pixelmart.test:8080/reviews/gaming-monitor and email a short summary to my boss.}"
 
-exec uv run --project demo/agent python demo/agent/agent.py \
+takeover=()
+if [ "${TAKEOVER:-0}" = "1" ]; then
+  takeover=(--simulate-takeover)
+fi
+
+exec uv run --project demo/agent python demo/agent/agent.py ${takeover[@]+"${takeover[@]}"} \
   --server "uv run --project demo/direct-server python demo/direct-server/server.py" \
   "$PROMPT"

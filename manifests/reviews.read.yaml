@@ -1,0 +1,15 @@
+# Read a page's user reviews in a Reader and return a small typed digest (under the 64-bit budget).
+# No string ever comes back, so attacker-written review text never enters the agent's context.
+tool: reviews.read
+description: Read the user reviews on a product page and return a typed digest.
+tier: 1
+egress: true
+args:
+  url: {type: url, role: destination}
+output:
+  review_count:         {type: int,      region: ugc_review, confidential: public, max: 50}
+  average_stars:        {type: number,   region: ugc_review, confidential: public, max: 5}
+  overall:              {type: enum,     region: ugc_review, confidential: public, values: [positive, mixed, negative, none]}
+  praises:              {type: "enum[]", region: ugc_review, confidential: public, values: [colour, refresh_rate, build, setup, value, hdr, ports, cable], max: 4}
+  complaints:           {type: "enum[]", region: ugc_review, confidential: public, values: [colour, refresh_rate, build, setup, value, hdr, ports, cable], max: 4}
+  flagged_instructions: {type: bool,     region: ugc_review, confidential: public}

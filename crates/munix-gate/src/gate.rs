@@ -1197,26 +1197,34 @@ impl Gate {
             }
         };
 
-        // Trust drops whether or not the ledger write below works.
+        // Trust drops whether or not the ledger write below works, except when every delivered field is typed within
+        // the 64-bit budget (design spec section 8, "Readers"): labels keep their region trust, but context trust is
+        // spared and never raised (invariant 4), and `lowest` tracks only fields that lowered the context.
         if let Some(task) = self.tasks.get_mut(&request.task) {
             task.items.extend(crate::quarantine::items_of(
                 request.step,
                 &raw_output,
                 &delivered.labels,
             ));
-            for (field, label) in &delivered.labels {
-                if task
-                    .instance
-                    .lowest
-                    .as_ref()
-                    .is_none_or(|(_, _, low)| label.trust < low.trust)
-                {
-                    task.instance.lowest = Some((request.step, field.clone(), label.clone()));
+            if !delivered.typed_only {
+                for (field, label) in &delivered.labels {
+                    if task
+                        .instance
+                        .lowest
+                        .as_ref()
+                        .is_none_or(|(_, _, low)| label.trust < low.trust)
+                    {
+                        task.instance.lowest = Some((request.step, field.clone(), label.clone()));
+                    }
                 }
             }
         }
-        let lowered = match (self.tasks.get_mut(&request.task), delivered.min_trust) {
-            (Some(task), Some(min)) => {
+        let lowered = match (
+            self.tasks.get_mut(&request.task),
+            delivered.min_trust,
+            delivered.typed_only,
+        ) {
+            (Some(task), Some(min), false) => {
                 let from = task.instance.context.trust();
                 task.instance
                     .context
@@ -1235,6 +1243,7 @@ impl Gate {
                 "withheld": delivered.withheld,
                 "quarantined": quarantined,
                 "min_trust": delivered.min_trust.map(Trust::value),
+                "typed_only": delivered.typed_only,
             }),
         ));
         if let Some((from, to)) = lowered {

@@ -110,6 +110,46 @@ pub struct OutputSpec {
     pub author_field: Option<String>,
     #[serde(default = "default_confidential")]
     pub confidential: Confidential,
+    /// For an `enum` output, its allowed values (1-16).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// For a list output, the most elements; for `int` and `number`, the largest value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+}
+
+/// The total information budget, in bits, that a tool output may carry without lowering the agent's context trust
+/// (design spec 8, "Capacity budget").
+pub const TYPED_BUDGET_BITS: u32 = 64;
+
+fn bits_for(count: u64) -> u32 {
+    // ceil(log2(count)), at least 1.
+    let mut bits = 0u32;
+    while bits < 64 && (1u64 << bits) < count {
+        bits += 1;
+    }
+    bits.max(1)
+}
+
+impl OutputSpec {
+    /// How many bits this output can carry, or `None` when it is free text (any string-shaped type, or a number,
+    /// int or list without a `max`). bool = 1; enum with n values = ceil(log2 n); int up to m = ceil(log2(m+1));
+    /// number up to m, read at 0.1 precision = ceil(log2(10m+1)); date = 16; a list multiplies by its `max`.
+    pub fn capacity_bits(&self) -> Option<u32> {
+        let one = match self.ty.scalar {
+            Scalar::Bool => 1,
+            Scalar::Enum => bits_for(self.values.len() as u64),
+            Scalar::Date => 16,
+            Scalar::Int if !self.ty.list => bits_for(u64::from(self.max?) + 1),
+            Scalar::Number if !self.ty.list => bits_for(u64::from(self.max?) * 10 + 1),
+            _ => return None,
+        };
+        if self.ty.list {
+            one.checked_mul(self.max?)
+        } else {
+            Some(one)
+        }
+    }
 }
 
 fn default_confidential() -> Confidential {
@@ -204,6 +244,25 @@ impl ToolManifest {
                 && !is_field_name(author)
             {
                 return Err(invalid("author_field must be 1-32 of [a-z_]"));
+            }
+            if out.ty.scalar == Scalar::Enum {
+                if !(1..=16).contains(&out.values.len()) {
+                    return Err(invalid("an enum output needs 1-16 values"));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for v in &out.values {
+                    if v.is_empty()
+                        || v.len() > 64
+                        || !v.bytes().all(|b| (0x21..=0x7e).contains(&b))
+                    {
+                        return Err(invalid("enum values are 1-64 printable ASCII characters"));
+                    }
+                    if !seen.insert(v) {
+                        return Err(invalid("enum values must be unique"));
+                    }
+                }
+            } else if !out.values.is_empty() {
+                return Err(invalid("only an enum output has values"));
             }
         }
         Ok(())
@@ -480,6 +539,8 @@ output:
                 region: RegionType::Unclassified,
                 author_field: None,
                 confidential: Confidential::Public,
+                values: Vec::new(),
+                max: None,
             };
             assert!(
                 with(|m| {
@@ -562,5 +623,40 @@ output:
         bad.tier = 9;
         assert!(cat.insert(bad).is_err(), "invalid manifest");
         assert_eq!(cat.iter().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn out(ty: &str, values: &[&str], max: Option<u32>) -> OutputSpec {
+        OutputSpec {
+            ty: ty.parse().unwrap(),
+            region: RegionType::UgcReview,
+            author_field: None,
+            confidential: Confidential::Public,
+            values: values.iter().map(|v| (*v).to_owned()).collect(),
+            max,
+        }
+    }
+
+    #[test]
+    fn capacity_bits_follow_the_schema() {
+        assert_eq!(out("bool", &[], None).capacity_bits(), Some(1));
+        assert_eq!(out("enum", &["a", "b", "c"], None).capacity_bits(), Some(2));
+        assert_eq!(out("enum", &["a"], None).capacity_bits(), Some(1));
+        assert_eq!(out("int", &[], Some(50)).capacity_bits(), Some(6));
+        assert_eq!(out("number", &[], Some(5)).capacity_bits(), Some(6));
+        assert_eq!(
+            out("enum[]", &["a", "b", "c", "d", "e", "f", "g", "h"], Some(4)).capacity_bits(),
+            Some(12)
+        );
+        // Free text, or no bound: no capacity, so it counts as free text.
+        assert_eq!(out("text", &[], None).capacity_bits(), None);
+        assert_eq!(out("url[]", &[], Some(3)).capacity_bits(), None);
+        assert_eq!(out("int", &[], None).capacity_bits(), None);
+        assert_eq!(out("bool[]", &[], None).capacity_bits(), None);
     }
 }

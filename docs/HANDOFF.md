@@ -6,12 +6,27 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~6:30 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~8:00 PM PT, by Claude (Opus 5.5)._
 
-- **Day 6 core built:**
-  - **Gate recovery** (`Gate::trip`, `Gate::recover`, quarantine by content hash, with blocked values that record
-    only what actually failed).
-  - **The watchdog** (`munix-runtime/src/watchdog.rs`).
+- **Strategy (owner):** get a rough version of every piece done tonight or tomorrow, then refine. Order: Readers, seal,
+  one-command demo, rough dashboard, red-team against Munix, README draft.
+- **Day 7 Readers work live, with no human step** (`PLAN=examples/demo-plan-readers.yaml demo/right.sh`):
+  - **Reader:** `reviews.read` returned a typed digest (positive, 4.5 stars, `flagged_instructions: true`) without
+    lowering context (`typed_only`).
+  - **The rest:** web.open read the listing and editorial (trust 75). The email went `gray`, the Muse Spark
+    reviewer approved it, and it was sent. About $0.012.
+  - **What's in it:**
+    - `OutputSpec` `values` and `max`, with `capacity_bits` (lead);
+    - typed-budget context rule (Gemini);
+    - in-budget Reader output delivered despite `reads` (lead);
+    - `munix-readers` crate, `reviews.read` manifest and demo plan (Gemini);
+    - registration in `munix run` (lead).
+- **Demo scripts:**
+  - `demo/services.sh` starts Mailpit and the mock site.
+  - `demo/right.sh` runs the same prompt under `munix run` (`PLAN=`, `TAKEOVER=1`).
+  - `demo/left.sh` also takes `TAKEOVER=1`.
+- **Next (rough-draft pass):** Integrity Seal, rough dashboard, red-team against Munix, README draft.
+
 - **Day 6 works live, with the takeover switch on.**
   - **Instance 1** emailed `hacker@evil.com` (takeover). Recovery 1 withheld exactly `step 1 reviews[1]` (cause
     `traced_value`).
@@ -20,8 +35,6 @@ _Last updated: Mon Oct 26, 2026, ~6:30 PM PT, by Claude (Opus 5.5)._
   - **Afterwards:** Mailpit had no attacker mail and no containers were left. 27 ledger entries, about $0.04.
   - **Lead fix:** `Gate::halt_for_takeover`, for a takeover the front sees before it can build a request.
 
-- **Finding from design:** after recovery the two honest reviews are still `ugc_review` at trust 15, so the email
-  still needs the user. Day 7 Readers keep trust high and remove that step.
 
 - **Supervisor done and pushed:** review follow-ups fixed (`edb0438`).
   - **Live `munix run` without `--plan` works:** Muse Spark wrote a 2-step plan; the recipient traced to

@@ -2269,3 +2269,226 @@ fn halt_for_takeover_lets_a_front_detected_takeover_recover() {
     assert_eq!(h.gate.recover(&task_id()).unwrap().attempt, 2);
     assert!(h.events().contains(&"takeover".to_owned()));
 }
+
+#[test]
+fn typed_output_under_budget_spares_context_trust_while_over_budget_or_free_text_lowers_it() {
+    use munix_core::label::{Capacity, RegionType};
+    use munix_gate::view::SourceView;
+
+    const READER_UNDER: &str = "
+tool: reviews.summary
+description: Return typed review summary fields within the 64-bit budget.
+tier: 0
+output:
+  stars:     {type: number, region: ugc_review, max: 5}
+  count:     {type: int, region: ugc_review, max: 50}
+  sentiment: {type: enum, region: ugc_review, values: [positive, mixed, negative, none]}
+  themes:    {type: \"enum[]\", region: ugc_review, values: [a, b, c, d, e, f, g, h], max: 4}
+";
+    const READER_OVER: &str = "
+tool: reviews.over
+description: Return typed review fields whose list max exceeds the 64-bit budget.
+tier: 0
+output:
+  stars:     {type: number, region: ugc_review, max: 5}
+  themes:    {type: \"enum[]\", region: ugc_review, values: [a, b, c, d, e, f, g, h], max: 30}
+";
+    const READER_MIX: &str = "
+tool: reviews.mix
+description: Return a typed field alongside one free-text field.
+tier: 0
+output:
+  stars:     {type: number, region: ugc_review, max: 5}
+  note:      {type: text, region: ugc_review}
+";
+
+    let key = signing_key();
+    let under = manifest(READER_UNDER);
+    let over = manifest(READER_OVER);
+    let mix = manifest(READER_MIX);
+    let email = manifest(EMAIL_SEND);
+    let news = manifest(NEWS_READ);
+    let digests = (
+        under.digest().unwrap(),
+        over.digest().unwrap(),
+        mix.digest().unwrap(),
+        email.digest().unwrap(),
+        news.digest().unwrap(),
+    );
+    let catalog = Catalog::from_manifests([under, over, mix, email, news]).unwrap();
+    let dir = fresh_dir();
+    let ledger = Ledger::create(dir.join("ledger.jsonl")).unwrap();
+    let vault = Vault::new().with(
+        "vault://mail/demo".parse().unwrap(),
+        Credential::new(CREDENTIAL),
+    );
+    let mut gate = Gate::new(key.clone(), catalog, vault, ledger);
+
+    gate.register(
+        "reviews.summary".parse().unwrap(),
+        digests.0,
+        tool(|_, _| {
+            Ok(args(&[
+                ("stars", json!(4.6)),
+                ("count", json!(12)),
+                ("sentiment", json!("positive")),
+                ("themes", json!(["a", "b"])),
+            ]))
+        }),
+    )
+    .unwrap();
+    gate.register(
+        "reviews.over".parse().unwrap(),
+        digests.1,
+        tool(|_, _| {
+            Ok(args(&[
+                ("stars", json!(4.6)),
+                ("themes", json!(["a", "b"])),
+            ]))
+        }),
+    )
+    .unwrap();
+    gate.register(
+        "reviews.mix".parse().unwrap(),
+        digests.2,
+        tool(|_, _| Ok(args(&[("stars", json!(4.6)), ("note", json!("short"))]))),
+    )
+    .unwrap();
+    gate.register(
+        "email.send".parse().unwrap(),
+        digests.3,
+        tool(|_, _| Ok(args(&[("message_id", json!("msg-1"))]))),
+    )
+    .unwrap();
+    gate.register(
+        "news.read".parse().unwrap(),
+        digests.4,
+        tool(|_, _| Ok(args(&[("headline", json!("Headline"))]))),
+    )
+    .unwrap();
+
+    let prompt = Signed::sign(&key, Purpose::Prompt, prompt_envelope()).unwrap();
+    let plan_yaml = format!(
+        "
+plan: P-demo
+task: T-demo
+prompt_hash: \"{}\"
+reads: [operator_content, editorial, ugc_review]
+steps:
+  - id: 1
+    tool: reviews.summary
+    args: {{}}
+    budget: 3
+  - id: 2
+    tool: email.send
+    args:
+      to:          {{from: [store.contacts.boss]}}
+      cc:          {{forbid: true}}
+      attachments: {{forbid: true}}
+      body:        {{may_embed: {{from: [prompt, store.contacts.boss]}}}}
+    budget: 3
+  - id: 3
+    tool: news.read
+    args: {{}}
+    budget: 2
+  - id: 4
+    tool: reviews.over
+    args: {{}}
+    budget: 2
+  - id: 5
+    tool: reviews.mix
+    args: {{}}
+    budget: 2
+amendments:
+  auto_max_tier: 1
+",
+        prompt_envelope().digest().unwrap().as_str()
+    );
+    let plan_body = Plan::from_yaml(&plan_yaml).unwrap();
+    let plan = Signed::sign(&key, Purpose::Plan, plan_body).unwrap();
+    gate.start_task(&prompt, &plan, &store()).unwrap();
+
+    // 1. Typed output under the 64-bit budget (26 bits) at ugc_review (trust 15): context stays at 100,
+    //    labels still carry trust 15, and email.send runs directly in the Clean band.
+    let Reply::Delivered(d_under) = gate.submit(&req(1, "reviews.summary", json!({}))) else {
+        panic!("expected reviews.summary delivery");
+    };
+    assert!(d_under.typed_only);
+    assert_eq!(d_under.min_trust, Some(Trust::UNKNOWN_AUTHOR));
+    assert_eq!(d_under.labels["stars"].trust, Trust::UNKNOWN_AUTHOR);
+    assert_eq!(
+        d_under.labels["stars"].capacity,
+        Capacity::Typed { bits: 6 }
+    );
+    assert_eq!(
+        d_under.labels["themes"].capacity,
+        Capacity::Typed { bits: 12 }
+    );
+    assert_eq!(gate.context_trust(&task_id()), Some(Trust::FULL));
+
+    // Lower context to 75 (Elevated) via news.read (free text), then run reviews.summary again:
+    // context stays at 75 (never raised, invariant 4), and lowest_read remains step 3 headline (not ugc_review).
+    assert!(matches!(
+        gate.submit(&req(3, "news.read", json!({}))),
+        Reply::Delivered(_)
+    ));
+    assert_eq!(gate.context_trust(&task_id()), Some(Trust::new(75)));
+    assert!(matches!(
+        gate.submit(&req(1, "reviews.summary", json!({}))),
+        Reply::Delivered(_)
+    ));
+    assert_eq!(gate.context_trust(&task_id()), Some(Trust::new(75)));
+
+    let email = email_to_boss("Check lowest_read");
+    let hash = pending(gate.submit(&email), &email, Stage::LlmReview);
+    let view = gate.review_view(&task_id(), &hash).unwrap();
+    assert_eq!(
+        view.lowest_read,
+        Some(SourceView::Step {
+            step: 3,
+            field: "headline".to_owned(),
+            region: RegionType::Editorial,
+            domain: None,
+            trust: Trust::new(75),
+        })
+    );
+
+    // 2. Mix with one free-text field lowers context trust to 15 (ugc_review).
+    let Reply::Delivered(d_mix) = gate.submit(&req(5, "reviews.mix", json!({}))) else {
+        panic!("expected reviews.mix delivery");
+    };
+    assert!(!d_mix.typed_only);
+    assert_eq!(d_mix.labels["stars"].trust, Trust::UNKNOWN_AUTHOR);
+    assert_eq!(gate.context_trust(&task_id()), Some(Trust::UNKNOWN_AUTHOR));
+
+    // Halt and recover to get a fresh instance at trust 100, then test over-budget typed fields.
+    gate.halt_for_takeover(&task_id(), DenyCode::OffPlan);
+    gate.recover(&task_id()).unwrap();
+    assert_eq!(gate.context_trust(&task_id()), Some(Trust::FULL));
+
+    // 3. Same typed fields over the 64-bit budget (6 + 90 = 96 bits) lower context trust to 15.
+    let Reply::Delivered(d_over) = gate.submit(&req(4, "reviews.over", json!({}))) else {
+        panic!("expected reviews.over delivery");
+    };
+    assert!(!d_over.typed_only);
+    assert_eq!(d_over.labels["themes"].trust, Trust::UNKNOWN_AUTHOR);
+    assert_eq!(gate.context_trust(&task_id()), Some(Trust::UNKNOWN_AUTHOR));
+
+    // Check ledger `executed` events record `typed_only`.
+    let entries: Vec<Entry> = std::fs::read_to_string(dir.join("ledger.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let executed: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| e.event["event"] == "executed")
+        .collect();
+    assert_eq!(executed[0].event["typed_only"], json!(true));
+    assert_eq!(executed[1].event["typed_only"], json!(false));
+    assert_eq!(executed[2].event["typed_only"], json!(true));
+    assert_eq!(executed[3].event["typed_only"], json!(false));
+    assert_eq!(executed[4].event["typed_only"], json!(false));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

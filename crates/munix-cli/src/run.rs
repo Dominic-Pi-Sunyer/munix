@@ -261,7 +261,16 @@ fn build_gate(
     catalog: &Catalog,
     ledger: Ledger,
     env: &Env,
+    reader: Arc<dyn ModelAdapter>,
 ) -> Result<Gate, Failure> {
+    let web_config = || -> Result<WebSpeedConfig, Failure> {
+        let mut config =
+            WebSpeedConfig::from_dir(env.get_or("WEBSPEED_OSS_DIR", DEFAULT_WEBSPEED_DIR));
+        config.allow_hosts = env.get("WEBSPEED_ALLOW_HOSTS");
+        config.templates =
+            SiteTemplates::load_dir("sites").map_err(|e| Failure::config(e.to_string()))?;
+        Ok(config)
+    };
     let mut vault = Vault::new();
     for (_, manifest) in catalog.iter() {
         if let Some(at) = &manifest.credentials {
@@ -271,13 +280,17 @@ fn build_gate(
     let mut gate = Gate::new(key.clone(), catalog.clone(), vault, ledger);
     for (name, manifest) in catalog.iter() {
         let tool: Box<dyn Tool> = match name.as_str() {
-            "web.open" => {
-                let mut config =
-                    WebSpeedConfig::from_dir(env.get_or("WEBSPEED_OSS_DIR", DEFAULT_WEBSPEED_DIR));
-                config.allow_hosts = env.get("WEBSPEED_ALLOW_HOSTS");
-                config.templates =
-                    SiteTemplates::load_dir("sites").map_err(|e| Failure::config(e.to_string()))?;
-                Box::new(WebSpeedOpen::new(config).map_err(|e| Failure::config(e.to_string()))?)
+            "web.open" => Box::new(
+                WebSpeedOpen::new(web_config()?).map_err(|e| Failure::config(e.to_string()))?,
+            ),
+            // The Reader fetches with its own Web Speed child, so its reads never share state with the agent's.
+            "reviews.read" => {
+                let web =
+                    WebSpeedOpen::new(web_config()?).map_err(|e| Failure::config(e.to_string()))?;
+                Box::new(munix_readers::reviews::ReviewReader::new(
+                    Arc::new(web),
+                    Arc::clone(&reader),
+                ))
             }
             "email.send" => Box::new(smtp_from(env)?),
             _ => continue,
@@ -516,7 +529,8 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     }
     let ledger = Ledger::create(&ledger_path)
         .map_err(|e| Failure::config(format!("cannot create the ledger: {e}")))?;
-    let mut gate = build_gate(&key, &catalog, ledger, &env)?;
+    let reader_adapter = supervisor_adapter(&env, &supervisor_model, Role::Reader, &api_key)?;
+    let mut gate = build_gate(&key, &catalog, ledger, &env, reader_adapter)?;
 
     // The prompt and the plan, both signed here.
     let envelope = PromptEnvelope {

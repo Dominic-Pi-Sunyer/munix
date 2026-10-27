@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use munix_core::ids::RefId;
 use munix_core::label::{Author, Capacity, Label, RegionType, Source, Trust};
-use munix_core::manifest::{ArgRole, ArgSpec, OutputSpec, ToolManifest};
+use munix_core::manifest::{ArgRole, ArgSpec, OutputSpec, TYPED_BUDGET_BITS, ToolManifest};
 use munix_core::request::check_arg_value;
 use munix_core::validate::Scalar;
 use serde_json::Value;
@@ -34,14 +34,18 @@ pub struct Delivered {
     /// Fields withheld because their region is `hidden` or not in the plan's `reads`, in name order.
     pub withheld: Vec<String>,
     /// The lowest trust among delivered fields; `None` when nothing was delivered. The caller lowers the
-    /// agent's context trust to this.
+    /// agent's context trust to this unless `typed_only` is true.
     pub min_trust: Option<Trust>,
+    /// True when at least one field was delivered and every delivered field's capacity is `Some(bits)` with the
+    /// sum at most `TYPED_BUDGET_BITS` (design spec section 8, "Readers"). When true, the Gate does not lower the
+    /// agent's context trust.
+    pub typed_only: bool,
 }
 
 /// Labels and filters one tool output.
 ///
 /// - Every field must be in `manifest.output` (else `UnknownField`) and pass `munix_core::request::check_arg_value`
-///   against an `ArgSpec` built from the output's type with role `content` and no other limits (else `BadValue`).
+///   against an `ArgSpec` built from the output's type, `values` and `max` with role `content` (else `BadValue`).
 ///   A whole string value that parses as a `RefId` is `BadValue`, so a tool can't forge a Gate ref. Missing
 ///   fields are fine.
 /// - A field whose region is `hidden` or not in `reads` is withheld: not delivered, no label, no ref issued, and
@@ -49,8 +53,10 @@ pub struct Delivered {
 /// - Label: `source` as given; `region` from the manifest; `author` is `operator` for `operator_*` regions and
 ///   `unknown` otherwise; `confidential` from the manifest; trust is the region's ceiling, capped at
 ///   `Trust::WEB_CAP` for a web source and at `Trust::UNKNOWN_AUTHOR` for an unknown author in `ugc_post`,
-///   `ugc_review`, `ugc_comment` or `profile`; capacity is `free_text` for text, url, email, phone, id, ref and
-///   `typed` with 1 bit for bool, 64 for int and number, 32 for date, 8 for enum.
+///   `ugc_review`, `ugc_comment` or `profile`; capacity comes from [`OutputSpec::capacity_bits`] (`Some(bits)` gives
+///   `Capacity::Typed { bits }`, `None` gives `Capacity::FreeText`).
+/// - `typed_only` is true when at least one field was delivered and every delivered field is `Capacity::Typed` with
+///   the sum of bits at most [`TYPED_BUDGET_BITS`] (design spec section 8, "Readers").
 /// - Each url, email and phone value (single or list element) is issued a ref with origin
 ///   `Origin::Step { step, field }` and the field's label, and the ref id replaces the value.
 /// - In delivered text, every `ref:` is rewritten to `ref-`, so page text can't name a Gate ref.
@@ -81,16 +87,36 @@ pub fn ingest(
         labels: BTreeMap::new(),
         withheld: Vec::new(),
         min_trust: None,
+        typed_only: false,
     };
+    // A Reader's output (design spec 8): when every field the tool returned is typed and the whole output fits the
+    // typed budget, it can't carry instructions, so the plan's `reads` filter (which keeps free text the task doesn't
+    // need away from the agent) doesn't withhold it. `hidden` is still never delivered, and labels keep the source's
+    // trust for argument checks.
+    let reader_output = output
+        .keys()
+        .map(|name| {
+            manifest
+                .output
+                .get(name)
+                .and_then(OutputSpec::capacity_bits)
+        })
+        .try_fold(0u32, |sum, bits| sum.checked_add(bits?))
+        .is_some_and(|bits| !output.is_empty() && bits <= TYPED_BUDGET_BITS);
+    let mut total_bits: Option<u32> = Some(0);
     for (name, value) in output {
         let Some(spec) = manifest.output.get(&name) else {
             return Err(IngestError::UnknownField);
         };
-        if spec.region == RegionType::Hidden || !reads.contains(&spec.region) {
+        if spec.region == RegionType::Hidden || (!reads.contains(&spec.region) && !reader_output) {
             delivered.withheld.push(name);
             continue;
         }
         let label = label_for(spec, source);
+        total_bits = match (total_bits, label.capacity) {
+            (Some(sum), Capacity::Typed { bits }) => sum.checked_add(bits),
+            _ => None,
+        };
         delivered.min_trust = Some(
             delivered
                 .min_trust
@@ -100,18 +126,20 @@ pub fn ingest(
         delivered.labels.insert(name.clone(), label);
         delivered.fields.insert(name, value);
     }
+    delivered.typed_only =
+        !delivered.fields.is_empty() && total_bits.is_some_and(|bits| bits <= TYPED_BUDGET_BITS);
     Ok(delivered)
 }
 
-/// Checks one output value against the manifest's type, and refuses a value that is itself a `ref:` token.
+/// Checks one output value against the manifest's type, `values` and `max`, and refuses a value that is itself a `ref:` token.
 fn check_value(spec: &OutputSpec, value: &Value) -> Result<(), IngestError> {
     let arg = ArgSpec {
         ty: spec.ty,
         role: ArgRole::Content,
         optional: false,
-        max: None,
+        max: spec.max,
         max_len: None,
-        values: Vec::new(),
+        values: spec.values.clone(),
         single_line: false,
     };
     let forged = match value {
@@ -155,19 +183,10 @@ fn label_for(spec: &OutputSpec, source: &Source) -> Label {
         author,
         trust,
         confidential: spec.confidential,
-        capacity: capacity_of(spec.ty.scalar),
-    }
-}
-
-fn capacity_of(scalar: Scalar) -> Capacity {
-    match scalar {
-        Scalar::Text | Scalar::Url | Scalar::Email | Scalar::Phone | Scalar::Id | Scalar::Ref => {
-            Capacity::FreeText
-        }
-        Scalar::Bool => Capacity::Typed { bits: 1 },
-        Scalar::Int | Scalar::Number => Capacity::Typed { bits: 64 },
-        Scalar::Date => Capacity::Typed { bits: 32 },
-        Scalar::Enum => Capacity::Typed { bits: 8 },
+        capacity: match spec.capacity_bits() {
+            Some(bits) => Capacity::Typed { bits },
+            None => Capacity::FreeText,
+        },
     }
 }
 
@@ -270,6 +289,42 @@ mod tests {
     // ---- tests that do not touch refs ----
 
     #[test]
+    fn a_reader_output_within_the_budget_is_delivered_even_outside_reads() {
+        let m = manifest(&[
+            "count:   {type: int,  region: ugc_review, max: 50}",
+            "flagged: {type: bool, region: ugc_review}",
+        ]);
+        let only_listing = reads(&[RegionType::ProductListing]);
+        let d = run(
+            &m,
+            &web(1),
+            &only_listing,
+            out(&[("count", json!(3)), ("flagged", json!(true))]),
+        )
+        .unwrap();
+        assert_eq!(d.fields.len(), 2);
+        assert!(d.withheld.is_empty());
+        assert!(d.typed_only);
+        // Labels keep the region's low trust.
+        assert_eq!(d.labels["count"].trust, Trust::UNKNOWN_AUTHOR);
+
+        // One free-text field makes it ordinary output: the reads filter applies again.
+        let m = manifest(&[
+            "count: {type: int,  region: ugc_review, max: 50}",
+            "text:  {type: text, region: ugc_review}",
+        ]);
+        let d = run(
+            &m,
+            &web(1),
+            &only_listing,
+            out(&[("count", json!(3)), ("text", json!("hi"))]),
+        )
+        .unwrap();
+        assert!(d.fields.is_empty());
+        assert_eq!(d.withheld, ["count", "text"]);
+    }
+
+    #[test]
     fn unknown_field_refuses_the_whole_output() {
         let m = web_open();
         let r = run(
@@ -369,16 +424,41 @@ mod tests {
     }
 
     #[test]
-    fn enum_outputs_cannot_pass_because_the_output_spec_has_no_values() {
-        // OutputSpec cannot list enum values, so check_arg_value finds no allowed value (fails closed).
-        let m = manifest(&["k: {type: enum, region: editorial}"]);
-        let r = run(
+    fn enum_and_bounded_outputs_respect_values_and_max() {
+        let m = manifest(&[
+            "k: {type: enum, region: editorial, values: [positive, mixed, negative]}",
+            "n: {type: int, region: editorial, max: 10}",
+            "r: {type: number, region: editorial, max: 5}",
+            "l: {type: \"enum[]\", region: editorial, values: [a, b], max: 2}",
+        ]);
+        let all = reads(&[RegionType::Editorial]);
+        let d = run(
             &m,
             &tool_source(),
-            &reads(&[RegionType::Editorial]),
-            out(&[("k", json!("a"))]),
-        );
-        assert_eq!(r, Err(IngestError::BadValue));
+            &all,
+            out(&[
+                ("k", json!("positive")),
+                ("n", json!(10)),
+                ("r", json!(4.5)),
+                ("l", json!(["a", "b"])),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(d.fields["k"], json!("positive"));
+        assert_eq!(d.fields["n"], json!(10));
+        assert_eq!(d.fields["r"], json!(4.5));
+        assert_eq!(d.fields["l"], json!(["a", "b"]));
+
+        for (name, bad) in [
+            ("k", json!("unlisted")),
+            ("n", json!(11)),
+            ("r", json!(5.5)),
+            ("l", json!(["a", "b", "a"])),
+            ("l", json!(["a", "c"])),
+        ] {
+            let r = run(&m, &tool_source(), &all, out(&[(name, bad.clone())]));
+            assert_eq!(r, Err(IngestError::BadValue), "{name} = {bad}");
+        }
     }
 
     #[test]
@@ -501,6 +581,8 @@ mod tests {
                 region,
                 author_field: None,
                 confidential: Confidential::Public,
+                values: Vec::new(),
+                max: None,
             };
             assert_eq!(
                 label_for(&spec, &tool_source()).author,
@@ -531,6 +613,8 @@ mod tests {
                 region,
                 author_field: None,
                 confidential: Confidential::Public,
+                values: Vec::new(),
+                max: None,
             };
             let non_web = label_for(&spec, &Source::Reader);
             let on_web = label_for(&spec, &web(3));
@@ -564,6 +648,8 @@ mod tests {
                 region,
                 author_field: None,
                 confidential: Confidential::Public,
+                values: Vec::new(),
+                max: None,
             };
             for source in [web(2), tool_source()] {
                 let label = label_for(&spec, &source);
@@ -596,43 +682,109 @@ mod tests {
             "d_phone: {type: phone, region: editorial}",
             "e_id: {type: id, region: editorial}",
             "f_bool: {type: bool, region: editorial}",
-            "g_int: {type: int, region: editorial}",
-            "h_num: {type: number, region: editorial}",
+            "g_int_bounded: {type: int, region: editorial, max: 50}",
+            "g_int_unbounded: {type: int, region: editorial}",
+            "h_num_bounded: {type: number, region: editorial, max: 5}",
+            "h_num_unbounded: {type: number, region: editorial}",
             "i_date: {type: date, region: editorial}",
             "j_list: {type: \"text[]\", region: editorial}",
+            "k_enum: {type: enum, region: editorial, values: [a, b, c]}",
+            "l_enum_list: {type: \"enum[]\", region: editorial, values: [a, b, c, d, e, f, g, h], max: 4}",
         ]);
-        // Only types that need no ref are delivered here; the ref-issuing ones are withheld.
         let d = run(
             &m,
             &tool_source(),
             &reads(&[RegionType::Editorial]),
             out(&[
                 ("a_text", json!("t")),
+                ("b_url", json!("https://shop.example/")),
+                ("c_email", json!("help@shop.example")),
+                ("d_phone", json!("+14155550123")),
                 ("e_id", json!("id-1")),
                 ("f_bool", json!(true)),
-                ("g_int", json!(3)),
-                ("h_num", json!(2.5)),
+                ("g_int_bounded", json!(3)),
+                ("g_int_unbounded", json!(3)),
+                ("h_num_bounded", json!(2.5)),
+                ("h_num_unbounded", json!(2.5)),
                 ("i_date", json!("2026-10-26")),
                 ("j_list", json!(["x", "y"])),
+                ("k_enum", json!("b")),
+                ("l_enum_list", json!(["a", "h"])),
             ]),
         )
         .unwrap();
         assert_eq!(d.labels["a_text"].capacity, Capacity::FreeText);
+        assert_eq!(d.labels["b_url"].capacity, Capacity::FreeText);
+        assert_eq!(d.labels["c_email"].capacity, Capacity::FreeText);
+        assert_eq!(d.labels["d_phone"].capacity, Capacity::FreeText);
         assert_eq!(d.labels["e_id"].capacity, Capacity::FreeText);
         assert_eq!(d.labels["f_bool"].capacity, Capacity::Typed { bits: 1 });
-        assert_eq!(d.labels["g_int"].capacity, Capacity::Typed { bits: 64 });
-        assert_eq!(d.labels["h_num"].capacity, Capacity::Typed { bits: 64 });
-        assert_eq!(d.labels["i_date"].capacity, Capacity::Typed { bits: 32 });
+        assert_eq!(
+            d.labels["g_int_bounded"].capacity,
+            Capacity::Typed { bits: 6 }
+        );
+        assert_eq!(d.labels["g_int_unbounded"].capacity, Capacity::FreeText);
+        assert_eq!(
+            d.labels["h_num_bounded"].capacity,
+            Capacity::Typed { bits: 6 }
+        );
+        assert_eq!(d.labels["h_num_unbounded"].capacity, Capacity::FreeText);
+        assert_eq!(d.labels["i_date"].capacity, Capacity::Typed { bits: 16 });
         assert_eq!(d.labels["j_list"].capacity, Capacity::FreeText);
-        assert_eq!(d.fields["f_bool"], json!(true));
-        assert_eq!(d.fields["g_int"], json!(3));
-        assert_eq!(d.fields["h_num"], json!(2.5));
-        assert_eq!(d.fields["j_list"], json!(["x", "y"]));
-        // The enum capacity (8 bits) and the free-text scalars that become refs are covered directly.
-        assert_eq!(capacity_of(Scalar::Enum), Capacity::Typed { bits: 8 });
-        for s in [Scalar::Url, Scalar::Email, Scalar::Phone, Scalar::Ref] {
-            assert_eq!(capacity_of(s), Capacity::FreeText);
-        }
+        assert_eq!(d.labels["k_enum"].capacity, Capacity::Typed { bits: 2 });
+        assert_eq!(
+            d.labels["l_enum_list"].capacity,
+            Capacity::Typed { bits: 12 }
+        );
+        assert!(!d.typed_only);
+    }
+
+    #[test]
+    fn typed_only_tracks_the_capacity_budget() {
+        let m = manifest(&[
+            "stars: {type: number, region: ugc_review, max: 5}",
+            "count: {type: int, region: ugc_review, max: 50}",
+            "sentiment: {type: enum, region: ugc_review, values: [positive, mixed, negative, none]}",
+            "themes: {type: \"enum[]\", region: ugc_review, values: [a, b, c, d, e, f, g, h], max: 4}",
+            "over_list: {type: \"enum[]\", region: ugc_review, values: [a, b, c, d, e, f, g, h], max: 30}",
+            "free: {type: text, region: ugc_review}",
+        ]);
+        let ugc = reads(&[RegionType::UgcReview]);
+
+        // Empty delivered output is not typed_only.
+        let empty = run(&m, &web(1), &ugc, BTreeMap::new()).unwrap();
+        assert!(!empty.typed_only);
+
+        // Under the 64-bit budget (6 + 6 + 2 + 12 = 26 bits): typed_only is true, labels still carry region trust.
+        let under = run(
+            &m,
+            &web(1),
+            &ugc,
+            out(&[
+                ("stars", json!(4.6)),
+                ("count", json!(12)),
+                ("sentiment", json!("positive")),
+                ("themes", json!(["a", "b"])),
+            ]),
+        )
+        .unwrap();
+        assert!(under.typed_only);
+        assert_eq!(under.min_trust, Some(Trust::UNKNOWN_AUTHOR));
+        assert_eq!(under.labels["stars"].trust, Trust::UNKNOWN_AUTHOR);
+
+        // Over the 64-bit budget (over_list alone is 3 * 30 = 90 bits): typed_only is false.
+        let over = run(&m, &web(1), &ugc, out(&[("over_list", json!(["a", "b"]))])).unwrap();
+        assert!(!over.typed_only);
+
+        // Mix of a small typed field and one free-text field: typed_only is false.
+        let mix = run(
+            &m,
+            &web(1),
+            &ugc,
+            out(&[("stars", json!(4.6)), ("free", json!("hello"))]),
+        )
+        .unwrap();
+        assert!(!mix.typed_only);
     }
 
     #[test]
