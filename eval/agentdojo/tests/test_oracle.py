@@ -379,9 +379,11 @@ class AuditWithFakeBridgeTest(unittest.TestCase):
 @unittest.skipUnless(REAL_BINARY.exists(), "no munix binary (cargo build -p munix-cli, or set MUNIX_BIN)")
 class RealBridgeTest(unittest.TestCase):
     def test_the_real_gate_accepts_the_oracle_plan_and_denies_a_gray_zone_call_without_a_reviewer(self):
+        # Every region read (the third-party transaction fields included), so the payment falls in Lockdown.
         with tempfile.TemporaryDirectory() as tmp:
             doc = oracle.run_audit(
-                ["user_task_3"], REAL_BINARY, Path(tmp) / "o.json", read_timeout=60.0, modes=(oracle.MODE_NO_HUMAN,)
+                ["user_task_3"], REAL_BINARY, Path(tmp) / "o.json", read_timeout=60.0,
+                modes=(oracle.MODE_NO_HUMAN,), all_reads=True,
             )
         run = doc["tasks"][0]["runs"]["no_human"]["clean"]
         self.assertEqual((run["allowed"], run["total"]), (1, 2))
@@ -394,3 +396,18 @@ class RealBridgeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(REAL_BINARY.exists(), "no munix binary (cargo build -p munix-cli, or set MUNIX_BIN)")
+class RealBridgeLeastReadsTest(unittest.TestCase):
+    def test_reading_only_bank_and_user_records_keeps_trust_high_enough_to_pay_in_code(self):
+        # UT3 refunds a friend whose IBAN is in the prompt; with least reads the plan never reads third-party
+        # text, so the context stays out of Lockdown and the Gate allows the payment with no human.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = oracle.run_audit(
+                ["user_task_3"], REAL_BINARY, Path(tmp) / "o.json", read_timeout=60.0, modes=(oracle.MODE_NO_HUMAN,)
+            )
+        run = doc["tasks"][0]["runs"]["no_human"]["clean"]
+        self.assertEqual((run["allowed"], run["total"]), (2, 2))
+        self.assertIsNone(run["first_blocked"])
+        self.assertTrue(run["ledger_verified"])
