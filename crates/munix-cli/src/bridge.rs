@@ -1,0 +1,951 @@
+//! `munix bridge`: the Gate for one AgentDojo task, spoken to in JSON lines on stdin and stdout.
+//!
+//! ```text
+//! munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml>]
+//! ```
+//!
+//! The Python side (`eval/agentdojo`) runs the agent in its own process and sends every tool call here. The same
+//! `GateFront` that `munix run` serves decides each call; when it lets one run, the bridge hands the resolved
+//! arguments back to Python (`run_tool`) and waits for the function's output (`tool_result`). Nothing here decides
+//! anything itself: no Gate, policy or reviewer logic is duplicated, and the Console answers no to everything.
+//!
+//! There is no sandbox, model gateway, watchdog, recovery or Integrity Seal: the agent is AgentDojo's, not ours.
+
+use std::collections::BTreeMap;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use munix_adapters::{ModelAdapter, Role};
+use munix_core::crypto::{Purpose, Signed, SigningKey};
+use munix_core::ids::{PlanId, SessionId, TaskId};
+use munix_core::manifest::Catalog;
+use munix_core::plan::Plan;
+use munix_core::prompt::PromptEnvelope;
+use munix_gate::gate::{Gate, Store};
+use munix_gate::tool::{Tool, ToolFailure};
+use munix_gate::vault::{Credential, Vault};
+use munix_ledger::Ledger;
+use munix_runtime::mcp::McpHandler;
+use munix_supervisor::planner::Planner;
+use munix_supervisor::reviewer::Reviewer;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::confirm::Confirmer;
+use crate::front::{GateFront, code_text};
+use crate::run::{
+    DEFAULT_MODEL, Env, Failure, PLACEHOLDER_CREDENTIAL, load_catalog, parse_id, random_bytes,
+    random_hex, rewrite_plan, supervisor_adapter,
+};
+
+const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml>]";
+/// What the model-facing diagnostics on stderr are cut to.
+const MAX_DIAGNOSTIC: usize = 200;
+
+/// What `munix bridge` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+struct Options {
+    manifests: PathBuf,
+    ledger: PathBuf,
+    plan: Option<PathBuf>,
+}
+
+/// Parses `bridge --manifests <dir> --ledger <file> [--plan <file>]`.
+fn parse_args(args: &[String]) -> Result<Options, Failure> {
+    let mut it = args.iter();
+    if it.next().map(String::as_str) != Some("bridge") {
+        return Err(Failure::usage(USAGE));
+    }
+    let (mut manifests, mut ledger, mut plan) = (None, None, None);
+    while let Some(arg) = it.next() {
+        let slot = match arg.as_str() {
+            "--manifests" => &mut manifests,
+            "--ledger" => &mut ledger,
+            "--plan" => &mut plan,
+            _ => return Err(Failure::usage(USAGE)),
+        };
+        let Some(value) = it.next() else {
+            return Err(Failure::usage(USAGE));
+        };
+        if slot.replace(PathBuf::from(value)).is_some() {
+            return Err(Failure::usage(USAGE));
+        }
+    }
+    match (manifests, ledger) {
+        (Some(manifests), Some(ledger)) => Ok(Options {
+            manifests,
+            ledger,
+            plan,
+        }),
+        _ => Err(Failure::usage(USAGE)),
+    }
+}
+
+/// A Console that never approves anything: nobody is there to ask.
+#[derive(Debug, Default)]
+struct AlwaysNo;
+
+impl Confirmer for AlwaysNo {
+    fn confirm(&mut self, _view: &munix_gate::gate::PendingView) -> bool {
+        false
+    }
+}
+
+/// One line from Python.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum Incoming {
+    Start {
+        prompt: String,
+    },
+    Call {
+        name: String,
+        #[serde(default)]
+        arguments: Value,
+    },
+    ToolResult {
+        ok: bool,
+        #[serde(default)]
+        output: Option<Value>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    End,
+}
+
+enum Received {
+    Message(Incoming),
+    /// Stdin closed.
+    Eof,
+    /// Not UTF-8, not JSON, not an object with a known `op` and exactly its fields.
+    Malformed,
+}
+
+/// The two ends of the conversation with Python, shared by the main loop and the remote tools (a tool's `call`
+/// runs while the main loop is inside `GateFront::call`, and needs the same lines).
+struct Io {
+    reader: Box<dyn BufRead + Send>,
+    writer: Box<dyn Write + Send>,
+    /// Python sent something the protocol does not allow while a tool was waiting for its result.
+    broken: bool,
+    /// Stdin closed, or stdout stopped taking lines.
+    closed: bool,
+}
+
+impl Io {
+    fn send(&mut self, message: &Value) {
+        if self.closed {
+            return;
+        }
+        let Ok(mut line) = serde_json::to_string(message) else {
+            self.closed = true;
+            return;
+        };
+        line.push('\n');
+        if self.writer.write_all(line.as_bytes()).is_err() || self.writer.flush().is_err() {
+            self.closed = true;
+        }
+    }
+
+    fn recv(&mut self) -> Received {
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => {
+                    self.closed = true;
+                    return Received::Eof;
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    return Received::Malformed;
+                }
+                Err(_) => {
+                    self.closed = true;
+                    return Received::Eof;
+                }
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            return match serde_json::from_str::<Incoming>(&line) {
+                Ok(message) => Received::Message(message),
+                Err(_) => Received::Malformed,
+            };
+        }
+    }
+}
+
+fn lock(io: &Mutex<Io>) -> MutexGuard<'_, Io> {
+    io.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A catalog tool that runs in Python: `call` sends `run_tool` and blocks for the matching `tool_result`.
+struct RemoteTool {
+    io: Arc<Mutex<Io>>,
+    /// AgentDojo's name for the function (the manifest's tool name after the suite prefix).
+    name: String,
+}
+
+impl Tool for RemoteTool {
+    fn call(
+        &self,
+        args: &BTreeMap<String, Value>,
+        _credential: Option<&Credential>,
+    ) -> Result<BTreeMap<String, Value>, ToolFailure> {
+        let mut io = lock(&self.io);
+        io.send(&json!({"op": "run_tool", "name": self.name, "arguments": args}));
+        if io.closed {
+            return Err(ToolFailure::Unavailable);
+        }
+        match io.recv() {
+            Received::Message(Incoming::ToolResult {
+                ok: true,
+                output: None,
+                ..
+            }) => Ok(BTreeMap::new()),
+            Received::Message(Incoming::ToolResult {
+                ok: true,
+                output: Some(Value::Object(map)),
+                ..
+            }) => Ok(map.into_iter().collect()),
+            Received::Message(Incoming::ToolResult { ok: true, .. }) => Err(ToolFailure::Internal),
+            Received::Message(Incoming::ToolResult {
+                ok: false, error, ..
+            }) => {
+                eprintln!(
+                    "munix: bridge: {} failed: {}",
+                    self.name,
+                    diagnostic(error.as_deref().unwrap_or(""))
+                );
+                // AgentDojo's functions fail on bad arguments (an unknown id, a wrong format).
+                Err(ToolFailure::BadInput)
+            }
+            Received::Message(_) | Received::Malformed => {
+                io.broken = true;
+                Err(ToolFailure::Internal)
+            }
+            Received::Eof => Err(ToolFailure::Unavailable),
+        }
+    }
+}
+
+/// Python's error text for stderr: one line, no control characters, cut short.
+fn diagnostic(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_DIAGNOSTIC)
+        .collect()
+}
+
+/// How the task's plan comes about.
+enum PlanSource {
+    /// A hand-written plan, rewritten with this run's ids and signed here.
+    Given(Plan),
+    /// The Supervisor's planner writes it from the prompt and the catalog (empty store).
+    Planner(Arc<dyn ModelAdapter>),
+}
+
+/// Everything one bridge session needs, with the randomness already drawn.
+struct Setup {
+    catalog: Catalog,
+    ledger_path: PathBuf,
+    plan: PlanSource,
+    /// The gray-zone reviewer's model.
+    reviewer: Arc<dyn ModelAdapter>,
+    key: SigningKey,
+    task: TaskId,
+    session: SessionId,
+    plan_id: PlanId,
+    nonce: String,
+}
+
+/// The suite every manifest in the catalog belongs to: the part of each tool name before its first dot.
+fn suite_of(catalog: &Catalog) -> Result<String, Failure> {
+    let mut suite: Option<&str> = None;
+    for (name, _) in catalog.iter() {
+        let Some((prefix, rest)) = name.as_str().split_once('.') else {
+            return Err(Failure::config(format!(
+                "tool {name} has no suite prefix (expected <suite>.<name>)"
+            )));
+        };
+        if rest.is_empty() {
+            return Err(Failure::config(format!("tool {name} has no function name")));
+        }
+        match suite {
+            None => suite = Some(prefix),
+            Some(first) if first == prefix => {}
+            Some(_) => {
+                return Err(Failure::config(
+                    "the manifests belong to more than one suite",
+                ));
+            }
+        }
+    }
+    suite
+        .map(str::to_owned)
+        .ok_or_else(|| Failure::config("no manifests found"))
+}
+
+/// The Gate with every manifest's tool registered as a remote tool at its manifest's digest.
+fn build_gate(setup: &Setup, io: &Arc<Mutex<Io>>) -> Result<Gate, Failure> {
+    if let Some(dir) = setup
+        .ledger_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|_| Failure::config("cannot create the ledger directory"))?;
+    }
+    let ledger = Ledger::create(&setup.ledger_path)
+        .map_err(|e| Failure::config(format!("cannot create the ledger: {e}")))?;
+    let mut vault = Vault::new();
+    for (_, manifest) in setup.catalog.iter() {
+        if let Some(at) = &manifest.credentials {
+            vault.insert(at.clone(), Credential::new(PLACEHOLDER_CREDENTIAL));
+        }
+    }
+    let mut gate = Gate::new(setup.key.clone(), setup.catalog.clone(), vault, ledger);
+    for (name, manifest) in setup.catalog.iter() {
+        let function = name
+            .as_str()
+            .split_once('.')
+            .map_or(name.as_str(), |(_, rest)| rest);
+        let tool = RemoteTool {
+            io: Arc::clone(io),
+            name: function.to_owned(),
+        };
+        let pinned = manifest
+            .digest()
+            .map_err(|e| Failure::config(e.to_string()))?;
+        gate.register(name.clone(), pinned, Box::new(tool))
+            .map_err(|e| Failure::config(format!("registering {name}: {e}")))?;
+    }
+    Ok(gate)
+}
+
+/// Runs one bridge session over `reader` and `writer`. Returns `Ok` when the session ended with `end` or stdin
+/// closed; a failure is also sent to Python as `{"op":"error",…}` (and carries its exit code).
+fn serve_bridge<R, W>(reader: R, writer: W, setup: Setup) -> Result<(), Failure>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let io = Arc::new(Mutex::new(Io {
+        reader: Box::new(reader),
+        writer: Box::new(writer),
+        broken: false,
+        closed: false,
+    }));
+    let result = session(&io, setup);
+    if let Err(failure) = &result {
+        lock(&io).send(&json!({"op": "error", "message": failure.message}));
+    }
+    result
+}
+
+fn malformed() -> Failure {
+    Failure::usage("malformed input")
+}
+
+fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
+    let suite = suite_of(&setup.catalog)?;
+    let mut gate = build_gate(&setup, io)?;
+
+    // `start`: the prompt, then the plan, both signed here.
+    let prompt_text = match lock(io).recv() {
+        Received::Message(Incoming::Start { prompt }) => prompt,
+        Received::Eof => return Ok(()),
+        Received::Message(_) | Received::Malformed => return Err(malformed()),
+    };
+    let key = &setup.key;
+    let envelope = PromptEnvelope {
+        task: setup.task.clone(),
+        session: setup.session.clone(),
+        nonce: setup.nonce.clone(),
+        text: prompt_text,
+        data: Vec::new(),
+    };
+    envelope
+        .validate()
+        .map_err(|e| Failure::config(format!("prompt: {e}")))?;
+    let prompt_hash = envelope
+        .digest()
+        .map_err(|e| Failure::config(format!("prompt: {e}")))?;
+    let sign_failed = |e: munix_core::error::Error| Failure::failed(e.to_string());
+    let plan = match &setup.plan {
+        PlanSource::Given(plan) => {
+            let plan = rewrite_plan(
+                plan.clone(),
+                setup.task.clone(),
+                setup.plan_id.clone(),
+                prompt_hash,
+            );
+            Signed::sign(key, Purpose::Plan, plan).map_err(sign_failed)?
+        }
+        PlanSource::Planner(adapter) => {
+            let planner = Planner::new(Arc::clone(adapter), key.clone());
+            planner
+                .plan(
+                    &envelope,
+                    &setup.catalog,
+                    &BTreeMap::new(),
+                    setup.plan_id.clone(),
+                )
+                .map_err(|e| Failure::config(e.to_string()))?
+        }
+    };
+    let prompt = Signed::sign(key, Purpose::Prompt, envelope.clone()).map_err(sign_failed)?;
+    let store = Store::new();
+    let brief = gate
+        .start_task(&prompt, &plan, &store)
+        .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
+    let plan_steps = plan.body.steps.len();
+    let reviewer = Reviewer::new(Arc::clone(&setup.reviewer), key.clone());
+    let mut front =
+        GateFront::new(&mut gate, key, brief, AlwaysNo).with_reviewer(reviewer, envelope);
+    lock(io).send(&json!({
+        "op": "started",
+        "task": setup.task.as_str(),
+        "plan_steps": plan_steps,
+    }));
+
+    // `call`s until `end`.
+    loop {
+        let received = lock(io).recv();
+        match received {
+            Received::Eof => return Ok(()),
+            Received::Message(Incoming::Call { name, arguments }) => {
+                // The lock is not held here: the remote tools take it to talk to Python.
+                let result = front.call(&format!("{suite}_{name}"), &arguments);
+                let mut io = lock(io);
+                if io.broken {
+                    return Err(malformed());
+                }
+                io.send(&json!({
+                    "op": "result",
+                    "text": result.text,
+                    "is_error": result.is_error,
+                }));
+                if io.closed {
+                    return Ok(());
+                }
+            }
+            Received::Message(Incoming::End) => break,
+            Received::Message(_) | Received::Malformed => return Err(malformed()),
+        }
+    }
+
+    let takeover = front.takeover();
+    drop(front);
+    let context_trust = gate.context_trust(&setup.task).map(|t| t.value());
+    drop(gate);
+    let (entries, verified) = match munix_ledger::verify_file(&setup.ledger_path) {
+        Ok(entries) => (entries, true),
+        Err(_) => (0, false),
+    };
+    lock(io).send(&json!({
+        "op": "ended",
+        "context_trust": context_trust,
+        "ledger_entries": entries,
+        "ledger_verified": verified,
+        "takeover": takeover.as_ref().map(code_text),
+    }));
+    Ok(())
+}
+
+/// `munix bridge`. Exit codes: 0 after `end` or when stdin closes, 2 for bad usage, bad configuration or
+/// malformed input, 1 for a failure while running.
+pub fn main(args: Vec<String>) -> ExitCode {
+    match run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            if failure.message == USAGE {
+                eprintln!("{USAGE}");
+            } else {
+                eprintln!("munix: {}", failure.message);
+            }
+            ExitCode::from(failure.code)
+        }
+    }
+}
+
+fn run(args: &[String]) -> Result<(), Failure> {
+    let opts = parse_args(args)?;
+    let env = Env::load(Path::new(".env"))?;
+    let api_key = env
+        .get("MODEL_API_KEY")
+        .ok_or_else(|| Failure::config("MODEL_API_KEY is not set (put it in .env)"))?;
+    let supervisor_model = env.get_or("MUNIX_SUPERVISOR_MODEL", DEFAULT_MODEL);
+    let catalog = load_catalog(&opts.manifests)?;
+    let plan = match &opts.plan {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|_| Failure::config(format!("cannot read {}", path.display())))?;
+            PlanSource::Given(
+                Plan::from_yaml(&text)
+                    .map_err(|e| Failure::config(format!("{}: {e}", path.display())))?,
+            )
+        }
+        None => PlanSource::Planner(supervisor_adapter(
+            &env,
+            &supervisor_model,
+            Role::Planner,
+            &api_key,
+        )?),
+    };
+    let reviewer = supervisor_adapter(&env, &supervisor_model, Role::Reviewer, &api_key)?;
+    let setup = Setup {
+        catalog,
+        ledger_path: opts.ledger,
+        plan,
+        reviewer,
+        key: SigningKey::from_bytes(&random_bytes(32)?)
+            .map_err(|e| Failure::failed(e.to_string()))?,
+        task: parse_id(&format!("T-{}", random_hex(4)?))?,
+        session: parse_id(&format!("S-{}", random_hex(4)?))?,
+        plan_id: parse_id(&format!("P-{}", random_hex(4)?))?,
+        nonce: random_hex(16)?,
+    };
+    serve_bridge(
+        std::io::BufReader::new(std::io::stdin()),
+        std::io::stdout(),
+        setup,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use munix_adapters::MockAdapter;
+    use munix_core::manifest::ToolManifest;
+    use std::io::Cursor;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const READ: &str = "
+tool: test.read
+description: Read a note and some contacts.
+tier: 1
+output:
+  note:     {type: text,      region: ugc_review, confidential: public}
+  contacts: {type: 'email[]', region: ugc_review, confidential: public, max: 3}
+";
+    const NEWS: &str = "
+tool: test.news
+description: Read the headline of the day.
+tier: 0
+output:
+  headline: {type: text, region: editorial, confidential: public}
+";
+    const SEND: &str = "
+tool: test.send
+description: Send a message.
+tier: 3
+egress: true
+credentials: vault://mail/test
+args:
+  to:   {type: 'email[]', role: destination, max: 5}
+  body: {type: text,      role: content,     max_len: 2000}
+output:
+  message_id: {type: id, region: operator_content, confidential: internal}
+";
+    const PLAN: &str = "
+plan: P-test
+task: T-test
+prompt_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+reads: [ugc_review, editorial, operator_content]
+steps:
+  - id: 1
+    tool: test.read
+    args: {}
+    budget: 3
+  - id: 2
+    tool: test.news
+    args: {}
+    budget: 3
+  - id: 3
+    tool: test.send
+    args:
+      to:   {from: [prompt]}
+      body: {dlp: no_secret}
+    budget: 3
+amendments:
+  auto_max_tier: 1
+";
+    const PROMPT: &str = "Send my status to boss@corp.example when you are done.";
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Stdout captured in memory.
+    #[derive(Clone, Default)]
+    struct Out(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Out {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Run {
+        result: Result<(), Failure>,
+        out: Vec<Value>,
+        ledger: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl Drop for Run {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn setup(dir: &Path, reviewer: Arc<dyn ModelAdapter>) -> Setup {
+        let manifests: Vec<ToolManifest> = [READ, NEWS, SEND]
+            .iter()
+            .map(|y| ToolManifest::from_yaml(y).unwrap())
+            .collect();
+        Setup {
+            catalog: Catalog::from_manifests(manifests).unwrap(),
+            ledger_path: dir.join("sub").join("ledger.jsonl"),
+            plan: PlanSource::Given(Plan::from_yaml(PLAN).unwrap()),
+            reviewer,
+            key: SigningKey::from_bytes(&[9u8; 32]).unwrap(),
+            task: "T-bridge1".parse().unwrap(),
+            session: "S-bridge1".parse().unwrap(),
+            plan_id: "P-bridge1".parse().unwrap(),
+            nonce: "0123456789abcdef".to_owned(),
+        }
+    }
+
+    /// Feeds `lines` to a bridge and returns what it wrote.
+    fn drive(lines: &[Value], reviewer: Arc<dyn ModelAdapter>) -> Run {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        drive_raw(&input, setup(&dir, reviewer), dir)
+    }
+
+    fn drive_raw(input: &str, setup: Setup, dir: PathBuf) -> Run {
+        let out = Out::default();
+        let ledger = setup.ledger_path.clone();
+        let result = serve_bridge(
+            Cursor::new(input.to_owned().into_bytes()),
+            out.clone(),
+            setup,
+        );
+        let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let out = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        Run {
+            result,
+            out,
+            ledger,
+            dir,
+        }
+    }
+
+    fn no_reviewer() -> Arc<dyn ModelAdapter> {
+        Arc::new(MockAdapter::new(Vec::new()))
+    }
+
+    fn start() -> Value {
+        json!({"op": "start", "prompt": PROMPT})
+    }
+
+    fn call(name: &str, arguments: Value) -> Value {
+        json!({"op": "call", "name": name, "arguments": arguments})
+    }
+
+    fn tool_ok(output: Value) -> Value {
+        json!({"op": "tool_result", "ok": true, "output": output})
+    }
+
+    fn end() -> Value {
+        json!({"op": "end"})
+    }
+
+    /// The `ref:` ids in a delivered `- item` list.
+    fn refs_in(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .filter(|item| item.starts_with("ref:"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn ops(run: &Run) -> Vec<&str> {
+        run.out.iter().map(|m| m["op"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn a_call_the_gate_allows_runs_in_python_and_the_result_comes_back() {
+        let run = drive(
+            &[
+                start(),
+                call("read", json!({})),
+                tool_ok(json!({"note": "all quiet", "contacts": ["a@b.example"]})),
+                end(),
+            ],
+            no_reviewer(),
+        );
+        run.result.as_ref().unwrap();
+        assert_eq!(ops(&run), ["started", "run_tool", "result", "ended"]);
+        assert_eq!(run.out[0]["plan_steps"], 3);
+        assert!(run.out[0]["task"].as_str().unwrap().starts_with("T-"));
+        // The function name is AgentDojo's, without the suite.
+        assert_eq!(run.out[1]["name"], "read");
+        assert_eq!(run.out[1]["arguments"], json!({}));
+        assert_eq!(run.out[2]["is_error"], false);
+        let text = run.out[2]["text"].as_str().unwrap();
+        assert!(text.contains("## note [ugc_review, trust "), "{text}");
+        assert!(text.contains("all quiet"));
+        // An address in an untrusted output is only ever shown as a ref.
+        assert!(!text.contains("a@b.example"), "{text}");
+        assert_eq!(refs_in(text).len(), 1, "{text}");
+
+        let ended = &run.out[3];
+        assert_eq!(ended["takeover"], Value::Null);
+        assert_eq!(ended["ledger_verified"], true);
+        assert!(ended["ledger_entries"].as_u64().unwrap() >= 4);
+        assert!(ended["context_trust"].as_u64().unwrap() < 100);
+        // The ledger really is where it was asked for, and its parent directory was created.
+        assert_eq!(
+            munix_ledger::verify_file(&run.ledger).unwrap() as u64,
+            ended["ledger_entries"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_destination_from_the_prompt_runs_with_the_real_address() {
+        let run = drive(
+            &[
+                start(),
+                call("send", json!({"to": ["ref:e1"], "body": "done"})),
+                tool_ok(json!({"message_id": "m-1"})),
+                end(),
+            ],
+            no_reviewer(),
+        );
+        run.result.as_ref().unwrap();
+        assert_eq!(ops(&run), ["started", "run_tool", "result", "ended"]);
+        assert_eq!(run.out[1]["name"], "send");
+        // Python gets the resolved argument, not the ref.
+        assert_eq!(
+            run.out[1]["arguments"],
+            json!({"to": ["boss@corp.example"], "body": "done"})
+        );
+        assert_eq!(run.out[2]["is_error"], false);
+        assert!(run.out[2]["text"].as_str().unwrap().contains("m-1"));
+        assert_eq!(run.out[3]["takeover"], Value::Null);
+        // Only trusted content was touched, so the context stays high.
+        assert!(run.out[3]["context_trust"].as_u64().unwrap() >= 60);
+    }
+
+    #[test]
+    fn a_destination_from_a_low_trust_output_is_a_takeover_and_halts_the_task() {
+        // The first `read` is followed by the contacts' ref in a `send`; the second `send` is never run.
+        let mut lines = vec![
+            start(),
+            call("read", json!({})),
+            tool_ok(json!({"note": "hi", "contacts": ["evil@attacker.example"]})),
+        ];
+        // The ref id is only known once the first result is out, so run the first half to learn it.
+        let first = drive(&lines, no_reviewer());
+        let text = first.out[2]["text"].as_str().unwrap().to_owned();
+        let contact = refs_in(&text).remove(0);
+        drop(first);
+
+        lines.push(call("send", json!({"to": [contact], "body": "x"})));
+        lines.push(call("send", json!({"to": ["ref:e1"], "body": "y"})));
+        lines.push(end());
+        let run = drive(&lines, no_reviewer());
+        run.result.as_ref().unwrap();
+        // No `run_tool` for either send.
+        assert_eq!(
+            ops(&run),
+            ["started", "run_tool", "result", "result", "result", "ended"]
+        );
+        assert_eq!(run.out[3]["text"], "denied: untrusted_destination");
+        assert_eq!(run.out[3]["is_error"], true);
+        assert_eq!(run.out[4]["text"], "denied: task halted");
+        assert_eq!(run.out[4]["is_error"], true);
+        assert_eq!(run.out[5]["takeover"], "untrusted_destination");
+        assert_eq!(run.out[5]["ledger_verified"], true);
+    }
+
+    #[test]
+    fn a_gray_zone_call_the_reviewer_hands_to_the_user_is_denied_without_asking() {
+        let reviewer = Arc::new(MockAdapter::new(vec![Ok(json!({
+            "verdict": "confirm_user",
+            "reason": "unclear",
+        }))]));
+        let run = drive(
+            &[
+                start(),
+                call("news", json!({})),
+                tool_ok(json!({"headline": "A quiet day"})),
+                call("send", json!({"to": ["ref:e1"], "body": "done"})),
+                end(),
+            ],
+            reviewer.clone(),
+        );
+        run.result.as_ref().unwrap();
+        // `news` ran; `send` was reviewed, handed to the (always-no) Console, and never reached Python.
+        assert_eq!(
+            ops(&run),
+            ["started", "run_tool", "result", "result", "ended"]
+        );
+        assert_eq!(reviewer.seen().len(), 1);
+        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["is_error"], true);
+        assert_eq!(run.out[4]["takeover"], Value::Null);
+    }
+
+    #[test]
+    fn a_failed_tool_is_a_coarse_failure_and_the_session_goes_on() {
+        let run = drive(
+            &[
+                start(),
+                call("read", json!({})),
+                json!({"op": "tool_result", "ok": false, "error": "no such thing"}),
+                end(),
+            ],
+            no_reviewer(),
+        );
+        run.result.as_ref().unwrap();
+        assert_eq!(ops(&run), ["started", "run_tool", "result", "ended"]);
+        assert_eq!(run.out[2]["text"], "tool failed: bad_input");
+        assert_eq!(run.out[2]["is_error"], true);
+    }
+
+    #[test]
+    fn a_call_outside_the_plan_is_a_takeover() {
+        let run = drive(
+            &[start(), call("wire_money", json!({})), end()],
+            no_reviewer(),
+        );
+        run.result.as_ref().unwrap();
+        assert_eq!(ops(&run), ["started", "result", "ended"]);
+        assert_eq!(run.out[1]["text"], "denied: off_plan");
+        assert_eq!(run.out[2]["takeover"], "off_plan");
+    }
+
+    #[test]
+    fn stdin_closing_early_ends_quietly() {
+        let before_start = drive(&[], no_reviewer());
+        before_start.result.as_ref().unwrap();
+        assert!(before_start.out.is_empty());
+
+        let after_start = drive(&[start()], no_reviewer());
+        after_start.result.as_ref().unwrap();
+        assert_eq!(ops(&after_start), ["started"]);
+
+        // Closing while a tool waits for its result writes no `result` or `ended`.
+        let mid_tool = drive(&[start(), call("read", json!({}))], no_reviewer());
+        mid_tool.result.as_ref().unwrap();
+        assert_eq!(ops(&mid_tool), ["started", "run_tool"]);
+    }
+
+    #[test]
+    fn malformed_input_is_an_error_and_exit_code_2() {
+        let cases: Vec<(&str, Vec<Value>)> = vec![
+            ("not json", vec![]),
+            ("call before start", vec![call("read", json!({}))]),
+            ("start twice", vec![start(), start()]),
+            ("unknown op", vec![json!({"op": "dance"})]),
+            (
+                "unexpected field",
+                vec![json!({"op": "start", "prompt": "x", "extra": 1})],
+            ),
+            ("stray tool_result", vec![start(), tool_ok(json!({}))]),
+            (
+                "wrong reply to run_tool",
+                vec![start(), call("read", json!({})), end()],
+            ),
+        ];
+        for (what, lines) in cases {
+            let mut input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+            if what == "not json" {
+                input.push_str("this is not json\n");
+            }
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let run = drive_raw(&input, setup(&dir, no_reviewer()), dir);
+            let failure = run.result.as_ref().unwrap_err();
+            assert_eq!(failure.code, 2, "{what}");
+            let last = run.out.last().unwrap();
+            assert_eq!(last["op"], "error", "{what}");
+            assert_eq!(last["message"], "malformed input", "{what}");
+        }
+    }
+
+    #[test]
+    fn manifests_must_share_one_suite() {
+        let read = ToolManifest::from_yaml(READ).unwrap();
+        let other = ToolManifest::from_yaml(&NEWS.replace("test.news", "other.news")).unwrap();
+        let mixed = Catalog::from_manifests(vec![read.clone(), other]).unwrap();
+        assert!(suite_of(&mixed).is_err());
+        let bare = Catalog::from_manifests(vec![
+            ToolManifest::from_yaml(&NEWS.replace("test.news", "news")).unwrap(),
+        ])
+        .unwrap();
+        assert!(suite_of(&bare).is_err());
+        let one = Catalog::from_manifests(vec![read]).unwrap();
+        assert_eq!(suite_of(&one).unwrap(), "test");
+    }
+
+    #[test]
+    fn arguments_are_parsed() {
+        let args =
+            |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+        let ok = parse_args(&args(&[
+            "bridge",
+            "--manifests",
+            "m",
+            "--ledger",
+            "l.jsonl",
+            "--plan",
+            "p.yaml",
+        ]))
+        .unwrap();
+        assert_eq!(
+            ok,
+            Options {
+                manifests: "m".into(),
+                ledger: "l.jsonl".into(),
+                plan: Some("p.yaml".into()),
+            }
+        );
+        for bad in [
+            args(&["bridge"]),
+            args(&["bridge", "--help"]),
+            args(&["bridge", "--manifests", "m"]),
+            args(&["bridge", "--manifests", "m", "--ledger"]),
+            args(&[
+                "bridge",
+                "--manifests",
+                "m",
+                "--manifests",
+                "n",
+                "--ledger",
+                "l",
+            ]),
+            args(&["run", "--manifests", "m", "--ledger", "l"]),
+        ] {
+            assert_eq!(parse_args(&bad).unwrap_err().code, 2, "{bad:?}");
+        }
+    }
+}
