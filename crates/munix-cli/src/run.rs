@@ -28,6 +28,7 @@ use munix_core::validate::Scalar;
 use munix_gate::gate::{Gate, QuarantineNote, RecoverError, Store, StoreValue, TripReason};
 use munix_gate::policy::DenyCode;
 use munix_gate::quarantine::Cause;
+use munix_gate::seal::{Root, Seal, SealGuard, SealWatch, Tamper};
 use munix_gate::tool::Tool;
 use munix_gate::vault::{Credential, Vault};
 use munix_ledger::Ledger;
@@ -54,6 +55,8 @@ const DEFAULT_HOST_GATEWAY: &str = "192.168.5.2";
 const DEFAULT_WEBSPEED_DIR: &str = "../web-speed-oss";
 const UPSTREAM: &str = "https://api.meta.ai/v1";
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often the Integrity Seal's watcher re-checks the sealed files.
+const SEAL_POLL: Duration = Duration::from_millis(500);
 /// What the vault holds for a manifest's credential. The local mail sink takes any login.
 const PLACEHOLDER_CREDENTIAL: &str = "munix-placeholder-credential";
 /// The defaults `SmtpEmail::from_env` uses, for when only one of the two variables is set.
@@ -495,6 +498,47 @@ fn limits_from(env: &Env) -> Result<Limits, Failure> {
     })
 }
 
+/// What the Integrity Seal covers (invariant 11), relative to the current directory (the repo root): the running
+/// binary, the workspace files and `crates/`, the manifests, site templates and example plans, `.env`, the `--plan`
+/// file, and Web Speed OSS's top-level source, since it is spawned as a tool.
+fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path) -> Vec<Root> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.push(Root::File(exe));
+    }
+    for file in ["Cargo.toml", "Cargo.lock", "clippy.toml", ".env"] {
+        roots.push(Root::File(PathBuf::from(file)));
+    }
+    for dir in ["crates", "manifests", "sites", "examples"] {
+        roots.push(Root::Tree(PathBuf::from(dir)));
+    }
+    if let Some(plan) = plan {
+        roots.push(Root::File(plan.to_path_buf()));
+    }
+    if let Ok(entries) = std::fs::read_dir(webspeed_dir) {
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && (p.extension().is_some_and(|x| x == "py")
+                        || p.file_name().is_some_and(|n| n == "requirements.txt"))
+            })
+            .collect();
+        files.sort();
+        roots.extend(files.into_iter().map(Root::File));
+    }
+    roots
+}
+
+/// The stop message for a tamper, shown to the user and kept as the run's outcome.
+fn tamper_message(tamper: &Tamper) -> String {
+    format!(
+        "Munix's own files changed during the task ({}); every task was stopped and nothing resumes. Start a new run",
+        tamper.path
+    )
+}
+
 fn run(args: &[String]) -> Result<Outcome, Failure> {
     let opts = parse_args(args)?;
     let env = Env::load(Path::new(".env"))?;
@@ -508,6 +552,17 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let host_gateway = env.get_or("MUNIX_HOST_GATEWAY", DEFAULT_HOST_GATEWAY);
     let pricing = pricing_from(&env)?;
     let limits = limits_from(&env)?;
+
+    // The Integrity Seal, taken before anything it covers is read.
+    let webspeed_dir = PathBuf::from(env.get_or("WEBSPEED_OSS_DIR", DEFAULT_WEBSPEED_DIR));
+    let seal = Seal::take(seal_roots(opts.plan.as_deref(), &webspeed_dir))
+        .map_err(|e| Failure::config(format!("cannot seal Munix's files: {e}")))?;
+    eprintln!(
+        "munix: sealed {} files (digest {})",
+        seal.file_count(),
+        seal.digest().get(..12).unwrap_or(seal.digest())
+    );
+    let seal = Arc::new(SealGuard::new(seal));
 
     // Identity: a fresh signing key and random ids for this run.
     let key =
@@ -531,6 +586,7 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         .map_err(|e| Failure::config(format!("cannot create the ledger: {e}")))?;
     let reader_adapter = supervisor_adapter(&env, &supervisor_model, Role::Reader, &api_key)?;
     let mut gate = build_gate(&key, &catalog, ledger, &env, reader_adapter)?;
+    gate.set_seal(seal.clone());
 
     // The prompt and the plan, both signed here.
     let envelope = PromptEnvelope {
@@ -625,6 +681,39 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         ledger_path.display()
     );
 
+    // The seal's watcher spans every instance. On a change it records the tamper and kills the current agent.
+    let current_container: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let tampered: Arc<Mutex<Option<Tamper>>> = Arc::new(Mutex::new(None));
+    let seal_watch = {
+        let container = Arc::clone(&current_container);
+        let slot = Arc::clone(&tampered);
+        SealWatch::start(
+            seal.clone(),
+            SEAL_POLL,
+            Box::new(move |tamper| {
+                eprintln!(
+                    "munix: TAMPER: {} changed; stopping every task",
+                    tamper.path
+                );
+                *slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tamper);
+                let name = container
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if !name.is_empty() {
+                    let _ = Command::new("docker")
+                        .args(["kill", &name])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }),
+        )
+    };
+
     let mut instance_num: u32 = 0;
     let (ended, killed, outcome) = loop {
         instance_num = instance_num.saturating_add(1);
@@ -640,6 +729,10 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             shim_script: runtime_dir.join("shim").join("munix_shim.py"),
         };
         let container_name = spec.network();
+        current_container
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&container_name);
         let mut sandbox = Sandbox::launch(spec)
             .map_err(|e| Failure::failed(format!("cannot start the sandbox: {e}")))?;
         let channel = (sandbox.child.stdout.take(), sandbox.child.stdin.take());
@@ -697,6 +790,23 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+        // A tamper (seen by the watcher, or by the Gate's check before a call) beats everything: every task stops
+        // and nothing recovers.
+        let tamper = tampered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .or_else(|| gate.tampered().cloned());
+        if let Some(tamper) = tamper {
+            gate.tamper(&tamper);
+            // The watcher killed the agent, so its channel breaking is expected, not a separate failure.
+            break (
+                Ok(ServeEnd::Stopped),
+                killed,
+                Outcome::Stopped(tamper_message(&tamper)),
+            );
+        }
+
         match decide_after_instance(takeover, trip) {
             NextStep::Finish => {
                 let outcome = match &ended {
@@ -742,6 +852,8 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             }
         }
     };
+
+    seal_watch.stop();
 
     // The summary.
     let trust = gate.context_trust(&task);
@@ -1087,6 +1199,26 @@ mod tests {
         let task: TaskId = "T-0a1b2c3d".parse().unwrap();
         assert_eq!(instance_sandbox_name(&task, 1), "t-0a1b2c3d-1");
         assert_eq!(instance_sandbox_name(&task, 2), "t-0a1b2c3d-2");
+    }
+
+    #[test]
+    fn the_seal_covers_munix_and_the_plan_file() {
+        let roots = seal_roots(
+            Some(Path::new("my-plan.yaml")),
+            Path::new("no-such-webspeed-dir"),
+        );
+        for dir in ["crates", "manifests", "sites", "examples"] {
+            assert!(roots.contains(&Root::Tree(PathBuf::from(dir))), "{dir}");
+        }
+        for file in ["Cargo.toml", "Cargo.lock", ".env", "my-plan.yaml"] {
+            assert!(roots.contains(&Root::File(PathBuf::from(file))), "{file}");
+        }
+        let tamper = Tamper {
+            path: "manifests/email.send.yaml".into(),
+            old: None,
+            new: None,
+        };
+        assert!(tamper_message(&tamper).contains("manifests/email.send.yaml"));
     }
 
     #[test]

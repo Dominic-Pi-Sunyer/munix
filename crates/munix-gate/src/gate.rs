@@ -3,6 +3,7 @@
 //! One `Gate` serves every task on this host. It is plain synchronous code; the runtime wraps it in a mutex.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use munix_core::context::{Band, ContextState};
 use munix_core::crypto::{self, Digest, Purpose, Signed, SigningKey};
@@ -22,6 +23,7 @@ use crate::facts::Origin;
 use crate::ingest::{Delivered, ingest};
 use crate::policy::{DenyCode, Facts, Outcome, Ruling, evaluate};
 use crate::refs::RefTable;
+use crate::seal::{SealCheck, Tamper};
 use crate::tool::{Tool, ToolFailure};
 use crate::trace::trace_arg;
 use crate::vault::{Credential, Vault};
@@ -49,6 +51,8 @@ pub enum GateError {
     TaskExists,
     #[error("store value is not valid for its type")]
     BadStoreValue,
+    #[error("Munix's own files changed; start a new run")]
+    Tampered,
     #[error("ledger: {0}")]
     Ledger(#[from] munix_ledger::LedgerError),
 }
@@ -129,6 +133,8 @@ pub struct Gate {
     tasks: BTreeMap<TaskId, Task>,
     /// Opaque numbers for web hosts, stable for the life of the Gate. The Supervisor only ever sees numbers.
     domains: BTreeMap<String, u32>,
+    seal: Option<Arc<dyn SealCheck>>,
+    tampered: Option<Tamper>,
 }
 
 enum Status {
@@ -230,6 +236,8 @@ pub enum RecoverError {
     NotHalted,
     #[error("the task has used its recoveries; the user must decide")]
     LimitReached,
+    #[error("Munix's own files changed; the task cannot resume")]
+    Tampered,
     #[error("ledger: {0}")]
     Ledger(#[from] munix_ledger::LedgerError),
 }
@@ -251,7 +259,41 @@ impl Gate {
             ledger,
             tasks: BTreeMap::new(),
             domains: BTreeMap::new(),
+            seal: None,
+            tampered: None,
         }
+    }
+
+    /// Installs the Integrity Seal checked before every tool execution (invariant 11).
+    pub fn set_seal(&mut self, seal: Arc<dyn SealCheck>) {
+        self.seal = Some(seal);
+    }
+
+    /// Halts every task on the first tamper detected, clears pending and blocked state, and writes `tamper_detected`.
+    pub fn tamper(&mut self, tamper: &Tamper) {
+        if self.tampered.is_some() {
+            return;
+        }
+        self.tampered = Some(tamper.clone());
+        let mut tasks = Vec::with_capacity(self.tasks.len());
+        for (id, task) in &mut self.tasks {
+            task.status = Status::Halted;
+            task.pending.clear();
+            task.blocked.clear();
+            tasks.push(id.as_str().to_owned());
+        }
+        let _ = self.log(json!({
+            "event": "tamper_detected",
+            "path": tamper.path,
+            "old": tamper.old,
+            "new": tamper.new,
+            "tasks": tasks,
+        }));
+    }
+
+    /// The first tamper recorded on this Gate, if any.
+    pub fn tampered(&self) -> Option<&Tamper> {
+        self.tampered.as_ref()
     }
 
     /// Registers the implementation of a catalog tool. The operator pins each manifest by digest; a manifest
@@ -299,6 +341,9 @@ impl Gate {
         plan: &Signed<Plan>,
         store: &Store,
     ) -> Result<TaskBrief, GateError> {
+        if self.tampered.is_some() {
+            return Err(GateError::Tampered);
+        }
         let envelope = prompt
             .verify(&self.key, Purpose::Prompt)
             .map_err(|_| GateError::BadSignature)?;
@@ -377,12 +422,14 @@ impl Gate {
             }
         }
 
+        let seal_digest = self.seal.as_ref().map(|s| s.digest());
         self.ledger.append(json!({
             "event": "task_started",
             "task": envelope.task.as_str(),
             "plan": body.plan.as_str(),
             "plan_digest": plan_digest.as_str(),
             "prompt_digest": prompt_digest.as_str(),
+            "seal": seal_digest,
         }))?;
         let brief = TaskBrief {
             task: envelope.task.clone(),
@@ -438,6 +485,9 @@ impl Gate {
     /// `context_lowered` (from, to) when it drops. Argument values are never written, only hashes and ref ids.
     /// If a ledger write fails, nothing executes and the reply is `Failed(Internal)` (fail closed).
     pub fn submit(&mut self, request: &Request) -> Reply {
+        if self.tampered.is_some() {
+            return Reply::Halted;
+        }
         let Ok(hash) = crypto::digest(request) else {
             return Reply::Failed(ToolFailure::Internal);
         };
@@ -517,6 +567,9 @@ impl Gate {
     /// `Denied(Reviewer)`, counted. `confirm_user` from a review re-parks it as `Pending { needs: User }`.
     /// Writes `decision` (stage, verdict, reasons) first.
     pub fn decide(&mut self, decision: &Signed<Decision>) -> Reply {
+        if self.tampered.is_some() {
+            return Reply::Halted;
+        }
         let body = &decision.body;
         let purpose = match body.stage {
             Stage::LlmReview => Purpose::Decision,
@@ -657,6 +710,9 @@ impl Gate {
     /// - **Ledger:** writes `recovered` (attempt, the quarantine notes) before returning; if that write fails,
     ///   nothing changes and the error is returned.
     pub fn recover(&mut self, task: &TaskId) -> Result<Recovery, RecoverError> {
+        if self.tampered.is_some() {
+            return Err(RecoverError::Tampered);
+        }
         let t = self.tasks.get(task).ok_or(RecoverError::UnknownTask)?;
         if !matches!(t.status, Status::Halted) {
             return Err(RecoverError::NotHalted);
@@ -1125,6 +1181,12 @@ impl Gate {
         let Some(resolved) = resolved else {
             return self.fail_before_call(case);
         };
+        if let Some(seal) = &self.seal
+            && let Err(t) = seal.verify()
+        {
+            self.tamper(&t);
+            return Reply::Halted;
+        }
 
         let result = {
             let credential = match &manifest.credentials {
@@ -1724,5 +1786,240 @@ mod tests {
         assert_eq!(view.args[1].embeds[0].ref_id, None);
         assert_eq!(view.args[1].embeds[1].ref_id, None);
         assert_eq!(view.args[2].values[0].ref_id, None);
+    }
+
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use munix_ledger::Entry;
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn fresh_dir() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "munix-gate-unit-{}-{n}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    struct FakeSeal {
+        broken: AtomicBool,
+    }
+
+    impl SealCheck for FakeSeal {
+        fn digest(&self) -> String {
+            "deadbeef01234567".to_owned()
+        }
+        fn verify(&self) -> Result<(), Tamper> {
+            if self.broken.load(Ordering::SeqCst) {
+                Err(Tamper {
+                    path: "manifests/x.yaml".into(),
+                    old: Some("aa".into()),
+                    new: Some("bb".into()),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct SealHarness {
+        gate: Gate,
+        key: SigningKey,
+        dir: PathBuf,
+        seal: Arc<FakeSeal>,
+        calls: Arc<Mutex<u32>>,
+        prompt: Signed<PromptEnvelope>,
+        plan: Signed<Plan>,
+    }
+
+    impl Drop for SealHarness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn build_seal_gate() -> SealHarness {
+        let key = SigningKey::from_bytes(&[7u8; 32]).unwrap();
+        let manifest_yaml = "
+tool: ping.run
+description: Ping tool.
+tier: 0
+output:
+  status: {type: text, region: operator_content, confidential: public}
+";
+        let manifest = ToolManifest::from_yaml(manifest_yaml).unwrap();
+        let pinned = manifest.digest().unwrap();
+        let catalog = Catalog::from_manifests([manifest]).unwrap();
+        let dir = fresh_dir();
+        let ledger = Ledger::create(dir.join("ledger.jsonl")).unwrap();
+        let mut gate = Gate::new(key.clone(), catalog, Vault::new(), ledger);
+
+        let calls = Arc::new(Mutex::new(0u32));
+        let calls_clone = Arc::clone(&calls);
+        gate.register(
+            "ping.run".parse().unwrap(),
+            pinned,
+            Box::new(move |_: &BTreeMap<String, Value>, _: Option<&Credential>| {
+                *calls_clone.lock().unwrap() += 1;
+                Ok(BTreeMap::from([("status".to_owned(), json!("pong"))]))
+            }),
+        )
+        .unwrap();
+
+        let seal = Arc::new(FakeSeal {
+            broken: AtomicBool::new(false),
+        });
+        gate.set_seal(Arc::clone(&seal) as Arc<dyn SealCheck>);
+
+        let prompt_env = PromptEnvelope {
+            task: "T-1".parse().unwrap(),
+            session: "S-1".parse().unwrap(),
+            nonce: "0123456789abcdef".to_owned(),
+            text: "Ping the server.".to_owned(),
+            data: Vec::new(),
+        };
+        let prompt_hash = prompt_env.digest().unwrap();
+        let prompt = Signed::sign(&key, Purpose::Prompt, prompt_env).unwrap();
+        let plan_yaml = format!(
+            "
+plan: P-1
+task: T-1
+prompt_hash: \"{}\"
+reads: [operator_content]
+steps:
+  - id: 1
+    tool: ping.run
+    args: {{}}
+    budget: 5
+amendments:
+  auto_max_tier: 1
+",
+            prompt_hash.as_str()
+        );
+        let plan_body = Plan::from_yaml(&plan_yaml).unwrap();
+        let plan = Signed::sign(&key, Purpose::Plan, plan_body).unwrap();
+        SealHarness {
+            gate,
+            key,
+            dir,
+            seal,
+            calls,
+            prompt,
+            plan,
+        }
+    }
+
+    fn ping_req(task: &str, plan: &str) -> Request {
+        Request {
+            task: task.parse().unwrap(),
+            plan: plan.parse().unwrap(),
+            step: 1,
+            tool: "ping.run".parse().unwrap(),
+            args: BTreeMap::new(),
+        }
+    }
+
+    fn read_entries(dir: &std::path::Path) -> Vec<Entry> {
+        std::fs::read_to_string(dir.join("ledger.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn seal_intact_delivers_and_broken_seal_halts_before_tool_call() {
+        let mut h = build_seal_gate();
+        h.gate
+            .start_task(&h.prompt, &h.plan, &Store::new())
+            .unwrap();
+
+        let entries = read_entries(&h.dir);
+        let started = entries
+            .iter()
+            .find(|e| e.event["event"] == "task_started")
+            .unwrap();
+        assert_eq!(started.event["seal"], json!("deadbeef01234567"));
+
+        // With the seal intact a normal request is delivered as before.
+        let r1 = h.gate.submit(&ping_req("T-1", "P-1"));
+        assert!(matches!(r1, Reply::Delivered(_)));
+        assert_eq!(*h.calls.lock().unwrap(), 1);
+        assert_eq!(h.gate.tampered(), None);
+
+        // Break the seal: the next request that would execute returns Reply::Halted and the tool is not called.
+        h.seal.broken.store(true, Ordering::SeqCst);
+        let r2 = h.gate.submit(&ping_req("T-1", "P-1"));
+        assert_eq!(r2, Reply::Halted);
+        assert_eq!(*h.calls.lock().unwrap(), 1);
+        assert_eq!(
+            h.gate.tampered(),
+            Some(&Tamper {
+                path: "manifests/x.yaml".into(),
+                old: Some("aa".into()),
+                new: Some("bb".into()),
+            })
+        );
+
+        // The ledger has a tamper_detected entry.
+        let entries = read_entries(&h.dir);
+        let tamper_entries: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.event["event"] == "tamper_detected")
+            .collect();
+        assert_eq!(tamper_entries.len(), 1);
+        assert_eq!(tamper_entries[0].event["path"], json!("manifests/x.yaml"));
+        assert_eq!(tamper_entries[0].event["old"], json!("aa"));
+        assert_eq!(tamper_entries[0].event["new"], json!("bb"));
+        assert_eq!(tamper_entries[0].event["tasks"], json!(["T-1"]));
+
+        // Every later submit returns Halted immediately (without logging another request event).
+        let len_before = read_entries(&h.dir).len();
+        assert_eq!(h.gate.submit(&ping_req("T-1", "P-1")), Reply::Halted);
+        assert_eq!(read_entries(&h.dir).len(), len_before);
+
+        // recover returns RecoverError::Tampered.
+        let rec = h.gate.recover(&"T-1".parse().unwrap());
+        assert!(matches!(rec, Err(RecoverError::Tampered)));
+
+        // start_task of a new task returns GateError::Tampered.
+        let prompt2_env = PromptEnvelope {
+            task: "T-2".parse().unwrap(),
+            session: "S-2".parse().unwrap(),
+            nonce: "0123456789abcdef".to_owned(),
+            text: "Ping again.".to_owned(),
+            data: Vec::new(),
+        };
+        let prompt2_hash = prompt2_env.digest().unwrap();
+        let prompt2 = Signed::sign(&h.key, Purpose::Prompt, prompt2_env).unwrap();
+        let mut plan2_body = h.plan.body.clone();
+        plan2_body.task = "T-2".parse().unwrap();
+        plan2_body.plan = "P-2".parse().unwrap();
+        plan2_body.prompt_hash = prompt2_hash;
+        let plan2 = Signed::sign(&h.key, Purpose::Plan, plan2_body).unwrap();
+        let start2 = h.gate.start_task(&prompt2, &plan2, &Store::new());
+        assert!(matches!(start2, Err(GateError::Tampered)));
+
+        // tamper() called a second time logs nothing more.
+        h.gate.tamper(&Tamper {
+            path: "other.yaml".into(),
+            old: None,
+            new: None,
+        });
+        let tamper_count = read_entries(&h.dir)
+            .iter()
+            .filter(|e| e.event["event"] == "tamper_detected")
+            .count();
+        assert_eq!(tamper_count, 1);
     }
 }

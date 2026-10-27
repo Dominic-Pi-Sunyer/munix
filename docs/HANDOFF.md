@@ -6,8 +6,21 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~8:00 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~9:30 PM PT, by Claude (Opus 5.5)._
 
+- **Rough Integrity Seal works live (invariant 11)** (`demo/tamper.sh`):
+  - **What it covers:** `munix run` seals 95 files at start: the binary, `Cargo.*`, `crates/`, `manifests/`,
+    `sites/`, `examples/`, `.env`, the `--plan` file and Web Speed's top-level `.py`. The digest goes in
+    `task_started`.
+  - **How it trips:** a 500 ms watcher and a check before every `execute` compare `stat` (size, mtime, ctime,
+    inode), so even a `touch` trips it. On a tamper, the Gate halts every task and writes `tamper_detected`
+    (path, old and new digest), and `recover` and `start_task` refuse. `munix run` stops with exit 1.
+  - **Live run:** `touch manifests/email.send.yaml` 8 s in killed the agent after one call, with no recovery and
+    no mail. 8 ledger entries, about $0.0025.
+  - **Who built what:** `munix-gate/src/seal.rs` and the Gate hooks (Gemini, reviewed); wiring and `tamper.sh`
+    (lead).
+  - **Not yet:** an FSEvents/inotify watcher (needs the `notify` crate, a download), and a Console re-seal
+    flow (today you start a new run).
 - **Strategy (owner):** get a rough version of every piece done tonight or tomorrow, then refine. Order: Readers, seal,
   one-command demo, rough dashboard, red-team against Munix, README draft.
 - **Day 7 Readers work live, with no human step** (`PLAN=examples/demo-plan-readers.yaml demo/right.sh`):
@@ -25,7 +38,7 @@ _Last updated: Mon Oct 26, 2026, ~8:00 PM PT, by Claude (Opus 5.5)._
   - `demo/services.sh` starts Mailpit and the mock site.
   - `demo/right.sh` runs the same prompt under `munix run` (`PLAN=`, `TAKEOVER=1`).
   - `demo/left.sh` also takes `TAKEOVER=1`.
-- **Next (rough-draft pass):** Integrity Seal, rough dashboard, red-team against Munix, README draft.
+- **Next (rough-draft pass):** rough dashboard, red-team against Munix, README draft.
 
 - **Day 6 works live, with the takeover switch on.**
   - **Instance 1** emailed `hacker@evil.com` (takeover). Recovery 1 withheld exactly `step 1 reviews[1]` (cause

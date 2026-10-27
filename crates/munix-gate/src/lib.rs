@@ -11,6 +11,7 @@ pub mod ingest;
 pub mod policy;
 pub mod quarantine;
 pub mod refs;
+pub mod seal;
 pub mod tool;
 pub mod trace;
 pub mod vault;
