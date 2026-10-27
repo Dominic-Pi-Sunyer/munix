@@ -25,7 +25,7 @@ use crate::policy::{DenyCode, Facts, Outcome, Ruling, evaluate};
 use crate::refs::RefTable;
 use crate::seal::{SealCheck, Tamper};
 use crate::tool::{Tool, ToolFailure};
-use crate::trace::trace_arg;
+use crate::trace::{trace_arg, trace_request};
 use crate::vault::{Credential, Vault};
 
 /// Why the Gate refused to set something up. Returned to the runtime and the Supervisor, never to the agent.
@@ -982,15 +982,8 @@ impl Gate {
             .filter_map(|m| m.credentials.as_ref())
             .filter_map(|at| self.vault.get(at))
             .collect();
-        let mut args = BTreeMap::new();
-        for (name, value) in &request.args {
-            if let Some(spec) = manifest.args.get(name) {
-                args.insert(
-                    name.clone(),
-                    trace_arg(spec, value, &task.refs, &credentials),
-                );
-            }
-        }
+        // Each argument on its own, plus a confidential value or credential split across content arguments.
+        let args = trace_request(&manifest.args, &request.args, &task.refs, &credentials);
         evaluate(&Facts {
             plan: &task.plan,
             step: request.step,

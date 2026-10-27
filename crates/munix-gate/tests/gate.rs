@@ -2543,3 +2543,26 @@ fn a_blocked_call_is_described_for_the_operator_with_where_each_destination_came
     );
     assert!(args[0].value.contains(BOSS));
 }
+
+#[test]
+fn a_credential_split_across_subject_and_body_is_denied_not_sent() {
+    // Neither half alone is the credential; together they are. The Gate checks the request as a whole.
+    let (first, second) = CREDENTIAL.split_at(CREDENTIAL.len() / 2);
+    let mut h = harness();
+    h.start();
+    let request = req(
+        2,
+        "email.send",
+        json!({"to": ["ref:e2"], "subject": format!("Hi {first}"), "body": format!("{second} thanks")}),
+    );
+    assert_eq!(
+        h.gate.submit(&request),
+        Reply::Denied(DenyCode::ConfidentialData)
+    );
+    assert_eq!(h.emails_sent(), 0);
+    // An honest email in the same task still goes.
+    assert!(matches!(
+        h.gate.submit(&email_to_boss("Fine")),
+        Reply::Delivered(_)
+    ));
+}
