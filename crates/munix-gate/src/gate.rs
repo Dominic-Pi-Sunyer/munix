@@ -122,6 +122,21 @@ pub struct PendingArg {
     pub name: String,
     pub value: String,
     pub sources: Vec<String>,
+    /// How well the argument's values trace, for destination and selector arguments; `None` for content and
+    /// control arguments.
+    pub destination: Option<DestinationTrace>,
+}
+
+/// The tracer's verdict on one destination or selector argument, summed over its values (a list has several).
+/// Computed by the same tracing the Gate's policy uses (`trace::trace_arg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DestinationTrace {
+    /// The lowest, over the argument's values, of each value's best (highest) match trust. `None` when some value
+    /// is untraced, or the argument has no values.
+    pub best_trust: Option<Trust>,
+    /// True when every value has at least one match whose origin is clean-side (the prompt, the user's data or a
+    /// store), and there is at least one value.
+    pub clean_side: bool,
 }
 
 pub struct Gate {
@@ -1061,6 +1076,10 @@ impl Gate {
                         other => other.to_string(),
                     },
                     sources: describe_sources(raw, &t.refs),
+                    destination: manifest
+                        .args
+                        .get(name)
+                        .and_then(|spec| destination_trace(spec, raw, &t.refs)),
                 }
             })
             .collect();
@@ -1102,6 +1121,10 @@ impl Gate {
                         other => other.to_string(),
                     },
                     sources: describe_sources(raw, &t.refs),
+                    destination: manifest
+                        .args
+                        .get(name)
+                        .and_then(|spec| destination_trace(spec, raw, &t.refs)),
                 }
             })
             .collect();
@@ -1637,6 +1660,33 @@ fn describe_sources(value: &Value, refs: &RefTable) -> Vec<String> {
     }
     out.dedup();
     out
+}
+
+/// The summary of how a destination or selector argument traced, from `trace_arg` (the Gate's own tracer). `None`
+/// for any other role. Fails closed: no values means not clean-side and no trust.
+fn destination_trace(
+    spec: &munix_core::manifest::ArgSpec,
+    raw: &Value,
+    refs: &RefTable,
+) -> Option<DestinationTrace> {
+    if !matches!(spec.role, ArgRole::Destination | ArgRole::Selector) {
+        return None;
+    }
+    let facts = trace_arg(spec, raw, refs, &[]);
+    let values = &facts.values;
+    let clean_side = !values.is_empty()
+        && values
+            .iter()
+            .all(|t| t.matches.iter().any(|m| m.origin.is_clean_side()));
+    let best_trust = if values.is_empty() || values.iter().any(|t| t.matches.is_empty()) {
+        None
+    } else {
+        values.iter().map(|t| t.best_trust()).min()
+    };
+    Some(DestinationTrace {
+        best_trust,
+        clean_side,
+    })
 }
 
 fn describe_entry(entry: &crate::refs::RefEntry) -> String {

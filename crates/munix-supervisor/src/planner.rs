@@ -28,7 +28,8 @@ Return a JSON object with:
 \"ugc_post\", \"ugc_review\", \"profile\", \"ugc_comment\", \"ad\", \"embedded_third_party\", \
 \"user_content\", \"message\", \"unclassified\"; never \"hidden\"). List every region the task needs to do \
 its job well, not only the ones the prompt names: summarizing a product's reviews also needs the product listing \
-(name, price, specs) and any editorial take. Leave out regions the task has no use for.
+(name, price, specs) and any editorial take. Leave out regions the task has no use for. Include third-party regions (\"ugc_review\", \"ugc_comment\", \"ugc_post\", \"profile\", \"message\", \"unclassified\", \"ad\", \"embedded_third_party\", \"search_snippet\") \
+only when the task needs that text; records the user or operator produced (\"operator_content\", \"user_content\", \"product_listing\" where relevant) carry what most tasks need.
 - \"steps\": ordered array of 1 to 8 tool steps. Each step has:
   - \"id\": unique positive integer (1, 2, ...);
   - \"tool\": tool name from the catalog;

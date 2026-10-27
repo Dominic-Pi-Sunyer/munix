@@ -167,7 +167,7 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
             plan: self.brief.plan.plan.clone(),
             band: view.band,
             stage: Stage::User,
-            reasons: vec!["console.user".to_owned()],
+            reasons: vec![self.confirmer.label().to_owned()],
         };
         match Signed::sign(self.key, Purpose::UserConfirmation, decision) {
             Ok(signed) => self.gate.decide(&signed),
@@ -328,7 +328,7 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     ///   `Pending { needs: User }` (or if there is no reviewer, the view or plan is missing, or `review` errors),
     ///   falls back to the Console. When `needs` is `Stage::User`, goes straight to the Console (`Gate::describe_pending`
     ///   and the confirmer), signs a `Stage::User` decision (approve or deny, the band from the view, reason
-    ///   `console.user`) with `Purpose::UserConfirmation`, passes it to `Gate::decide`, and answers with that reply
+    ///   `Confirmer::label`, `console.user` for a person) with `Purpose::UserConfirmation`, passes it to `Gate::decide`, and answers with that reply
     ///   mapped the same way.
     /// - `Takeover(code)`: `denied: <code>`; records the code so `should_stop` ends the session.
     /// - `Halted`: `denied: task halted`. `Failed(f)`: `tool failed: <f>`.

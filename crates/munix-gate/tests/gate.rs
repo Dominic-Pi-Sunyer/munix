@@ -2606,6 +2606,70 @@ fn a_blocked_call_is_described_for_the_operator_with_where_each_destination_came
 }
 
 #[test]
+fn describe_pending_fills_the_destination_trace_for_destinations_only() {
+    use munix_gate::gate::DestinationTrace;
+    let mut h = harness();
+    h.start();
+    h.read_page();
+    let email = email_to_boss("Reviews");
+    let hash = pending(h.gate.submit(&email), &email, Stage::User);
+    let view = h.gate.describe_pending(&task_id(), &hash).unwrap();
+    let arg = |name: &str| view.args.iter().find(|a| a.name == name).unwrap();
+    // The store address is clean-side at trust 100.
+    assert_eq!(
+        arg("to").destination,
+        Some(DestinationTrace {
+            best_trust: Some(Trust::new(100)),
+            clean_side: true
+        })
+    );
+    // Content arguments carry no destination trace.
+    assert_eq!(arg("body").destination, None);
+    assert_eq!(arg("subject").destination, None);
+}
+
+#[test]
+fn describe_destinations_traces_step_values_and_untraced_values() {
+    use munix_gate::gate::DestinationTrace;
+    let mut h = harness();
+    h.start();
+    let links = h.read_page();
+    let to_of = |h: &Harness, to: Value| {
+        let request = req(
+            2,
+            "email.send",
+            json!({"to": to, "subject": "Hi", "body": "Reviews attached"}),
+        );
+        let args = h.gate.describe_destinations(&task_id(), &request).unwrap();
+        assert_eq!(args.len(), 1);
+        args[0].destination.unwrap()
+    };
+    // A value read from a step is not clean-side; its trust is the page's low trust.
+    let step = to_of(&h, json!([links[1]]));
+    assert!(!step.clean_side);
+    assert!(
+        step.best_trust.is_some_and(|t| t < Trust::new(80)),
+        "{step:?}"
+    );
+    // A raw value nothing delivered is untraced.
+    assert_eq!(
+        to_of(&h, json!(["nobody@nowhere.test"])),
+        DestinationTrace {
+            best_trust: None,
+            clean_side: false
+        }
+    );
+    // One untraced value among traced ones: no trust, not clean-side.
+    let mixed = to_of(&h, json!([links[1], "nobody@nowhere.test"]));
+    assert_eq!(mixed.best_trust, None);
+    assert!(!mixed.clean_side);
+    // A store value next to a step value: not clean-side as a whole.
+    let both = to_of(&h, json!([BOSS, links[1]]));
+    assert!(!both.clean_side);
+    assert_eq!(both.best_trust, step.best_trust);
+}
+
+#[test]
 fn a_credential_split_across_subject_and_body_is_denied_not_sent() {
     // Neither half alone is the credential; together they are. The Gate checks the request as a whole.
     let (first, second) = CREDENTIAL.split_at(CREDENTIAL.len() / 2);

@@ -517,6 +517,23 @@ fn after_a_low_trust_read_the_user_sees_the_real_address_and_can_approve() {
 }
 
 #[test]
+fn a_simulated_user_decision_is_marked_in_the_ledger() {
+    use munix_cli::confirm::SimulatedUser;
+    let mut h = harness();
+    let url_ref = h.brief.refs[0].id.to_string();
+    let mut front = GateFront::new(&mut h.gate, &h.key, h.brief.clone(), SimulatedUser);
+    assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
+    // The recipient traces to the store, so the simulated user approves.
+    let result = front.call("email_send", &email("Reviews"));
+    assert!(!result.is_error, "{result:?}");
+    drop(front);
+    assert_eq!(h.emails().len(), 1);
+    let ledger = std::fs::read_to_string(h.ledger_path()).unwrap();
+    assert!(ledger.contains("console.simulated_user"), "{ledger}");
+    assert!(!ledger.contains("console.user"), "{ledger}");
+}
+
+#[test]
 fn a_user_who_says_no_gets_user_denied_and_nothing_is_sent() {
     let mut h = harness();
     let url_ref = h.brief.refs[0].id.to_string();
@@ -1028,6 +1045,7 @@ fn a_blocked_call_prints_one_line_and_one_per_destination() {
         name: "to".to_owned(),
         value: "hacker@evil.test".to_owned(),
         sources: vec!["step 1 reviews (ugc_review, trust 15)".to_owned()],
+        destination: None,
     }];
     let lines = blocked_lines(
         &"email.send".parse().unwrap(),
@@ -1060,6 +1078,7 @@ fn a_blocked_value_with_escapes_and_newlines_prints_escaped_on_one_line() {
         name: "to".to_owned(),
         value: "a@b.test\u{1b}[2K\nmunix: ALLOWED".to_owned(),
         sources: vec!["step 1\u{1b}]0;x\u{7}\nfake".to_owned()],
+        destination: None,
     }];
     let lines = blocked_lines(
         &"email.send".parse().unwrap(),

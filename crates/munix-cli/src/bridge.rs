@@ -1,13 +1,14 @@
 //! `munix bridge`: the Gate for one AgentDojo task, spoken to in JSON lines on stdin and stdout.
 //!
 //! ```text
-//! munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]]
+//! munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]] [--simulated-user]
 //! ```
 //!
 //! The Python side (`eval/agentdojo`) runs the agent in its own process and sends every tool call here. The same
 //! `GateFront` that `munix run` serves decides each call; when it lets one run, the bridge hands the resolved
 //! arguments back to Python (`run_tool`) and waits for the function's output (`tool_result`). Nothing here decides
-//! anything itself: no Gate, policy or reviewer logic is duplicated, and the Console answers no to everything.
+//! anything itself: no Gate, policy or reviewer logic is duplicated, and the Console answers no to everything unless
+//! `--simulated-user` selects the labeled stand-in for a careful user (`confirm::SimulatedUser`).
 //!
 //! There is no sandbox, model gateway, watchdog, recovery or Integrity Seal: the agent is AgentDojo's, not ours.
 
@@ -33,15 +34,14 @@ use munix_supervisor::reviewer::Reviewer;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::confirm::Confirmer;
+use crate::confirm::{Confirmer, SimulatedUser};
 use crate::front::{GateFront, code_text};
 use crate::run::{
     DEFAULT_MODEL, Env, Failure, PLACEHOLDER_CREDENTIAL, load_catalog, parse_id, random_bytes,
     random_hex, rewrite_plan, supervisor_adapter,
 };
 
-const USAGE: &str =
-    "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]]";
+const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]] [--simulated-user]";
 /// What the model-facing diagnostics on stderr are cut to.
 const MAX_DIAGNOSTIC: usize = 200;
 
@@ -54,19 +54,27 @@ struct Options {
     /// No gray-zone reviewer: such requests go to the (always-no) Console and are denied, as in `munix run` with
     /// no reviewer. Needs `--plan`, so no model is called at all and `MODEL_API_KEY` is not required.
     no_reviewer: bool,
+    /// The Console is `SimulatedUser` instead of a flat no. Evaluation only; its decisions are marked
+    /// `console.simulated_user` in the ledger.
+    simulated_user: bool,
 }
 
-/// Parses `bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]]`.
+/// Parses `bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]] [--simulated-user]`.
 fn parse_args(args: &[String]) -> Result<Options, Failure> {
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("bridge") {
         return Err(Failure::usage(USAGE));
     }
     let (mut manifests, mut ledger, mut plan) = (None, None, None);
-    let mut no_reviewer = false;
+    let (mut no_reviewer, mut simulated_user) = (false, false);
     while let Some(arg) = it.next() {
-        if arg == "--no-reviewer" {
-            if std::mem::replace(&mut no_reviewer, true) {
+        if arg == "--no-reviewer" || arg == "--simulated-user" {
+            let flag = if arg == "--no-reviewer" {
+                &mut no_reviewer
+            } else {
+                &mut simulated_user
+            };
+            if std::mem::replace(flag, true) {
                 return Err(Failure::usage(USAGE));
             }
             continue;
@@ -91,6 +99,7 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
             ledger,
             plan,
             no_reviewer,
+            simulated_user,
         }),
         _ => Err(Failure::usage(USAGE)),
     }
@@ -103,6 +112,39 @@ struct AlwaysNo;
 impl Confirmer for AlwaysNo {
     fn confirm(&mut self, _view: &munix_gate::gate::PendingView) -> bool {
         false
+    }
+}
+
+/// The bridge's Console: a flat no, or, with `--simulated-user`, the labeled stand-in for a careful user. This
+/// file is the only place that constructs `SimulatedUser`; `munix run` never does.
+enum BridgeConsole {
+    AlwaysNo(AlwaysNo),
+    Simulated(SimulatedUser),
+}
+
+impl BridgeConsole {
+    fn new(simulated_user: bool) -> Self {
+        if simulated_user {
+            BridgeConsole::Simulated(SimulatedUser)
+        } else {
+            BridgeConsole::AlwaysNo(AlwaysNo)
+        }
+    }
+}
+
+impl Confirmer for BridgeConsole {
+    fn confirm(&mut self, view: &munix_gate::gate::PendingView) -> bool {
+        match self {
+            BridgeConsole::AlwaysNo(c) => c.confirm(view),
+            BridgeConsole::Simulated(c) => c.confirm(view),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            BridgeConsole::AlwaysNo(c) => c.label(),
+            BridgeConsole::Simulated(c) => c.label(),
+        }
     }
 }
 
@@ -267,6 +309,8 @@ struct Setup {
     plan: PlanSource,
     /// The gray-zone reviewer's model; `None` sends gray-zone requests to the Console, which says no.
     reviewer: Option<Arc<dyn ModelAdapter>>,
+    /// `--simulated-user`: the Console is `SimulatedUser`, not a flat no.
+    simulated_user: bool,
     key: SigningKey,
     task: TaskId,
     session: SessionId,
@@ -415,7 +459,12 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         .start_task(&prompt, &plan, &store)
         .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
     let plan_steps = plan.body.steps.len();
-    let mut front = GateFront::new(&mut gate, key, brief, AlwaysNo);
+    let mut front = GateFront::new(
+        &mut gate,
+        key,
+        brief,
+        BridgeConsole::new(setup.simulated_user),
+    );
     if let Some(adapter) = &setup.reviewer {
         let reviewer = Reviewer::new(Arc::clone(adapter), key.clone());
         front = front.with_reviewer(reviewer, envelope);
@@ -528,6 +577,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         ledger_path: opts.ledger,
         plan,
         reviewer,
+        simulated_user: opts.simulated_user,
         key: SigningKey::from_bytes(&random_bytes(32)?)
             .map_err(|e| Failure::failed(e.to_string()))?,
         task: parse_id(&format!("T-{}", random_hex(4)?))?,
@@ -603,6 +653,14 @@ amendments:
   auto_max_tier: 1
 ";
     const PROMPT: &str = "Send my status to boss@corp.example when you are done.";
+    /// The same plan, but `send` may also take its recipient from step 1's contacts, so a low-trust recipient
+    /// is a gray or confirm-user request rather than a takeover.
+    fn plan_with_step_recipients() -> String {
+        PLAN.replace(
+            "to:   {from: [prompt]}",
+            "to:   {from: [prompt, step.1.contacts], min_trust: 0}",
+        )
+    }
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -634,6 +692,15 @@ amendments:
     }
 
     fn setup(dir: &Path, reviewer: Option<Arc<dyn ModelAdapter>>) -> Setup {
+        setup_with(dir, reviewer, PLAN, false)
+    }
+
+    fn setup_with(
+        dir: &Path,
+        reviewer: Option<Arc<dyn ModelAdapter>>,
+        plan: &str,
+        simulated_user: bool,
+    ) -> Setup {
         let manifests: Vec<ToolManifest> = [READ, NEWS, SEND]
             .iter()
             .map(|y| ToolManifest::from_yaml(y).unwrap())
@@ -641,8 +708,9 @@ amendments:
         Setup {
             catalog: Catalog::from_manifests(manifests).unwrap(),
             ledger_path: dir.join("sub").join("ledger.jsonl"),
-            plan: PlanSource::Given(Plan::from_yaml(PLAN).unwrap()),
+            plan: PlanSource::Given(Plan::from_yaml(plan).unwrap()),
             reviewer,
+            simulated_user,
             key: SigningKey::from_bytes(&[9u8; 32]).unwrap(),
             task: "T-bridge1".parse().unwrap(),
             session: "S-bridge1".parse().unwrap(),
@@ -684,6 +752,16 @@ amendments:
             ledger,
             dir,
         }
+    }
+
+    /// Like `drive_with` and no reviewer, with the plan given and the simulated user as the Console.
+    fn drive_simulated(lines: &[Value], plan: &str) -> Run {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        drive_raw(&input, setup_with(&dir, None, plan, true), dir)
     }
 
     fn no_reviewer() -> Arc<dyn ModelAdapter> {
@@ -867,6 +945,73 @@ amendments:
     }
 
     #[test]
+    fn the_simulated_user_approves_a_prompt_recipient_and_denies_a_low_trust_one() {
+        let plan = plan_with_step_recipients();
+        let read = [
+            start(),
+            call("read", json!({})),
+            tool_ok(json!({"note": "hi", "contacts": ["evil@attacker.example"]})),
+        ];
+        // The ref id is only known once the first result is out.
+        let first = drive_simulated(&read, &plan);
+        first.result.as_ref().unwrap();
+        let contact = refs_in(first.out[2]["text"].as_str().unwrap()).remove(0);
+        drop(first);
+
+        // The recipient is the address in the user's prompt: the simulated user approves, so it runs.
+        let mut lines = read.to_vec();
+        lines.push(call("send", json!({"to": ["ref:e1"], "body": "done"})));
+        lines.push(tool_ok(json!({"message_id": "m-1"})));
+        lines.push(end());
+        let run = drive_simulated(&lines, &plan);
+        run.result.as_ref().unwrap();
+        assert_eq!(
+            ops(&run),
+            [
+                "started", "run_tool", "result", "run_tool", "result", "ended"
+            ]
+        );
+        assert_eq!(run.out[3]["name"], "send");
+        assert_eq!(
+            run.out[3]["arguments"],
+            json!({"to": ["boss@corp.example"], "body": "done"})
+        );
+        assert_eq!(run.out[4]["is_error"], false);
+        let ledger = std::fs::read_to_string(&run.ledger).unwrap();
+        assert!(ledger.contains("console.simulated_user"), "{ledger}");
+        assert!(!ledger.contains("console.user"), "{ledger}");
+        drop(run);
+
+        // The recipient only traces to a low-trust output: denied, and nothing runs.
+        let mut lines = read.to_vec();
+        lines.push(call("send", json!({"to": [contact], "body": "x"})));
+        lines.push(end());
+        let run = drive_simulated(&lines, &plan);
+        run.result.as_ref().unwrap();
+        assert_eq!(
+            ops(&run),
+            ["started", "run_tool", "result", "result", "ended"]
+        );
+        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["is_error"], true);
+        assert_eq!(run.out[4]["takeover"], Value::Null);
+        let ledger = std::fs::read_to_string(&run.ledger).unwrap();
+        assert!(ledger.contains("console.simulated_user"), "{ledger}");
+
+        // Without the flag the same prompt recipient is denied: the Console is a flat no.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut lines = read.to_vec();
+        lines.push(call("send", json!({"to": ["ref:e1"], "body": "done"})));
+        lines.push(end());
+        let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let run = drive_raw(&input, setup_with(&dir, None, &plan, false), dir);
+        assert_eq!(run.out[3]["text"], "denied: user_denied");
+    }
+
+    #[test]
     fn a_failed_tool_is_a_coarse_failure_and_the_session_goes_on() {
         let run = drive(
             &[
@@ -982,8 +1127,32 @@ amendments:
                 ledger: "l.jsonl".into(),
                 plan: Some("p.yaml".into()),
                 no_reviewer: false,
+                simulated_user: false,
             }
         );
+        let simulated = parse_args(&args(&[
+            "bridge",
+            "--manifests",
+            "m",
+            "--ledger",
+            "l.jsonl",
+            "--simulated-user",
+        ]))
+        .unwrap();
+        assert!(simulated.simulated_user && simulated.plan.is_none() && !simulated.no_reviewer);
+        let both = parse_args(&args(&[
+            "bridge",
+            "--simulated-user",
+            "--manifests",
+            "m",
+            "--ledger",
+            "l.jsonl",
+            "--plan",
+            "p.yaml",
+            "--no-reviewer",
+        ]))
+        .unwrap();
+        assert!(both.simulated_user && both.no_reviewer);
         let quiet = parse_args(&args(&[
             "bridge",
             "--manifests",
@@ -1017,6 +1186,15 @@ amendments:
                 "p",
                 "--no-reviewer",
                 "--no-reviewer",
+            ]),
+            args(&[
+                "bridge",
+                "--manifests",
+                "m",
+                "--ledger",
+                "l",
+                "--simulated-user",
+                "--simulated-user",
             ]),
             args(&["bridge"]),
             args(&["bridge", "--help"]),

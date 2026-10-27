@@ -794,6 +794,8 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
 
         let reviewer = Reviewer::new(Arc::clone(&reviewer_adapter), key.clone());
         let mut reader = BufReader::new(stdout);
+        // The Console is always the person at the terminal. `confirm::SimulatedUser` is for the evaluation bridge
+        // only and is never used by `munix run`.
         let mut front = GateFront::new(&mut gate, &key, brief.clone(), TerminalConfirmer)
             .with_reviewer(reviewer, envelope.clone())
             .with_progress(progress)

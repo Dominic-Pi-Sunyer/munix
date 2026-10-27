@@ -1,5 +1,5 @@
 //! `munix run [--plan <file>] --prompt <text> -- <agent command...>`,
-//! `munix bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]]` and
+//! `munix bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]] [--simulated-user]` and
 //! `munix dashboard [--runs <dir>] [--port <n>]` and `munix ledger [<file>]`; see [`munix_cli::run`],
 //! [`munix_cli::bridge`], [`munix_cli::dashboard`] and [`munix_cli::ledger`].
 

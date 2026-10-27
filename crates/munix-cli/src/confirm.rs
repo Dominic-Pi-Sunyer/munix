@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 
 use munix_core::context::Band;
 use munix_core::decision::Stage;
+use munix_core::label::Trust;
 use munix_gate::gate::PendingView;
 
 /// The longest value shown, in characters. A longer one is cut and says how much was left out.
@@ -16,6 +17,47 @@ const MAX_SHOWN: usize = 500;
 /// Asks the user about one parked request. `true` approves.
 pub trait Confirmer {
     fn confirm(&mut self, view: &PendingView) -> bool;
+
+    /// The single reason the Console's decision carries in the ledger. Anything that is not a real person at the
+    /// user's own screen must override this, so its decisions can be told apart.
+    fn label(&self) -> &'static str {
+        "console.user"
+    }
+}
+
+/// The lowest best-match trust at which `SimulatedUser` accepts a destination that does not come from the
+/// prompt, the user's data or a store.
+pub const SIMULATED_USER_MIN_TRUST: u8 = 80;
+
+/// A deterministic stand-in for the user, for the evaluation bridge only (`munix bridge --simulated-user`).
+///
+/// It models a careful user who reads the Console's provenance and approves only when every destination and
+/// selector argument traces to something they would trust: their own prompt, their stores or data, or a record
+/// at trust `SIMULATED_USER_MIN_TRUST` or more. It denies everything else: any value that traces to nothing, any
+/// destination read from low-trust content, and any request with no destination or selector argument to judge.
+///
+/// This exists so an evaluation with no human (AgentDojo) can show how Munix behaves with a person present. It is
+/// never a security mechanism and `munix run` never uses it. Its decisions are marked in the ledger by the reason
+/// `console.simulated_user`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SimulatedUser;
+
+impl Confirmer for SimulatedUser {
+    fn confirm(&mut self, view: &PendingView) -> bool {
+        let min = Some(Trust::new(SIMULATED_USER_MIN_TRUST));
+        let mut judged = 0usize;
+        for trace in view.args.iter().filter_map(|a| a.destination) {
+            judged += 1;
+            if !(trace.clean_side || trace.best_trust >= min) {
+                return false;
+            }
+        }
+        judged > 0
+    }
+
+    fn label(&self) -> &'static str {
+        "console.simulated_user"
+    }
 }
 
 /// Asks on the terminal: prints the request to stderr and reads a `y`/`n` answer from `/dev/tty`, so the agent's
@@ -123,7 +165,7 @@ fn clean(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use munix_gate::gate::PendingArg;
+    use munix_gate::gate::{DestinationTrace, PendingArg};
 
     use super::*;
 
@@ -142,7 +184,45 @@ mod tests {
             name: name.to_owned(),
             value: value.to_owned(),
             sources: sources.iter().map(|s| (*s).to_owned()).collect(),
+            destination: None,
         }
+    }
+
+    fn dest(name: &str, best_trust: Option<u8>, clean_side: bool) -> PendingArg {
+        PendingArg {
+            destination: Some(DestinationTrace {
+                best_trust: best_trust.map(Trust::new),
+                clean_side,
+            }),
+            ..arg(name, "value", &[])
+        }
+    }
+
+    #[test]
+    fn the_simulated_user_approves_only_traced_destinations() {
+        let mut user = SimulatedUser;
+        // Traces to a store (clean side).
+        assert!(user.confirm(&view(vec![
+            dest("to", Some(100), true),
+            arg("body", "Hi", &[]),
+        ])));
+        // A step-sourced value at trust 85 passes, at 30 does not; the boundary is 80.
+        assert!(user.confirm(&view(vec![dest("iban", Some(85), false)])));
+        assert!(user.confirm(&view(vec![dest("iban", Some(80), false)])));
+        assert!(!user.confirm(&view(vec![dest("iban", Some(79), false)])));
+        assert!(!user.confirm(&view(vec![dest("iban", Some(30), false)])));
+        // Untraced.
+        assert!(!user.confirm(&view(vec![dest("iban", None, false)])));
+        // One bad destination among good ones.
+        assert!(!user.confirm(&view(vec![
+            dest("to", Some(100), true),
+            dest("cc", Some(30), false),
+        ])));
+        // Nothing to judge.
+        assert!(!user.confirm(&view(vec![arg("body", "Hi", &[])])));
+        assert!(!user.confirm(&view(vec![])));
+        assert_eq!(user.label(), "console.simulated_user");
+        assert_eq!(TerminalConfirmer.label(), "console.user");
     }
 
     #[test]

@@ -8,7 +8,7 @@ AgentDojo's environment whenever the Gate allows it. All security decisions stay
 ## Process
 
 ```
-munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]]
+munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]] [--simulated-user]
 ```
 
 - **stdin and stdout:** JSON lines, one object per line, UTF-8. Diagnostics go to stderr.
@@ -48,6 +48,11 @@ exit code 2.
 - **Remote tools:** each manifest's tool is registered as a remote `Tool`. Its `call` sends `run_tool` and blocks
   for the matching `tool_result`. `ok:false` becomes `ToolFailure::Upstream`.
 - **No human:** the Console is a confirmer that always answers no. Nothing is ever approved for the user.
+- **`--simulated-user`:** replaces that flat no with a deterministic, clearly labeled stand-in for a careful user
+  (evaluation only; `munix run` never uses it). It approves a Console request only when every destination and
+  selector argument traces to the prompt, the user's data or a store, or to a record of trust 80 or more, and denies
+  everything else, including any untraced value. Its decisions carry the ledger reason `console.simulated_user`
+  instead of `console.user`.
 - **Gray zone:** gray-zone calls go to the Muse Spark reviewer. Anything it would hand to the user is therefore
   denied.
 - **Takeovers:** after a takeover the Gate halts the task, and every later `call` gets `Halted` as its result. The
