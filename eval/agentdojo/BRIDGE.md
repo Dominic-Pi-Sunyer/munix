@@ -8,7 +8,7 @@ AgentDojo's environment whenever the Gate allows it. All security decisions stay
 ## Process
 
 ```
-munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml>]
+munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]]
 ```
 
 - **stdin and stdout:** JSON lines, one object per line, UTF-8. Diagnostics go to stderr.

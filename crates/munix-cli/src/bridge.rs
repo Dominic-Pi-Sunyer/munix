@@ -1,7 +1,7 @@
 //! `munix bridge`: the Gate for one AgentDojo task, spoken to in JSON lines on stdin and stdout.
 //!
 //! ```text
-//! munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml>]
+//! munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]]
 //! ```
 //!
 //! The Python side (`eval/agentdojo`) runs the agent in its own process and sends every tool call here. The same
@@ -40,7 +40,8 @@ use crate::run::{
     random_hex, rewrite_plan, supervisor_adapter,
 };
 
-const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml>]";
+const USAGE: &str =
+    "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]]";
 /// What the model-facing diagnostics on stderr are cut to.
 const MAX_DIAGNOSTIC: usize = 200;
 
@@ -50,16 +51,26 @@ struct Options {
     manifests: PathBuf,
     ledger: PathBuf,
     plan: Option<PathBuf>,
+    /// No gray-zone reviewer: such requests go to the (always-no) Console and are denied, as in `munix run` with
+    /// no reviewer. Needs `--plan`, so no model is called at all and `MODEL_API_KEY` is not required.
+    no_reviewer: bool,
 }
 
-/// Parses `bridge --manifests <dir> --ledger <file> [--plan <file>]`.
+/// Parses `bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]]`.
 fn parse_args(args: &[String]) -> Result<Options, Failure> {
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("bridge") {
         return Err(Failure::usage(USAGE));
     }
     let (mut manifests, mut ledger, mut plan) = (None, None, None);
+    let mut no_reviewer = false;
     while let Some(arg) = it.next() {
+        if arg == "--no-reviewer" {
+            if std::mem::replace(&mut no_reviewer, true) {
+                return Err(Failure::usage(USAGE));
+            }
+            continue;
+        }
         let slot = match arg.as_str() {
             "--manifests" => &mut manifests,
             "--ledger" => &mut ledger,
@@ -74,10 +85,12 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
         }
     }
     match (manifests, ledger) {
-        (Some(manifests), Some(ledger)) => Ok(Options {
+        // Without a plan the planner needs a model, and the reviewer is part of the same setup.
+        (Some(manifests), Some(ledger)) if plan.is_some() || !no_reviewer => Ok(Options {
             manifests,
             ledger,
             plan,
+            no_reviewer,
         }),
         _ => Err(Failure::usage(USAGE)),
     }
@@ -252,8 +265,8 @@ struct Setup {
     catalog: Catalog,
     ledger_path: PathBuf,
     plan: PlanSource,
-    /// The gray-zone reviewer's model.
-    reviewer: Arc<dyn ModelAdapter>,
+    /// The gray-zone reviewer's model; `None` sends gray-zone requests to the Console, which says no.
+    reviewer: Option<Arc<dyn ModelAdapter>>,
     key: SigningKey,
     task: TaskId,
     session: SessionId,
@@ -402,9 +415,11 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         .start_task(&prompt, &plan, &store)
         .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
     let plan_steps = plan.body.steps.len();
-    let reviewer = Reviewer::new(Arc::clone(&setup.reviewer), key.clone());
-    let mut front =
-        GateFront::new(&mut gate, key, brief, AlwaysNo).with_reviewer(reviewer, envelope);
+    let mut front = GateFront::new(&mut gate, key, brief, AlwaysNo);
+    if let Some(adapter) = &setup.reviewer {
+        let reviewer = Reviewer::new(Arc::clone(adapter), key.clone());
+        front = front.with_reviewer(reviewer, envelope);
+    }
     lock(io).send(&json!({
         "op": "started",
         "task": setup.task.as_str(),
@@ -471,31 +486,43 @@ pub fn main(args: Vec<String>) -> ExitCode {
     }
 }
 
-fn run(args: &[String]) -> Result<(), Failure> {
-    let opts = parse_args(args)?;
+/// `.env` and the environment, the API key and the Supervisor's model.
+fn model_config() -> Result<(Env, String, String), Failure> {
     let env = Env::load(Path::new(".env"))?;
     let api_key = env
         .get("MODEL_API_KEY")
         .ok_or_else(|| Failure::config("MODEL_API_KEY is not set (put it in .env)"))?;
-    let supervisor_model = env.get_or("MUNIX_SUPERVISOR_MODEL", DEFAULT_MODEL);
+    let model = env.get_or("MUNIX_SUPERVISOR_MODEL", DEFAULT_MODEL);
+    Ok((env, api_key, model))
+}
+
+fn run(args: &[String]) -> Result<(), Failure> {
+    let opts = parse_args(args)?;
     let catalog = load_catalog(&opts.manifests)?;
-    let plan = match &opts.plan {
+    let (plan, reviewer) = match &opts.plan {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|_| Failure::config(format!("cannot read {}", path.display())))?;
-            PlanSource::Given(
+            let given = PlanSource::Given(
                 Plan::from_yaml(&text)
                     .map_err(|e| Failure::config(format!("{}: {e}", path.display())))?,
-            )
+            );
+            if opts.no_reviewer {
+                // No model anywhere: no key needed.
+                (given, None)
+            } else {
+                let (env, api_key, model) = model_config()?;
+                let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
+                (given, Some(reviewer))
+            }
         }
-        None => PlanSource::Planner(supervisor_adapter(
-            &env,
-            &supervisor_model,
-            Role::Planner,
-            &api_key,
-        )?),
+        None => {
+            let (env, api_key, model) = model_config()?;
+            let planner = supervisor_adapter(&env, &model, Role::Planner, &api_key)?;
+            let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
+            (PlanSource::Planner(planner), Some(reviewer))
+        }
     };
-    let reviewer = supervisor_adapter(&env, &supervisor_model, Role::Reviewer, &api_key)?;
     let setup = Setup {
         catalog,
         ledger_path: opts.ledger,
@@ -606,7 +633,7 @@ amendments:
         }
     }
 
-    fn setup(dir: &Path, reviewer: Arc<dyn ModelAdapter>) -> Setup {
+    fn setup(dir: &Path, reviewer: Option<Arc<dyn ModelAdapter>>) -> Setup {
         let manifests: Vec<ToolManifest> = [READ, NEWS, SEND]
             .iter()
             .map(|y| ToolManifest::from_yaml(y).unwrap())
@@ -626,6 +653,10 @@ amendments:
 
     /// Feeds `lines` to a bridge and returns what it wrote.
     fn drive(lines: &[Value], reviewer: Arc<dyn ModelAdapter>) -> Run {
+        drive_with(lines, Some(reviewer))
+    }
+
+    fn drive_with(lines: &[Value], reviewer: Option<Arc<dyn ModelAdapter>>) -> Run {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir =
             std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
@@ -813,6 +844,29 @@ amendments:
     }
 
     #[test]
+    fn without_a_reviewer_a_gray_zone_call_goes_to_the_console_and_is_denied() {
+        let run = drive_with(
+            &[
+                start(),
+                call("news", json!({})),
+                tool_ok(json!({"headline": "A quiet day"})),
+                call("send", json!({"to": ["ref:e1"], "body": "done"})),
+                end(),
+            ],
+            None,
+        );
+        run.result.as_ref().unwrap();
+        // The same gray-zone call as above, with no adapter anywhere: denied by the Console, nothing runs.
+        assert_eq!(
+            ops(&run),
+            ["started", "run_tool", "result", "result", "ended"]
+        );
+        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["is_error"], true);
+        assert_eq!(run.out[4]["takeover"], Value::Null);
+    }
+
+    #[test]
     fn a_failed_tool_is_a_coarse_failure_and_the_session_goes_on() {
         let run = drive(
             &[
@@ -883,7 +937,7 @@ amendments:
             let dir =
                 std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
-            let run = drive_raw(&input, setup(&dir, no_reviewer()), dir);
+            let run = drive_raw(&input, setup(&dir, Some(no_reviewer())), dir);
             let failure = run.result.as_ref().unwrap_err();
             assert_eq!(failure.code, 2, "{what}");
             let last = run.out.last().unwrap();
@@ -927,9 +981,43 @@ amendments:
                 manifests: "m".into(),
                 ledger: "l.jsonl".into(),
                 plan: Some("p.yaml".into()),
+                no_reviewer: false,
             }
         );
+        let quiet = parse_args(&args(&[
+            "bridge",
+            "--manifests",
+            "m",
+            "--no-reviewer",
+            "--ledger",
+            "l.jsonl",
+            "--plan",
+            "p.yaml",
+        ]))
+        .unwrap();
+        assert!(quiet.no_reviewer);
+        assert_eq!(quiet.plan, Some(PathBuf::from("p.yaml")));
         for bad in [
+            // `--no-reviewer` without `--plan` would leave the planner without a model.
+            args(&[
+                "bridge",
+                "--manifests",
+                "m",
+                "--ledger",
+                "l",
+                "--no-reviewer",
+            ]),
+            args(&[
+                "bridge",
+                "--manifests",
+                "m",
+                "--ledger",
+                "l",
+                "--plan",
+                "p",
+                "--no-reviewer",
+                "--no-reviewer",
+            ]),
             args(&["bridge"]),
             args(&["bridge", "--help"]),
             args(&["bridge", "--manifests", "m"]),
