@@ -60,6 +60,7 @@ impl RefTable {
             Scalar::Url => 'u',
             Scalar::Email => 'e',
             Scalar::Phone => 'p',
+            Scalar::Iban => 'i',
             _ => 'v',
         };
         self.next = self.next.saturating_add(1);

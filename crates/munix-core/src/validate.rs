@@ -1,6 +1,6 @@
 //! The only validators for values that cross a trust boundary. Other crates call these; none keeps its own copy.
 //!
-//! Machine values (email, url, id, phone, date, ref) are printable ASCII only, so there are no homoglyphs.
+//! Machine values (email, url, id, phone, iban, date, ref) are printable ASCII only, so there are no homoglyphs.
 //! Free text may carry non-ASCII letters but never control, bidi, zero-width, tag or other invisible characters.
 
 use crate::error::{Error, invalid};
@@ -15,6 +15,7 @@ pub enum Scalar {
     Email,
     Url,
     Phone,
+    Iban,
     Id,
     Ref,
     Bool,
@@ -32,6 +33,7 @@ impl Scalar {
             Scalar::Email => "email",
             Scalar::Url => "url",
             Scalar::Phone => "phone",
+            Scalar::Iban => "iban",
             Scalar::Id => "id",
             Scalar::Ref => "ref",
             Scalar::Bool => "bool",
@@ -65,6 +67,7 @@ impl FromStr for Scalar {
             "email" => Scalar::Email,
             "url" => Scalar::Url,
             "phone" => Scalar::Phone,
+            "iban" => Scalar::Iban,
             "id" => Scalar::Id,
             "ref" => Scalar::Ref,
             "bool" => Scalar::Bool,
@@ -84,6 +87,7 @@ pub fn is_valid(scalar: Scalar, s: &str) -> bool {
         Scalar::Email => is_email(s),
         Scalar::Url => is_url(s),
         Scalar::Phone => is_phone(s),
+        Scalar::Iban => is_iban(s),
         Scalar::Id => is_id(s),
         Scalar::Ref => s.parse::<RefId>().is_ok(),
         Scalar::Date => is_date(s),
@@ -247,6 +251,22 @@ pub fn is_phone(s: &str) -> bool {
     (4..=20).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// An International Bank Account Number by shape only: two uppercase ASCII letters, two ASCII digits, then 10-30
+/// uppercase ASCII letters or digits (14-34 characters in all), with no spaces.
+///
+/// There is deliberately no mod-97 checksum and no country-code list: AgentDojo's test data uses synthetic numbers
+/// and a non-ISO country code ("UK"), which a checksum would reject. Lowercase is invalid; callers must not
+/// normalize silently, because a changed destination would no longer match what the user wrote.
+pub fn is_iban(s: &str) -> bool {
+    let b = s.as_bytes();
+    (14..=34).contains(&b.len())
+        && b[..2].iter().all(u8::is_ascii_uppercase)
+        && b[2..4].iter().all(u8::is_ascii_digit)
+        && b[4..]
+            .iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 /// `YYYY-MM-DD` that is a real calendar date (year 0001 or later).
 pub fn is_date(s: &str) -> bool {
     let b = s.as_bytes();
@@ -284,6 +304,7 @@ mod tests {
             Scalar::Email,
             Scalar::Url,
             Scalar::Phone,
+            Scalar::Iban,
             Scalar::Id,
             Scalar::Ref,
             Scalar::Bool,
@@ -588,6 +609,39 @@ mod tests {
         assert!(long_host.len() <= 254 && is_email(&long_host));
         let too_long = format!("a@{}.com", vec!["b".repeat(60); 5].join("."));
         assert!(too_long.len() > 254 && !is_email(&too_long));
+    }
+
+    #[test]
+    fn ibans_by_shape_only() {
+        for ok in [
+            "GB29NWBK60161331926819",
+            "UK12345678901234567890",
+            "SE3550000000054910000003",
+            "US133000000121212121212",
+            "AB12ABCDEFGHIJ",
+            &format!("DE00{}", "A".repeat(30)),
+        ] {
+            assert!(is_valid(Scalar::Iban, ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "gb29nwbk60161331926819",
+            "GB29nwbk60161331926819",
+            "GB29NWBK6016",
+            "AB12ABCDEFGHI",
+            &format!("DE00{}", "A".repeat(31)),
+            "GB29 NWBK 6016 1331 9268 19",
+            "GB29NWBK60161331926819 ",
+            "1B29NWBK60161331926819",
+            "GBX9NWBK60161331926819",
+            "GB29NWBK-0161331926819",
+            "G\u{412}29NWBK60161331926819",
+            "GB29NWBK60161331926\u{ff11}19",
+            "GB29NWBK60161331926819\n",
+        ] {
+            assert!(!is_valid(Scalar::Iban, bad), "{bad:?}");
+        }
+        assert!(Scalar::Iban.is_string_shaped());
     }
 
     #[test]

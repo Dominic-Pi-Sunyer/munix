@@ -200,7 +200,12 @@ fn swap(
     refs: &mut RefTable,
 ) -> Value {
     match value {
-        Value::String(s) if matches!(scalar, Scalar::Url | Scalar::Email | Scalar::Phone) => {
+        Value::String(s)
+            if matches!(
+                scalar,
+                Scalar::Url | Scalar::Email | Scalar::Phone | Scalar::Iban
+            ) =>
+        {
             let origin = Origin::Step {
                 step,
                 field: field.to_owned(),
@@ -980,6 +985,50 @@ mod tests {
         )
         .unwrap();
         assert!(!d.fields["links"].to_string().contains("evil.example"));
+    }
+
+    #[test]
+    fn iban_values_become_refs_and_bad_ones_are_rejected() {
+        let m = manifest(&[
+            "payee: {type: iban, region: operator_content}",
+            "payees: {type: \"iban[]\", region: operator_content}",
+        ]);
+        let all = reads(&[RegionType::OperatorContent]);
+        let mut refs = RefTable::new();
+        let d = ingest(
+            &m,
+            2,
+            &tool_source(),
+            &all,
+            out(&[
+                ("payee", json!("GB29NWBK60161331926819")),
+                (
+                    "payees",
+                    json!(["SE3550000000054910000003", "gb29nwbk60161331926819"]),
+                ),
+            ]),
+            &mut refs,
+        );
+        assert_eq!(d, Err(IngestError::BadValue));
+        let mut refs = RefTable::new();
+        let d = ingest(
+            &m,
+            2,
+            &tool_source(),
+            &all,
+            out(&[
+                ("payee", json!("GB29NWBK60161331926819")),
+                ("payees", json!(["SE3550000000054910000003"])),
+            ]),
+            &mut refs,
+        )
+        .unwrap();
+        assert_eq!(d.fields["payee"], json!("ref:i1"));
+        assert_eq!(d.fields["payees"], json!(["ref:i2"]));
+        assert!(!json!(d.fields).to_string().contains("GB29"));
+        let entry = refs.get(&"ref:i1".parse().unwrap()).unwrap();
+        assert_eq!(entry.value, "GB29NWBK60161331926819");
+        assert_eq!(entry.scalar, Scalar::Iban);
     }
 
     #[test]

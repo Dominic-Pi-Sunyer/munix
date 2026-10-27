@@ -14,7 +14,7 @@ use munix_core::manifest::{ArgRole, Catalog, ToolManifest};
 use munix_core::plan::{Plan, SourcePath};
 use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{Request, Violation};
-use munix_core::validate::{Scalar, is_email, is_url, is_valid};
+use munix_core::validate::{Scalar, is_email, is_iban, is_url, is_valid};
 use munix_ledger::Ledger;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -328,8 +328,8 @@ impl Gate {
     /// `Plan::validate`; every step's tool is registered and its credential (if any) is in the vault; the task id
     /// is new. Any failure writes nothing and starts nothing.
     ///
-    /// Then it issues refs, in this order: every url and email in the prompt text (whitespace-separated tokens
-    /// with surrounding `()[]<>"',.;:!?` trimmed that pass core's `is_url` / `is_email`), with origin
+    /// Then it issues refs, in this order: every url, email and IBAN in the prompt text (whitespace-separated
+    /// tokens with surrounding `()[]<>"',.;:!?` trimmed that pass core's `is_url` / `is_email` / `is_iban`), with origin
     /// `Origin::Prompt`; then every store value the plan names in a `from` or `may_embed` path, with origin
     /// `Origin::Store`. Labels: source `prompt` or `store`, region `user_content`, author `user`, trust 100,
     /// confidential `internal` for the prompt and the value's own for the store, capacity `free_text`.
@@ -1361,7 +1361,7 @@ fn user_label(source: Source, confidential: Confidential) -> Label {
     }
 }
 
-/// Urls and emails in the prompt text, in order of appearance.
+/// Urls, emails and IBANs in the prompt text, in order of appearance.
 fn prompt_values(text: &str) -> Vec<(String, Scalar)> {
     text.split_whitespace()
         .filter_map(|token| {
@@ -1370,6 +1370,8 @@ fn prompt_values(text: &str) -> Vec<(String, Scalar)> {
                 Some((token.to_owned(), Scalar::Url))
             } else if is_email(token) {
                 Some((token.to_owned(), Scalar::Email))
+            } else if is_iban(token) {
+                Some((token.to_owned(), Scalar::Iban))
             } else {
                 None
             }
@@ -1709,6 +1711,25 @@ mod tests {
             values: Vec::new(),
             single_line: false,
         }
+    }
+
+    #[test]
+    fn prompt_values_picks_out_urls_emails_and_ibans() {
+        assert_eq!(
+            prompt_values("Please send 10 to GB29NWBK60161331926819, thanks."),
+            vec![("GB29NWBK60161331926819".to_owned(), Scalar::Iban)]
+        );
+        assert_eq!(
+            prompt_values(
+                "Mail bob@a.test or see (https://a.test/x) then pay SE3550000000054910000003."
+            ),
+            vec![
+                ("bob@a.test".to_owned(), Scalar::Email),
+                ("https://a.test/x".to_owned(), Scalar::Url),
+                ("SE3550000000054910000003".to_owned(), Scalar::Iban),
+            ]
+        );
+        assert!(prompt_values("gb29nwbk60161331926819 and GB29 NWBK 6016 1331 9268 19").is_empty());
     }
 
     #[test]

@@ -153,6 +153,7 @@ fn check_scalar(spec: &ArgSpec, v: &Value, value_max: Option<u32>) -> Result<(),
         | Scalar::Email
         | Scalar::Url
         | Scalar::Phone
+        | Scalar::Iban
         | Scalar::Id
         | Scalar::Ref
         | Scalar::Date => {

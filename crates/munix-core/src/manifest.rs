@@ -415,6 +415,37 @@ output:
     }
 
     #[test]
+    fn parses_an_iban_destination_and_iban_output() {
+        let yaml = "
+tool: bank.send_money
+description: Send money to a bank account.
+tier: 3
+egress: true
+credentials: vault://bank/oauth
+args:
+  recipient: {type: iban, role: destination}
+  amount:    {type: number, role: content}
+output:
+  payees: {type: \"iban[]\", region: operator_content}
+";
+        let m = ToolManifest::from_yaml(yaml).unwrap();
+        assert_eq!(
+            m.args["recipient"].ty,
+            ArgType {
+                scalar: Scalar::Iban,
+                list: false
+            }
+        );
+        assert_eq!(
+            m.output["payees"].ty,
+            ArgType {
+                scalar: Scalar::Iban,
+                list: true
+            }
+        );
+    }
+
+    #[test]
     fn rejects_unknown_fields_everywhere() {
         let top = format!("{EMAIL}trusted: true\n");
         assert!(ToolManifest::from_yaml(&top).is_err());
@@ -466,7 +497,9 @@ output:
             })
             .is_err()
         );
-        for ty in ["email", "url", "phone", "id", "ref", "text", "url[]"] {
+        for ty in [
+            "email", "url", "phone", "iban", "id", "ref", "text", "url[]", "iban[]",
+        ] {
             let r = with(|m| {
                 m.args
                     .insert("target".into(), arg(ty, ArgRole::Destination));

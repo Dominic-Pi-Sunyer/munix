@@ -365,6 +365,7 @@ fn arg_schema(spec: &ArgSpec) -> Value {
         | Scalar::Email
         | Scalar::Url
         | Scalar::Phone
+        | Scalar::Iban
         | Scalar::Id
         | Scalar::Date
         | Scalar::Ref => json!({"type": "string"}),
