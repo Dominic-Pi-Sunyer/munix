@@ -2,9 +2,12 @@
 //!
 //! Runs after `Request::check_shape`, so every value already has the manifest's shape.
 
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use munix_core::ids::{RefId, find_embedded};
+use munix_core::label::Confidential;
 use munix_core::manifest::{ArgRole, ArgSpec};
 use munix_core::validate::Scalar;
 use serde_json::Value;
@@ -24,7 +27,10 @@ use crate::vault::Credential;
 ///   are counted in `raw_destinations`; `confidential` is the most confidential of the embedded (or traced raw)
 ///   entries' labels and of table entries (at least 6 characters long) whose value is copied into the text;
 ///   `contains_credential` is set when any credential appears in the text plainly, base64 encoded (standard or
-///   URL-safe, with or without padding) or hex encoded (either case).
+///   URL-safe, with or without padding) or hex encoded (either case). Known values and credentials are looked
+///   for in the raw text and in its percent-decoded form (`%XX`, `+` as a space, decoded once). Table entries
+///   labelled `private` or `secret` (at least 8 characters long) are also found base64 or hex encoded, and
+///   raise `confidential` to their level exactly like a plain copy.
 /// - Content `ref`/`ref[]` values (such as attachments) resolve like embedded refs.
 /// - Everything else (control arguments, numbers, bools, enums) gives default facts.
 pub fn trace_arg(
@@ -143,12 +149,12 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
             });
         }
     }
-    for (_, entry) in refs.iter() {
-        if entry.value.len() >= MIN_COPIED_LEN && text.contains(entry.value.as_str()) {
-            facts.confidential = facts.confidential.max(entry.label.confidential);
-        }
+    let views = views_of(text);
+    if let Some(level) = known_value_level(&views, refs, MIN_COPIED_LEN, Confidential::Public, &[])
+    {
+        facts.confidential = facts.confidential.max(level);
     }
-    if !facts.contains_credential && text_has_credential(text, credentials) {
+    if !facts.contains_credential && text_has_credential(&views, credentials, 1) {
         facts.contains_credential = true;
     }
 }
@@ -156,30 +162,228 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
 /// Known values shorter than this are not treated as copied into text (too many accidental hits).
 const MIN_COPIED_LEN: usize = 6;
 
-/// Credentials shorter than this are only checked plainly.
+/// Values shorter than this are only checked plainly: no base64 or hex form is looked for.
 const MIN_ENCODED_LEN: usize = 8;
 
-fn text_has_credential(text: &str, credentials: &[&Credential]) -> bool {
-    // Encoded copies may be wrapped across lines, so the encoded checks look at the text without whitespace.
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let compact_lower = compact.to_ascii_lowercase();
-    credentials.iter().any(|credential| {
-        let secret = credential.expose_secret();
-        if secret.is_empty() {
-            return false;
+/// Values shorter than this are ignored when looking for one split across several content arguments.
+const MIN_SPLIT_LEN: usize = 8;
+
+/// One way of reading a piece of text, prepared for matching.
+struct View {
+    text: String,
+    /// `text` without white space (encoded copies may be wrapped across lines).
+    compact: String,
+    compact_lower: String,
+}
+
+impl View {
+    fn new(text: &str) -> View {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let compact_lower = compact.to_ascii_lowercase();
+        View {
+            text: text.to_owned(),
+            compact,
+            compact_lower,
         }
-        if text.contains(secret) {
-            return true;
+    }
+}
+
+/// The raw text and, when it differs, its percent-decoded form.
+fn views_of(text: &str) -> Vec<View> {
+    let mut views = vec![View::new(text)];
+    if text.contains(['%', '+']) {
+        let decoded = percent_decode(text);
+        if decoded != text {
+            views.push(View::new(&decoded));
         }
-        let bytes = secret.as_bytes();
-        if bytes.len() < MIN_ENCODED_LEN {
-            return false;
+    }
+    views
+}
+
+/// Decodes `%XX` pairs and turns `+` into a space, once (the result is not decoded again). A `%` not followed by
+/// two hex digits is left as it is. Bytes that do not form valid UTF-8 become the replacement character.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                let pair = bytes.get(i + 1).zip(bytes.get(i + 2));
+                match pair.and_then(|(&hi, &lo)| Some(hex_digit(hi)? << 4 | hex_digit(lo)?)) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
         }
-        compact_lower.contains(&hex::encode(bytes))
-            || base64_needles(bytes)
-                .iter()
-                .any(|needle| compact.contains(needle.as_str()))
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Finds `value` in any view: plainly when it has at least `min_plain` characters, and (when `encoded` is set and
+/// it has at least [`MIN_ENCODED_LEN`] bytes) hex or base64 encoded.
+fn value_in_views(views: &[View], value: &str, min_plain: usize, encoded: bool) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value.len() >= min_plain && views.iter().any(|v| v.text.contains(value)) {
+        return true;
+    }
+    if !encoded || value.len() < MIN_ENCODED_LEN {
+        return false;
+    }
+    let hex = hex::encode(value.as_bytes());
+    let needles = base64_needles(value.as_bytes());
+    views.iter().any(|v| {
+        v.compact_lower.contains(&hex) || needles.iter().any(|n| v.compact.contains(n.as_str()))
     })
+}
+
+/// The most confidential level among table entries found in `views`: plainly when at least `min_plain` characters
+/// long, and encoded when labelled `private` or `secret`. Entries below `floor` are skipped, and so are entries
+/// found whole in any of the `alone` view sets (one per piece of text; those are handled per argument). `None`
+/// when nothing is found.
+fn known_value_level(
+    views: &[View],
+    refs: &RefTable,
+    min_plain: usize,
+    floor: Confidential,
+    alone: &[Vec<View>],
+) -> Option<Confidential> {
+    let mut found: Option<Confidential> = None;
+    for (_, entry) in refs.iter() {
+        let level = entry.label.confidential;
+        if level < floor || found.is_some_and(|f| f >= level) {
+            continue;
+        }
+        let encoded = level >= Confidential::Private;
+        if value_in_views(views, &entry.value, min_plain, encoded)
+            && !alone
+                .iter()
+                .any(|v| value_in_views(v, &entry.value, min_plain, encoded))
+        {
+            found = Some(level);
+        }
+    }
+    found
+}
+
+fn text_has_credential(views: &[View], credentials: &[&Credential], min_plain: usize) -> bool {
+    credentials
+        .iter()
+        .any(|credential| value_in_views(views, credential.expose_secret(), min_plain, true))
+}
+
+/// The orders in which `n` pieces of text are joined to look for a split value: every order for up to
+/// [`MAX_PERMUTED_PIECES`] pieces (an attacker picks which argument carries which half), otherwise name order and
+/// its reverse.
+fn orderings(n: usize) -> Vec<Vec<usize>> {
+    let mut all: Vec<Vec<usize>> = vec![Vec::new()];
+    if n > MAX_PERMUTED_PIECES {
+        return vec![(0..n).collect(), (0..n).rev().collect()];
+    }
+    for _ in 0..n {
+        let mut next = Vec::new();
+        for partial in &all {
+            for i in 0..n {
+                if !partial.contains(&i) {
+                    let mut longer = partial.clone();
+                    longer.push(i);
+                    next.push(longer);
+                }
+            }
+        }
+        all = next;
+    }
+    all
+}
+
+/// Up to this many pieces of content text are joined in every order (at most 24 orders).
+const MAX_PERMUTED_PIECES: usize = 4;
+
+/// Traces every argument of one request, and additionally looks for a value split across its content arguments.
+///
+/// Each argument with a spec gets [`trace_arg`] facts. Then the text of all content arguments (string-shaped,
+/// not refs; list elements in order) is joined in argument-name order, once with no separator and once with a
+/// single space (in every order when there are at most four pieces, so it does not matter which argument carries
+/// which half; otherwise in name order and in reverse), and the joined text is checked for credentials and for table entries labelled `private` or
+/// `secret` (plain, percent-decoded, base64 or hex; values shorter than 8 characters are ignored). Only a value
+/// that is not found whole inside any single piece counts as split. A hit raises
+/// EVERY content argument to that level (`contains_credential` for a credential), so the strictest `dlp` rule
+/// among them decides. Needs at least two non-empty pieces of content text.
+pub fn trace_request(
+    specs: &BTreeMap<String, ArgSpec>,
+    args: &BTreeMap<String, Value>,
+    refs: &RefTable,
+    credentials: &[&Credential],
+) -> BTreeMap<String, ArgFacts> {
+    let mut out = BTreeMap::new();
+    let mut content_names: Vec<&String> = Vec::new();
+    let mut pieces: Vec<&str> = Vec::new();
+    for (name, value) in args {
+        let Some(spec) = specs.get(name) else {
+            continue;
+        };
+        out.insert(name.clone(), trace_arg(spec, value, refs, credentials));
+        if spec.role == ArgRole::Content
+            && spec.ty.scalar.is_string_shaped()
+            && spec.ty.scalar != Scalar::Ref
+        {
+            content_names.push(name);
+            pieces.extend(items(value).into_iter().flatten().filter(|t| !t.is_empty()));
+        }
+    }
+    if pieces.len() < 2 {
+        return out;
+    }
+    let mut views = Vec::new();
+    for order in orderings(pieces.len()) {
+        let ordered: Vec<&str> = order.iter().map(|&i| pieces[i]).collect();
+        views.extend(views_of(&ordered.concat()));
+        views.extend(views_of(&ordered.join(" ")));
+    }
+    // A value found whole inside one piece is that argument's own business (`trace_arg`), not a split.
+    let alone: Vec<Vec<View>> = pieces.iter().map(|p| views_of(p)).collect();
+    let credential = credentials.iter().any(|c| {
+        let secret = c.expose_secret();
+        value_in_views(&views, secret, MIN_SPLIT_LEN, true)
+            && !alone
+                .iter()
+                .any(|v| value_in_views(v, secret, MIN_SPLIT_LEN, true))
+    });
+    let level = known_value_level(&views, refs, MIN_SPLIT_LEN, Confidential::Private, &alone);
+    for name in content_names {
+        if let Some(facts) = out.get_mut(name) {
+            facts.contains_credential |= credential;
+            if let Some(level) = level {
+                facts.confidential = facts.confidential.max(level);
+            }
+        }
+    }
+    out
 }
 
 /// The base64 strings that show up wherever `secret` is encoded, whatever its byte offset inside the encoded
@@ -1385,5 +1589,384 @@ mod tests {
         );
         assert!(!facts.contains_credential);
         assert_eq!(facts.values, vec![Traced::untraced()]);
+    }
+
+    // ---- percent decoding ----
+
+    #[test]
+    fn percent_decode_handles_pairs_plus_and_junk() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("a+b+c"), "a b c");
+        assert_eq!(percent_decode("%41%62%7a%7A"), "Abzz");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz%4"), "%zz%4");
+        assert_eq!(percent_decode("%2B"), "+");
+        assert_eq!(percent_decode("caf%C3%A9 \u{4f60}"), "caf\u{e9} \u{4f60}");
+        assert_eq!(percent_decode("%FF"), "\u{fffd}");
+        assert_eq!(percent_decode(""), "");
+    }
+
+    #[test]
+    fn percent_decode_is_not_recursive() {
+        assert_eq!(percent_decode("%2541"), "%41");
+        assert_eq!(percent_decode("%252B"), "%2B");
+    }
+
+    // ---- DLP encodings ----
+
+    fn percent_encode_all(s: &str) -> String {
+        s.bytes().map(|b| format!("%{b:02X}")).collect()
+    }
+
+    fn table(value: &str, level: Confidential) -> RefTable {
+        let mut refs = RefTable::new();
+        refs.issue(value, Scalar::Text, step(1, "v"), label(20, level));
+        refs
+    }
+
+    fn text_facts(text: &str, refs: &RefTable, creds: &[&Credential]) -> ArgFacts {
+        trace_arg(
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!(text),
+            refs,
+            creds,
+        )
+    }
+
+    #[test]
+    fn url_encoded_credential_is_found() {
+        assert!(content_has_credential(
+            &format!("key={}", percent_encode_all(SECRET)),
+            &[SECRET]
+        ));
+        assert!(content_has_credential(
+            &format!("key={}", percent_encode_all(SECRET).to_ascii_lowercase()),
+            &[SECRET]
+        ));
+        // Only the odd characters encoded, as a URL encoder would.
+        assert!(content_has_credential(
+            "tok=pass%20word+123%21",
+            &["pass word 123!"]
+        ));
+        assert!(!content_has_credential(
+            "tok=pass%20word",
+            &["pass word 123!"]
+        ));
+    }
+
+    #[test]
+    fn a_doubly_url_encoded_credential_is_decoded_only_once() {
+        // Decoded once only: a doubly encoded credential is not found.
+        let twice = percent_encode_all(&percent_encode_all(SECRET));
+        assert!(!content_has_credential(&twice, &[SECRET]));
+    }
+
+    #[test]
+    fn url_encoded_private_store_value_raises_confidentiality() {
+        let refs = table("alice salary 185000", Confidential::Private);
+        let facts = text_facts("note=alice%20salary%20185000", &refs, &[]);
+        assert_eq!(facts.confidential, Confidential::Private);
+        let facts = text_facts("note=alice+salary+185000", &refs, &[]);
+        assert_eq!(facts.confidential, Confidential::Private);
+        let facts = text_facts(&percent_encode_all("alice salary 185000"), &refs, &[]);
+        assert_eq!(facts.confidential, Confidential::Private);
+        let refs = table("alice salary 185000", Confidential::Secret);
+        let facts = text_facts("alice%20salary%20185000", &refs, &[]);
+        assert_eq!(facts.confidential, Confidential::Secret);
+    }
+
+    #[test]
+    fn harmless_url_encoded_text_raises_nothing() {
+        let refs = table("alice salary 185000", Confidential::Secret);
+        let c = cred(SECRET);
+        let facts = text_facts("hello%20world and a+b", &refs, &[&c]);
+        assert_eq!(facts.confidential, Confidential::Public);
+        assert!(!facts.contains_credential);
+        assert!(facts.embedded.is_empty());
+        assert_eq!(facts.raw_destinations, 0);
+    }
+
+    #[test]
+    fn base64_and_hex_of_private_and_secret_values_are_found() {
+        let value = "alice-salary-185000";
+        for level in [Confidential::Private, Confidential::Secret] {
+            let refs = table(value, level);
+            let encoded = [
+                STANDARD_NO_PAD.encode(value),
+                URL_SAFE_NO_PAD.encode(value),
+                base64::engine::general_purpose::STANDARD.encode(value),
+                hex::encode(value),
+                hex::encode(value).to_ascii_uppercase(),
+                STANDARD_NO_PAD.encode(format!("xx{value} and more")),
+            ];
+            for enc in encoded {
+                let facts = text_facts(&format!("blob: {enc}"), &refs, &[]);
+                assert_eq!(facts.confidential, level, "{enc}");
+            }
+        }
+    }
+
+    #[test]
+    fn base64_of_a_url_encoded_private_value_is_found_after_decoding() {
+        let value = "alice-salary-185000";
+        let refs = table(value, Confidential::Private);
+        // The base64 text itself arrives percent-encoded (`=` as %3D, `+` as %2B).
+        let enc = STANDARD_NO_PAD.encode(format!("zz{value}"));
+        let facts = text_facts(&percent_encode_all(&enc), &refs, &[]);
+        assert_eq!(facts.confidential, Confidential::Private);
+    }
+
+    #[test]
+    fn encoded_forms_only_apply_to_private_and_secret_values() {
+        let value = "alice-salary-185000";
+        for level in [Confidential::Public, Confidential::Internal] {
+            let refs = table(value, level);
+            let facts = text_facts(&STANDARD_NO_PAD.encode(value), &refs, &[]);
+            assert_eq!(facts.confidential, Confidential::Public, "{level:?}");
+            let facts = text_facts(&hex::encode(value), &refs, &[]);
+            assert_eq!(facts.confidential, Confidential::Public, "{level:?}");
+        }
+    }
+
+    #[test]
+    fn short_private_values_are_not_matched_encoded() {
+        // Seven characters: found plainly, never encoded.
+        let refs = table("pin1234", Confidential::Secret);
+        assert_eq!(
+            text_facts("pin1234", &refs, &[]).confidential,
+            Confidential::Secret
+        );
+        assert_eq!(
+            text_facts(&STANDARD_NO_PAD.encode("pin1234"), &refs, &[]).confidential,
+            Confidential::Public
+        );
+        assert_eq!(
+            text_facts(&hex::encode("pin1234"), &refs, &[]).confidential,
+            Confidential::Public
+        );
+        // Eight characters get the encoded checks.
+        let refs = table("pin12345", Confidential::Secret);
+        assert_eq!(
+            text_facts(&hex::encode("pin12345"), &refs, &[]).confidential,
+            Confidential::Secret
+        );
+    }
+
+    // ---- values split across content arguments ----
+
+    fn email_specs() -> BTreeMap<String, ArgSpec> {
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            "to".to_owned(),
+            spec(Scalar::Email, true, ArgRole::Destination),
+        );
+        specs.insert(
+            "subject".to_owned(),
+            spec(Scalar::Text, false, ArgRole::Content),
+        );
+        specs.insert(
+            "body".to_owned(),
+            spec(Scalar::Text, false, ArgRole::Content),
+        );
+        specs.insert(
+            "attachments".to_owned(),
+            spec(Scalar::Ref, true, ArgRole::Content),
+        );
+        specs
+    }
+
+    fn request_args(subject: &str, body: &str) -> BTreeMap<String, Value> {
+        [
+            ("to", json!(["bob@a.test"])),
+            ("subject", json!(subject)),
+            ("body", json!(body)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect()
+    }
+
+    #[test]
+    fn a_secret_split_across_subject_and_body_raises_both() {
+        let refs = table("alice-salary-185000", Confidential::Secret);
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("alice-salary-", "185000 for the year"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts["subject"].confidential, Confidential::Secret);
+        assert_eq!(facts["body"].confidential, Confidential::Secret);
+        // The destination is untouched.
+        assert_eq!(facts["to"].confidential, Confidential::Public);
+        // Order does not matter: the body is the first half, the subject the second.
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("185000", "alice-salary-"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts["subject"].confidential, Confidential::Secret);
+        assert_eq!(facts["body"].confidential, Confidential::Secret);
+        // A first half alone, or two unrelated pieces, raise nothing.
+        let facts = trace_request(&email_specs(), &request_args("alice-sal", "x"), &refs, &[]);
+        assert_eq!(facts["subject"].confidential, Confidential::Public);
+        assert_eq!(facts["body"].confidential, Confidential::Public);
+    }
+
+    #[test]
+    fn orderings_cover_small_sets_and_fall_back_for_large_ones() {
+        assert_eq!(orderings(0), vec![Vec::<usize>::new()]);
+        assert_eq!(orderings(2), vec![vec![0, 1], vec![1, 0]]);
+        assert_eq!(orderings(4).len(), 24);
+        assert_eq!(
+            orderings(6),
+            vec![vec![0, 1, 2, 3, 4, 5], vec![5, 4, 3, 2, 1, 0]]
+        );
+    }
+
+    #[test]
+    fn a_value_wholly_inside_one_argument_does_not_raise_the_others() {
+        let refs = table("alice-salary-185000", Confidential::Private);
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("Weekly summary", "the figure is alice-salary-185000"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts["body"].confidential, Confidential::Private);
+        assert_eq!(facts["subject"].confidential, Confidential::Public);
+        // Same for an encoded copy and for a credential.
+        let enc = hex::encode("alice-salary-185000");
+        let facts = trace_request(&email_specs(), &request_args("Hi", &enc), &refs, &[]);
+        assert_eq!(facts["body"].confidential, Confidential::Private);
+        assert_eq!(facts["subject"].confidential, Confidential::Public);
+        let c = cred(SECRET);
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("Hi", SECRET),
+            &RefTable::new(),
+            &[&c],
+        );
+        assert!(facts["body"].contains_credential);
+        assert!(!facts["subject"].contains_credential);
+    }
+
+    #[test]
+    fn a_split_joined_by_a_space_is_found() {
+        let refs = table("alice salary 185000", Confidential::Private);
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("alice salary", "185000"),
+            &refs,
+            &[],
+        );
+        assert_eq!(facts["subject"].confidential, Confidential::Private);
+        assert_eq!(facts["body"].confidential, Confidential::Private);
+    }
+
+    #[test]
+    fn a_credential_split_across_arguments_flags_every_content_argument() {
+        let c = cred(SECRET);
+        let (a, b) = SECRET.split_at(10);
+        let facts = trace_request(&email_specs(), &request_args(a, b), &RefTable::new(), &[&c]);
+        assert!(facts["subject"].contains_credential);
+        assert!(facts["body"].contains_credential);
+        assert!(!facts["to"].contains_credential);
+    }
+
+    #[test]
+    fn an_encoded_split_value_is_found() {
+        let refs = table("alice-salary-185000", Confidential::Secret);
+        let enc = hex::encode("alice-salary-185000");
+        let (a, b) = enc.split_at(14);
+        let facts = trace_request(&email_specs(), &request_args(a, b), &refs, &[]);
+        assert_eq!(facts["subject"].confidential, Confidential::Secret);
+        assert_eq!(facts["body"].confidential, Confidential::Secret);
+    }
+
+    #[test]
+    fn a_split_inside_a_list_argument_is_found() {
+        let mut specs = email_specs();
+        specs.insert(
+            "notes".to_owned(),
+            spec(Scalar::Text, true, ArgRole::Content),
+        );
+        let refs = table("alice-salary-185000", Confidential::Secret);
+        let mut args = request_args("hi", "there");
+        args.insert("notes".to_owned(), json!(["alice-sal", "ary-185000"]));
+        let facts = trace_request(&specs, &args, &refs, &[]);
+        assert_eq!(facts["subject"].confidential, Confidential::Secret);
+        assert_eq!(facts["body"].confidential, Confidential::Secret);
+        assert_eq!(facts["notes"].confidential, Confidential::Secret);
+    }
+
+    #[test]
+    fn short_values_are_not_split_matched() {
+        // Seven characters: found whole in one argument, never across two.
+        let refs = table("pin1234", Confidential::Secret);
+        let facts = trace_request(&email_specs(), &request_args("pin1", "234"), &refs, &[]);
+        assert_eq!(facts["subject"].confidential, Confidential::Public);
+        assert_eq!(facts["body"].confidential, Confidential::Public);
+        let c = cred("hunter2");
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("hunt", "er2"),
+            &RefTable::new(),
+            &[&c],
+        );
+        assert!(!facts["subject"].contains_credential);
+        assert!(!facts["body"].contains_credential);
+        // Eight characters are split-matched.
+        let refs = table("pin12345", Confidential::Secret);
+        let facts = trace_request(&email_specs(), &request_args("pin1", "2345"), &refs, &[]);
+        assert_eq!(facts["body"].confidential, Confidential::Secret);
+    }
+
+    #[test]
+    fn split_matching_ignores_public_and_internal_values() {
+        for level in [Confidential::Public, Confidential::Internal] {
+            let refs = table("alice-salary-185000", level);
+            let facts = trace_request(
+                &email_specs(),
+                &request_args("alice-salary-", "185000"),
+                &refs,
+                &[],
+            );
+            assert_eq!(facts["subject"].confidential, Confidential::Public);
+            assert_eq!(facts["body"].confidential, Confidential::Public);
+        }
+    }
+
+    #[test]
+    fn unrelated_content_arguments_stay_clean() {
+        let refs = table("alice-salary-185000", Confidential::Secret);
+        let c = cred(SECRET);
+        let facts = trace_request(
+            &email_specs(),
+            &request_args("Weekly summary", "hello%20world, nothing to see"),
+            &refs,
+            &[&c],
+        );
+        for name in ["subject", "body", "to"] {
+            assert_eq!(facts[name].confidential, Confidential::Public, "{name}");
+            assert!(!facts[name].contains_credential, "{name}");
+        }
+        assert!(facts["subject"].embedded.is_empty() && facts["body"].embedded.is_empty());
+    }
+
+    #[test]
+    fn trace_request_matches_trace_arg_per_argument() {
+        let refs = table("alice-salary-185000", Confidential::Secret);
+        let specs = email_specs();
+        let args = request_args("a link evil.test", "plain body");
+        let facts = trace_request(&specs, &args, &refs, &[]);
+        for (name, value) in &args {
+            assert_eq!(facts[name], trace_arg(&specs[name], value, &refs, &[]));
+        }
+        // Arguments without a spec are skipped.
+        let mut extra = args.clone();
+        extra.insert("unknown".to_owned(), json!("x"));
+        assert_eq!(trace_request(&specs, &extra, &refs, &[]).len(), 3);
     }
 }
