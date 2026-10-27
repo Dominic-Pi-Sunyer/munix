@@ -1,21 +1,23 @@
 //! `munix run`: one task, one sandboxed agent, behind the Gate.
 //!
 //! ```text
-//! munix run --plan <plan.yaml> --prompt <text> [--image <image>] [--agent-dir <dir>] [--ledger <file>]
+//! munix run [--plan <plan.yaml>] --prompt <text> [--image <image>] [--agent-dir <dir>] [--ledger <file>]
 //!           -- <agent command...>
 //! ```
 //!
-//! Until the Supervisor exists (Day 5) the plan is a hand-written file, signed here. The prompt goes to Munix
-//! separately from the agent's own command line (design spec, Ingress).
+//! Without `--plan`, the Supervisor's planner writes and signs the plan from the prompt, the catalog and the
+//! operator stores. With `--plan`, a hand-written plan file is rewritten for this run and signed here. The prompt
+//! goes to Munix separately from the agent's own command line (design spec, Ingress).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
-use munix_adapters::{Pricing, Usage};
+use munix_adapters::{MetaAdapter, ModelAdapter, Pricing, ReasoningEffort, Role, Usage};
 use munix_core::crypto::{Digest, Purpose, Signed, SigningKey};
 use munix_core::ids::{PlanId, SessionId, TaskId};
 use munix_core::label::Confidential;
@@ -30,6 +32,8 @@ use munix_ledger::Ledger;
 use munix_runtime::gateway::{ApiKey, Gateway, GatewayConfig};
 use munix_runtime::mcp::{ServeEnd, serve};
 use munix_runtime::sandbox::{Sandbox, SandboxSpec};
+use munix_supervisor::planner::Planner;
+use munix_supervisor::reviewer::Reviewer;
 use munix_tools::email::SmtpEmail;
 use munix_tools::site::SiteTemplates;
 use munix_tools::webspeed::{WebSpeedConfig, WebSpeedOpen};
@@ -37,7 +41,7 @@ use munix_tools::webspeed::{WebSpeedConfig, WebSpeedOpen};
 use crate::confirm::TerminalConfirmer;
 use crate::front::{GateFront, code_text};
 
-const USAGE: &str = "usage: munix run --plan <plan.yaml> --prompt <text> [--image <image>] \
+const USAGE: &str = "usage: munix run [--plan <plan.yaml>] --prompt <text> [--image <image>] \
                      [--agent-dir <dir>] [--ledger <file>] -- <agent command...>";
 const DEFAULT_IMAGE: &str = "munix-demo-agent";
 const DEFAULT_AGENT_DIR: &str = "demo/agent";
@@ -85,7 +89,7 @@ impl Failure {
 /// What `munix run` was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
-    plan: PathBuf,
+    plan: Option<PathBuf>,
     prompt: String,
     image: String,
     agent_dir: PathBuf,
@@ -93,7 +97,7 @@ struct Options {
     command: Vec<String>,
 }
 
-/// Parses `run --plan <file> --prompt <text> [...] -- <agent command...>`.
+/// Parses `run [--plan <file>] --prompt <text> [...] -- <agent command...>`.
 fn parse_args(args: &[String]) -> Result<Options, Failure> {
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("run") {
@@ -123,14 +127,14 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
         };
         *slot = Some(value.clone());
     }
-    let (Some(plan), Some(prompt)) = (plan, prompt) else {
+    let Some(prompt) = prompt else {
         return Err(Failure::usage(USAGE));
     };
     if command.is_empty() {
         return Err(Failure::usage(USAGE));
     }
     Ok(Options {
-        plan: PathBuf::from(plan),
+        plan: plan.map(PathBuf::from),
         prompt,
         image: image.unwrap_or_else(|| DEFAULT_IMAGE.to_owned()),
         agent_dir: PathBuf::from(agent_dir.unwrap_or_else(|| DEFAULT_AGENT_DIR.to_owned())),
@@ -314,24 +318,28 @@ enum Outcome {
 ///    `munix-demo-agent`, agent dir `demo/agent`, ledger `runs/<task>.ledger.jsonl` (its directory is created).
 /// 2. Read `.env` from the current directory if it exists (`KEY=VALUE` lines, `#` comments; variables already set
 ///    win). Require `MODEL_API_KEY`. Also read `MUNIX_WORKER_MODEL` (default `muse-spark-1.3`), `MUNIX_WORKER_EFFORT`,
-///    `MUNIX_BOSS_EMAIL` (default `boss@corp.example`), `MUNIX_HOST_GATEWAY` (default `192.168.5.2`, Colima),
-///    `WEBSPEED_OSS_DIR` (default `../web-speed-oss`), `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`.
+///    `MUNIX_SUPERVISOR_MODEL` (default `muse-spark-1.3`), `MUNIX_BOSS_EMAIL` (default `boss@corp.example`),
+///    `MUNIX_HOST_GATEWAY` (default `192.168.5.2`, Colima), `WEBSPEED_OSS_DIR` (default `../web-speed-oss`),
+///    `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`.
 /// 3. A fresh 32-byte signing key from `/dev/urandom`. Random hex ids: task `T-<8>`, session `S-<8>`, plan `P-<8>`,
 ///    nonce 32 hex characters.
 /// 4. The catalog from `manifests/*.yaml`, the site templates from `sites/`, the tools (`web.open` through Web
 ///    Speed OSS with the allowlist and templates, `email.send` through `SmtpEmail::from_env`), a vault holding a
 ///    placeholder credential for each manifest's `credentials` ref (Mailpit takes any), a new ledger, and a `Gate`
 ///    with each tool registered at its manifest's digest.
-/// 5. The prompt envelope, then the plan file with its `task` and `plan` replaced by the new ids and its
-///    `prompt_hash` set to the envelope's digest. Sign both, and `start_task` with the store
-///    `contacts.boss = MUNIX_BOSS_EMAIL` (email, internal).
+/// 5. The prompt envelope, then either the `--plan` file (with its `task` and `plan` replaced by the new ids and its
+///    `prompt_hash` set to the envelope's digest) or a plan written and signed by the Supervisor's `Planner`
+///    (`MUNIX_SUPERVISOR_MODEL`, printing `munix: plan written by <model> (<n> steps)` to stderr). Sign the prompt,
+///    build the Supervisor's `Reviewer`, and `start_task` with the store `contacts.boss = MUNIX_BOSS_EMAIL` (email,
+///    internal).
 /// 6. Start the model gateway on `127.0.0.1:0` for upstream `https://api.meta.ai/v1`, allowing only the worker
 ///    model, with a 120 s timeout.
 /// 7. Launch the sandbox: name from the task id (lowercase), the image, the agent dir (absolute), the command,
 ///    env `MUNIX_WORKER_MODEL`, `MUNIX_WORKER_EFFORT` (if set), `MUNIX_BOSS_EMAIL`, the host gateway, the gateway's
 ///    port, and this crate's sibling `munix-runtime/relay/relay.py` and `munix-runtime/shim/munix_shim.py` (found
 ///    from `CARGO_MANIFEST_DIR` at build time).
-/// 8. `munix_runtime::mcp::serve` on the agent's stdout and stdin with a `GateFront` and `TerminalConfirmer`.
+/// 8. `munix_runtime::mcp::serve` on the agent's stdout and stdin with a `GateFront` (with the `Reviewer` attached)
+///    and `TerminalConfirmer`.
 /// 9. When it ends, kill the sandbox and print a summary to stderr: the outcome (finished, or the takeover code),
 ///    the context trust, the ledger path and entry count, and the gateway's token usage with an estimated cost
 ///    (`munix_adapters::Pricing::from_env`).
@@ -346,6 +354,48 @@ pub fn main(args: Vec<String>) -> ExitCode {
     }
 }
 
+/// A Meta adapter for one Supervisor role, configured from `munix run`'s own lookup (the environment, then `.env`)
+/// rather than the process environment alone, so a key or effort set only in `.env` is used.
+fn supervisor_adapter(
+    env: &Env,
+    model: &str,
+    role: Role,
+    api_key: &str,
+) -> Result<Arc<dyn ModelAdapter>, Failure> {
+    let effort = match env.get(role.env_var()) {
+        Some(value) => value.parse::<ReasoningEffort>().map_err(|_| {
+            Failure::config(format!(
+                "{} must be minimal, low, medium, high, xhigh or max",
+                role.env_var()
+            ))
+        })?,
+        None => ReasoningEffort::default(),
+    };
+    let base_url = env.get_or("MUNIX_META_URL", "https://api.meta.ai/v1");
+    let adapter = MetaAdapter::new(&base_url, model, api_key)
+        .map_err(|e| Failure::config(e.to_string()))?
+        .with_reasoning_effort(effort);
+    Ok(Arc::new(adapter))
+}
+
+/// Prices for the cost estimate, from the environment then `.env` (defaults: the published Muse Spark 1.1 rates).
+fn pricing_from(env: &Env) -> Result<Pricing, Failure> {
+    let price = |key: &str, default: f64| -> Result<f64, Failure> {
+        match env.get(key) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<f64>()
+                .ok()
+                .filter(|p| p.is_finite() && *p >= 0.0)
+                .ok_or_else(|| Failure::config(format!("{key} must be a non-negative number"))),
+        }
+    };
+    Ok(Pricing {
+        input_per_m: price("MUNIX_PRICE_INPUT_PER_M", 1.25)?,
+        output_per_m: price("MUNIX_PRICE_OUTPUT_PER_M", 4.25)?,
+    })
+}
+
 fn run(args: &[String]) -> Result<Outcome, Failure> {
     let opts = parse_args(args)?;
     let env = Env::load(Path::new(".env"))?;
@@ -354,9 +404,10 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         .ok_or_else(|| Failure::config("MODEL_API_KEY is not set (put it in .env)"))?;
     let worker_model = env.get_or("MUNIX_WORKER_MODEL", DEFAULT_MODEL);
     let worker_effort = env.get("MUNIX_WORKER_EFFORT");
+    let supervisor_model = env.get_or("MUNIX_SUPERVISOR_MODEL", DEFAULT_MODEL);
     let boss_email = env.get_or("MUNIX_BOSS_EMAIL", DEFAULT_BOSS);
     let host_gateway = env.get_or("MUNIX_HOST_GATEWAY", DEFAULT_HOST_GATEWAY);
-    let pricing = Pricing::from_env().map_err(|e| Failure::config(e.to_string()))?;
+    let pricing = pricing_from(&env)?;
 
     // Identity: a fresh signing key and random ids for this run.
     let key =
@@ -394,14 +445,33 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let prompt_hash = envelope
         .digest()
         .map_err(|e| Failure::config(format!("prompt: {e}")))?;
-    let plan_text = std::fs::read_to_string(&opts.plan)
-        .map_err(|_| Failure::config(format!("cannot read {}", opts.plan.display())))?;
-    let plan = Plan::from_yaml(&plan_text)
-        .map_err(|e| Failure::config(format!("{}: {e}", opts.plan.display())))?;
-    let plan = rewrite_plan(plan, task.clone(), plan_id, prompt_hash);
     let sign_failed = |e: munix_core::error::Error| Failure::failed(e.to_string());
-    let prompt = Signed::sign(&key, Purpose::Prompt, envelope).map_err(sign_failed)?;
-    let plan = Signed::sign(&key, Purpose::Plan, plan).map_err(sign_failed)?;
+    let plan = match &opts.plan {
+        Some(plan_path) => {
+            let plan_text = std::fs::read_to_string(plan_path)
+                .map_err(|_| Failure::config(format!("cannot read {}", plan_path.display())))?;
+            let plan = Plan::from_yaml(&plan_text)
+                .map_err(|e| Failure::config(format!("{}: {e}", plan_path.display())))?;
+            let plan = rewrite_plan(plan, task.clone(), plan_id, prompt_hash);
+            Signed::sign(&key, Purpose::Plan, plan).map_err(sign_failed)?
+        }
+        None => {
+            let adapter = supervisor_adapter(&env, &supervisor_model, Role::Planner, &api_key)?;
+            let planner = Planner::new(adapter, key.clone());
+            let stores = BTreeMap::from([("contacts".to_owned(), vec!["boss".to_owned()])]);
+            let plan = planner
+                .plan(&envelope, &catalog, &stores, plan_id)
+                .map_err(|e| Failure::config(e.to_string()))?;
+            eprintln!(
+                "munix: plan written by {supervisor_model} ({} steps)",
+                plan.body.steps.len()
+            );
+            plan
+        }
+    };
+    let reviewer_adapter = supervisor_adapter(&env, &supervisor_model, Role::Reviewer, &api_key)?;
+    let reviewer = Reviewer::new(reviewer_adapter, key.clone());
+    let prompt = Signed::sign(&key, Purpose::Prompt, envelope.clone()).map_err(sign_failed)?;
     let store: Store = BTreeMap::from([(
         "contacts".to_owned(),
         BTreeMap::from([(
@@ -473,7 +543,8 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
 
     // The agent's MCP channel, served by the Gate.
     let mut reader = BufReader::new(stdout);
-    let mut front = GateFront::new(&mut gate, &key, brief, TerminalConfirmer);
+    let mut front =
+        GateFront::new(&mut gate, &key, brief, TerminalConfirmer).with_reviewer(reviewer, envelope);
     let ended = serve(&mut reader, &mut stdin, &mut front);
     let takeover = front.takeover();
     drop(front);
@@ -564,7 +635,7 @@ mod tests {
         assert_eq!(
             opts,
             Options {
-                plan: PathBuf::from("p.yaml"),
+                plan: Some(PathBuf::from("p.yaml")),
                 prompt: "Do it".to_owned(),
                 image: "munix-demo-agent".to_owned(),
                 agent_dir: PathBuf::from("demo/agent"),
@@ -572,6 +643,22 @@ mod tests {
                 command: args(&["python", "/agent/agent.py"]),
             }
         );
+    }
+
+    #[test]
+    fn missing_plan_is_accepted_by_parse_args() {
+        let opts = parse_args(&args(&[
+            "run",
+            "--prompt",
+            "Do it",
+            "--",
+            "python",
+            "/agent/agent.py",
+        ]))
+        .unwrap();
+        assert_eq!(opts.plan, None);
+        assert_eq!(opts.prompt, "Do it");
+        assert_eq!(opts.command, args(&["python", "/agent/agent.py"]));
     }
 
     #[test]
@@ -595,6 +682,7 @@ mod tests {
             "--",
         ]))
         .unwrap();
+        assert_eq!(opts.plan, Some(PathBuf::from("p.yaml")));
         assert_eq!(opts.image, "img:1");
         assert_eq!(opts.agent_dir, PathBuf::from("/a"));
         assert_eq!(opts.ledger, Some(PathBuf::from("out/l.jsonl")));
@@ -603,10 +691,9 @@ mod tests {
 
     #[test]
     fn bad_usage_exits_with_2() {
-        let cases: [&[&str]; 9] = [
+        let cases: [&[&str]; 8] = [
             &[],
             &["--plan", "p", "--prompt", "x", "--", "a"],
-            &["run", "--prompt", "x", "--", "a"],
             &["run", "--plan", "p", "--", "a"],
             &["run", "--plan", "p", "--prompt", "x"],
             &["run", "--plan", "p", "--prompt", "x", "--"],
@@ -674,6 +761,28 @@ mod tests {
         assert_eq!(env.get("D").as_deref(), Some("from_process"));
         assert_eq!(env.get("E"), None);
         assert_eq!(env.get_or("E", "dflt"), "dflt");
+    }
+
+    #[test]
+    fn supervisor_settings_and_prices_come_from_dotenv_too() {
+        let env = Env {
+            file: parse_dotenv(
+                "MUNIX_REVIEWER_EFFORT=minimal\nMUNIX_PRICE_INPUT_PER_M=2\nMUNIX_PRICE_OUTPUT_PER_M=8\n",
+            ),
+            process: |_| None,
+        };
+        let adapter =
+            supervisor_adapter(&env, "muse-spark-1.3", Role::Reviewer, "test-key").unwrap();
+        assert_eq!(adapter.name(), "meta:muse-spark-1.3");
+        let pricing = pricing_from(&env).unwrap();
+        assert_eq!((pricing.input_per_m, pricing.output_per_m), (2.0, 8.0));
+
+        let bad = Env {
+            file: parse_dotenv("MUNIX_PLANNER_EFFORT=turbo\nMUNIX_PRICE_INPUT_PER_M=-1\n"),
+            process: |_| None,
+        };
+        assert!(supervisor_adapter(&bad, "muse-spark-1.3", Role::Planner, "test-key").is_err());
+        assert!(pricing_from(&bad).is_err());
     }
 
     #[test]

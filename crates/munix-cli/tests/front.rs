@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use munix_adapters::{AdapterError, MockAdapter};
 use munix_cli::confirm::Confirmer;
 use munix_cli::front::GateFront;
 use munix_core::context::Band;
@@ -26,6 +27,7 @@ use munix_gate::tool::{Tool, ToolFailure};
 use munix_gate::vault::{Credential, Vault};
 use munix_ledger::Ledger;
 use munix_runtime::mcp::{CallResult, McpHandler};
+use munix_supervisor::reviewer::Reviewer;
 use serde_json::{Value, json};
 
 const WEB_OPEN: &str = include_str!(concat!(
@@ -117,6 +119,7 @@ struct Harness {
     gate: Gate,
     key: SigningKey,
     brief: TaskBrief,
+    envelope: PromptEnvelope,
     dir: PathBuf,
     task: TaskId,
     /// Every argument map the fake email tool received.
@@ -242,7 +245,7 @@ fn build(options: &Options) -> Harness {
     }
     let mut plan = Plan::from_yaml(&text).unwrap();
     plan.prompt_hash = envelope.digest().unwrap();
-    let prompt = Signed::sign(&key, Purpose::Prompt, envelope).unwrap();
+    let prompt = Signed::sign(&key, Purpose::Prompt, envelope.clone()).unwrap();
     let plan = Signed::sign(&key, Purpose::Plan, plan).unwrap();
     let store: Store = BTreeMap::from([(
         "contacts".to_owned(),
@@ -260,6 +263,7 @@ fn build(options: &Options) -> Harness {
         gate,
         key,
         brief,
+        envelope,
         dir,
         task,
         sent,
@@ -276,6 +280,16 @@ impl Harness {
             self.brief.clone(),
             script.clone(),
         )
+    }
+
+    fn front_with_reviewer(
+        &mut self,
+        script: &Script,
+        mock: Arc<MockAdapter>,
+    ) -> GateFront<'_, Script> {
+        let reviewer = Reviewer::new(mock, self.key.clone());
+        let envelope = self.envelope.clone();
+        self.front(script).with_reviewer(reviewer, envelope)
     }
 
     fn ledger_path(&self) -> PathBuf {
@@ -531,7 +545,7 @@ fn an_unanswered_console_is_a_no() {
 }
 
 #[test]
-fn a_review_request_goes_to_the_user_until_the_supervisor_exists() {
+fn a_review_request_with_no_reviewer_goes_to_the_user() {
     let mut h = build(&Options {
         news: true,
         news_step: true,
@@ -550,6 +564,145 @@ fn a_review_request_goes_to_the_user_until_the_supervisor_exists() {
         (Stage::LlmReview, Band::Elevated)
     );
     assert_eq!(h.emails().len(), 1);
+}
+
+#[test]
+fn reviewer_approve_at_elevated_delivers_without_asking_the_confirmer() {
+    let mut h = build(&Options {
+        news: true,
+        news_step: true,
+        ..Options::default()
+    });
+    let mock = Arc::new(MockAdapter::new(vec![Ok(json!({
+        "verdict": "approve",
+        "reason": "serves_prompt",
+    }))]));
+    let script = Script::default();
+    let mut front = h.front_with_reviewer(&script, mock.clone());
+    assert!(!front.call("news_read", &json!({})).is_error);
+    let result = front.call("email_send", &email("Reviews"));
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.text.contains("msg-1"), "{}", result.text);
+    assert!(!front.should_stop());
+    drop(front);
+
+    assert!(script.shown().is_empty(), "the confirmer is never asked");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    // Invariant 3: the reviewer sees metadata and the user's prompt, never tool output or store values.
+    assert!(!seen[0].user.contains(BOSS));
+    assert!(!seen[0].user.contains("A quiet day"));
+    assert!(!seen[0].user.contains("The reviews are positive."));
+    let sent = h.emails();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["to"], json!([BOSS]));
+}
+
+#[test]
+fn reviewer_deny_returns_denied_reviewer_without_asking_the_confirmer() {
+    let mut h = build(&Options {
+        news: true,
+        news_step: true,
+        ..Options::default()
+    });
+    let mock = Arc::new(MockAdapter::new(vec![Ok(json!({
+        "verdict": "deny",
+        "reason": "off_task",
+    }))]));
+    let script = Script::answering(&[true]);
+    let mut front = h.front_with_reviewer(&script, mock.clone());
+    assert!(!front.call("news_read", &json!({})).is_error);
+    let result = front.call("email_send", &email("Reviews"));
+    refused(&result, "denied: reviewer");
+    assert!(!front.should_stop());
+    drop(front);
+
+    assert_eq!(mock.seen().len(), 1);
+    assert!(script.shown().is_empty(), "the confirmer is never asked");
+    assert!(h.emails().is_empty());
+}
+
+#[test]
+fn reviewer_confirm_user_goes_to_the_confirmer() {
+    let mut h = build(&Options {
+        news: true,
+        news_step: true,
+        ..Options::default()
+    });
+    let mock = Arc::new(MockAdapter::new(vec![Ok(json!({
+        "verdict": "confirm_user",
+        "reason": "unclear",
+    }))]));
+    let script = Script::answering(&[true]);
+    let mut front = h.front_with_reviewer(&script, mock.clone());
+    assert!(!front.call("news_read", &json!({})).is_error);
+    let result = front.call("email_send", &email("Reviews"));
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.text.contains("msg-1"), "{}", result.text);
+    drop(front);
+
+    assert_eq!(mock.seen().len(), 1);
+    let shown = script.shown();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].needs, shown[0].band),
+        (Stage::User, Band::Elevated)
+    );
+    assert_eq!(h.emails().len(), 1);
+}
+
+#[test]
+fn a_mock_adapter_error_in_the_reviewer_goes_to_the_confirmer() {
+    let mut h = build(&Options {
+        news: true,
+        news_step: true,
+        ..Options::default()
+    });
+    let mock = Arc::new(MockAdapter::new(vec![Err(AdapterError::Timeout)]));
+    let script = Script::answering(&[true]);
+    let mut front = h.front_with_reviewer(&script, mock.clone());
+    assert!(!front.call("news_read", &json!({})).is_error);
+    let result = front.call("email_send", &email("Reviews"));
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.text.contains("msg-1"), "{}", result.text);
+    drop(front);
+
+    assert_eq!(mock.seen().len(), 1);
+    let shown = script.shown();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].needs, shown[0].band),
+        (Stage::User, Band::Elevated)
+    );
+    assert_eq!(h.emails().len(), 1);
+}
+
+#[test]
+fn a_request_parked_for_the_user_never_reaches_the_reviewer() {
+    let mut h = harness();
+    let url_ref = h.brief.refs[0].id.to_string();
+    let mock = Arc::new(MockAdapter::new(vec![Ok(json!({
+        "verdict": "approve",
+        "reason": "serves_prompt",
+    }))]));
+    let script = Script::answering(&[false]);
+    let mut front = h.front_with_reviewer(&script, mock.clone());
+    assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
+    let result = front.call("email_send", &email("Reviews"));
+    refused(&result, "denied: reviewer");
+    drop(front);
+
+    assert!(
+        mock.seen().is_empty(),
+        "a request parked for the user must never reach the reviewer"
+    );
+    let shown = script.shown();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].needs, shown[0].band),
+        (Stage::User, Band::Lockdown)
+    );
+    assert!(h.emails().is_empty());
 }
 
 #[test]

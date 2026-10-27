@@ -19,8 +19,10 @@ _Last updated: Mon Oct 26, 2026, ~4:30 PM PT, by Claude (Opus 5.5)._
       3 times.
     - The planner raises any model-written `min_trust` on step sources to 60 (`MIN_STEP_TRUST`), because the live
       planner wrote 0.
-- **Next:** wire into `munix run`. Use the planner when `--plan` is absent (`MUNIX_SUPERVISOR_MODEL`), and the reviewer
-  for `needs: LlmReview` instead of the Console.
+- **Wired into `munix run`** (Gemini, reviewed). Without `--plan`, Muse Spark writes the plan, and gray-zone requests
+  go to the reviewer, then to the Console only if it says `confirm_user` or fails. The lead fixed the Supervisor
+  adapters and prices to read `.env` like the rest of `munix run`. Not yet run live without `--plan`.
+- **Review of `7d806c8` found no invariant break.** Seven follow-ups are open; see "Known issues".
 
 - **`munix run` works live end to end.** The image `munix-demo-agent` is built.
   - **The run:** the agent reads the page through the Gate (trust falls to 15). Its email to the boss (`ref:e2`) is
@@ -137,7 +139,12 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 - `munix run` reads `.env` as a fallback layer, not into the process environment: `set_var` needs `unsafe`.
 - A tool name that can't become a `ToolName` is treated as a takeover but isn't written to the ledger, since there is
   no `Request` to log.
-- Until the Supervisor is wired into `munix run`, requests parked for review (`needs: LlmReview`) go to the user at
-  the Console.
+- **Review follow-ups (Supervisor view):**
+  - The view re-guesses which ref a raw embed matched. Carry ref ids in `Traced` instead.
+  - `normalize_without_refs` duplicates the tracer's normalization.
+  - `value_scalar_type` infers type from ref-id prefixes.
+  - Content args are traced twice, and the embed lookup is quadratic.
+  - Add a poison-test case with agent-invented ref ids, and a planner floor test on `from` rules.
+  - `Task.lowest` must reset on recovery.
 - The live planner reads only `ugc_review`, so the listing and the editor's take (price, specs) are withheld. That's
   safe but thin; nudge the planner prompt to list every region the task needs.

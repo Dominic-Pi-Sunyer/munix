@@ -419,6 +419,7 @@ dependencies = [
  "munix-gate",
  "munix-ledger",
  "munix-runtime",
+ "munix-supervisor",
  "munix-tools",
  "serde",
  "serde_json",

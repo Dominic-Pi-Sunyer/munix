@@ -7,6 +7,7 @@ use munix_core::decision::{Decision, Stage, Verdict};
 use munix_core::ids::ToolName;
 use munix_core::manifest::ArgSpec;
 use munix_core::plan::Step;
+use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{DEFAULT_LIST_MAX, Request};
 use munix_core::validate::Scalar;
 use munix_gate::gate::{Gate, Reply, TaskBrief};
@@ -14,6 +15,7 @@ use munix_gate::ingest::Delivered;
 use munix_gate::policy::DenyCode;
 use munix_gate::tool::ToolFailure;
 use munix_runtime::mcp::{CallResult, McpHandler, ToolInfo};
+use munix_supervisor::reviewer::Reviewer;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -25,6 +27,7 @@ pub struct GateFront<'a, C: Confirmer> {
     key: &'a SigningKey,
     brief: TaskBrief,
     confirmer: C,
+    reviewer: Option<(Reviewer, PromptEnvelope)>,
     takeover: Option<DenyCode>,
 }
 
@@ -36,8 +39,19 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
             key,
             brief,
             confirmer,
+            reviewer: None,
             takeover: None,
         }
+    }
+
+    /// Attaches the Supervisor's gray-zone reviewer for `Stage::LlmReview` requests.
+    pub fn with_reviewer(
+        mut self,
+        reviewer: munix_supervisor::reviewer::Reviewer,
+        prompt: munix_core::prompt::PromptEnvelope,
+    ) -> Self {
+        self.reviewer = Some((reviewer, prompt));
+        self
     }
 
     /// The takeover signal that ended the session, if any.
@@ -100,10 +114,30 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
         }
     }
 
+    /// Asks the Supervisor's reviewer about a request parked for `Stage::LlmReview` and applies its signed decision.
+    fn ask_reviewer(&mut self, request_hash: &Digest) -> Option<Reply> {
+        let (reviewer, prompt) = self.reviewer.as_ref()?;
+        let view = self.gate.review_view(&self.brief.task, request_hash)?;
+        let plan = self.gate.plan(&self.brief.task)?;
+        let signed = reviewer.review(prompt, plan, &view, request_hash).ok()?;
+        Some(self.gate.decide(&signed))
+    }
+
     fn answer(&mut self, reply: Reply) -> CallResult {
+        let reply = match reply {
+            Reply::Pending {
+                request_hash,
+                needs: Stage::LlmReview,
+            } => self
+                .ask_reviewer(&request_hash)
+                .unwrap_or_else(|| self.ask_user(&request_hash)),
+            other => other,
+        };
         match reply {
-            Reply::Pending { request_hash, .. } => {
-                // A request that needs the Supervisor's review goes to the user too, until the Supervisor exists.
+            Reply::Pending {
+                request_hash,
+                needs: Stage::User,
+            } => {
                 let reply = self.ask_user(&request_hash);
                 self.settled(reply)
             }
@@ -219,10 +253,13 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     ///   they are and list items as `- item` lines; then one line naming the withheld fields, if any.
     /// - `Malformed`: `denied: ` and the violation codes, comma-separated.
     /// - `Denied(code)`: `denied: <code>`.
-    /// - `Pending`: shows the request on the Console (`Gate::describe_pending` and the confirmer), signs a
-    ///   `Stage::User` decision (approve or deny, the band from the view, reason `console.user`) with
-    ///   `Purpose::UserConfirmation`, passes it to `Gate::decide`, and answers with that reply mapped the same way.
-    ///   A review the Supervisor would give (`needs: LlmReview`) also goes to the user until the Supervisor exists.
+    /// - `Pending`: when `needs` is `Stage::LlmReview` and a reviewer is attached, asks `Reviewer::review` on the
+    ///   Gate's redacted `review_view` and passes the signed decision to `Gate::decide`; if `decide` answers
+    ///   `Pending { needs: User }` (or if there is no reviewer, the view or plan is missing, or `review` errors),
+    ///   falls back to the Console. When `needs` is `Stage::User`, goes straight to the Console (`Gate::describe_pending`
+    ///   and the confirmer), signs a `Stage::User` decision (approve or deny, the band from the view, reason
+    ///   `console.user`) with `Purpose::UserConfirmation`, passes it to `Gate::decide`, and answers with that reply
+    ///   mapped the same way.
     /// - `Takeover(code)`: `denied: <code>`; records the code so `should_stop` ends the session.
     /// - `Halted`: `denied: task halted`. `Failed(f)`: `tool failed: <f>`.
     fn call(&mut self, name: &str, arguments: &Value) -> CallResult {
