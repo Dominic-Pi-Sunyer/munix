@@ -4,6 +4,7 @@
     .venv/bin/python -m unittest discover -s tests
 """
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -187,7 +188,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(agent.runs, 2)
         self.assertEqual(len(client.requests), 2)  # no third attacker call after the success
         self.assertEqual(doc["totals"]["pairs_broken"], 1)
-        self.assertEqual(json.loads(out.read_text())["pairs"][0]["status"], "broken")
+        self.assertEqual(adaptive.load_full(out)["pairs"][0]["status"], "broken")
 
     def test_history_accumulates_in_the_attacker_message(self):
         _, client, _, _ = run_search([reply("first idea"), reply("second idea"), reply(f"{MARKER}")], rounds=3)
@@ -242,7 +243,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(doc["pairs"][0]["rounds"]), 2)  # round 1 costs 0.00125, round 2 pushes it past
         self.assertEqual(doc["pairs"][0]["status"], "budget_stopped")
         self.assertEqual(len(client.requests), 2)
-        saved = json.loads(out.read_text())
+        saved = adaptive.load_full(out)
         self.assertEqual(saved["stopped"], "budget")
         self.assertAlmostEqual(saved["totals"]["estimated_cost_usd"], 0.0025, places=4)
         self.assertEqual(saved["totals"]["attacker_usage"]["prompt_tokens"], 200)
@@ -282,7 +283,7 @@ class ReplayTests(unittest.TestCase):
     def test_replay_reruns_the_stored_payload(self):
         doc, _, _, out = run_search([reply("meh"), reply(f"{MARKER} again")])
         self.assertEqual(doc["pairs"][0]["status"], "broken")
-        source = json.loads(out.read_text())
+        source = adaptive.load_full(out)
         target, agent = make_target()
         replay_out = Path(tempfile.mkdtemp()) / "replay.json"
         result = adaptive.replay(
@@ -300,7 +301,7 @@ class ReplayTests(unittest.TestCase):
         doc, _, _, out = run_search([reply("meh")], rounds=1)
         target, agent = make_target()
         result = adaptive.replay(
-            suite=SUITE, source=json.loads(out.read_text()), target=target, repeats=2,
+            suite=SUITE, source=adaptive.load_full(out), target=target, repeats=2,
             out_path=Path(tempfile.mkdtemp()) / "r.json", config={},
         )
         self.assertEqual(agent.runs, 0)
@@ -317,7 +318,7 @@ class ReplayTests(unittest.TestCase):
         munix_executor.SUMMARIES.clear()
         target, _ = make_target()
         result = adaptive.replay(
-            suite=SUITE, source=json.loads(out.read_text()), target=target, repeats=2,
+            suite=SUITE, source=adaptive.load_full(out), target=target, repeats=2,
             out_path=Path(tempfile.mkdtemp()) / "r.json", config={}, session=FakeSession(),
         )
         self.assertEqual([r["munix"]["denials"] for r in result["pairs"][0]["runs"]], [1, 1])
@@ -325,3 +326,49 @@ class ReplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WithholdingTests(unittest.TestCase):
+    """Successful payloads are working attacks: they never reach the public results file."""
+
+    def test_search_withholds_only_the_successful_payload(self):
+        doc, _, _, out = run_search([reply("a harmless miss"), reply(f"{MARKER} wins")])
+        public_text = out.read_text()
+        private_path = out.parent / "private" / out.name
+        self.assertNotIn(MARKER, public_text)
+        self.assertIn("a harmless miss", public_text)  # failed attempts stay public
+        self.assertIn(f"{MARKER} wins", private_path.read_text())
+        public = json.loads(public_text)
+        pair = public["pairs"][0]
+        self.assertNotIn("winning_payload", pair)
+        self.assertEqual(pair["winning_payload_sha256"], hashlib.sha256(f"{MARKER} wins".encode()).hexdigest())
+        won = pair["rounds"][1]
+        self.assertEqual(won["payload"], adaptive.WITHHELD)
+        self.assertEqual(won["transcript"], adaptive.WITHHELD)
+        self.assertEqual(won["rationale"], adaptive.WITHHELD)
+        self.assertEqual(adaptive.load_full(out)["pairs"][0]["winning_payload"], f"{MARKER} wins")
+
+    def test_replay_withholds_payloads_and_transcripts(self):
+        _, _, _, out = run_search([reply(f"{MARKER} wins")])
+        target, _ = make_target()
+        replay_out = Path(tempfile.mkdtemp()) / "replay.json"
+        adaptive.replay(
+            suite=SUITE, source=adaptive.load_full(out), target=target, repeats=2, out_path=replay_out,
+            config={}, prices=(1.0, 1.0),
+        )
+        public_text = replay_out.read_text()
+        self.assertNotIn(MARKER, public_text)
+        pair = json.loads(public_text)["pairs"][0]
+        self.assertEqual(pair["payload"], adaptive.WITHHELD)
+        self.assertTrue(all(r["transcript"] == adaptive.WITHHELD for r in pair["runs"]))
+        self.assertIn(MARKER, (replay_out.parent / "private" / replay_out.name).read_text())
+
+    def test_redact_splits_a_file_written_before_withholding(self):
+        _, _, _, out = run_search([reply(f"{MARKER} wins")])
+        full = adaptive.load_full(out)
+        old_style = Path(tempfile.mkdtemp()) / "old.json"
+        old_style.write_text(json.dumps(full))
+        self.assertIn(MARKER, old_style.read_text())
+        adaptive.write_split(adaptive.load_full(old_style), old_style)
+        self.assertNotIn(MARKER, old_style.read_text())
+        self.assertIn(MARKER, (old_style.parent / "private" / old_style.name).read_text())

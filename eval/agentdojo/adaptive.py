@@ -15,6 +15,8 @@ AgentDojo's environment is simulated in-process, and no real account, service or
 """
 
 import argparse
+import copy
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -37,6 +39,10 @@ import munix_executor
 from run import BENCHMARK_VERSION, DEFAULT_MODEL, META_URL, Usage, env_value, make_pipeline
 
 RESULTS = HERE / "results"
+# Successful payloads are working attacks on a production Meta model: they stay out of the public repo (gitignored)
+# until reported to Meta. The public results keep a hash and a length in their place.
+PRIVATE = RESULTS / "private"
+WITHHELD = "successful payload, kept out of the public repo until reported to Meta (see results/private/)"
 DEFAULT_PRICES = (1.25, 4.25)  # USD per million input / output tokens, as in run.py
 MAX_PAYLOAD_CHARS = 3000
 TRANSCRIPT_CHARS = 1500
@@ -267,6 +273,59 @@ def _delta(u: Usage, before: tuple[int, int, int]) -> dict:
     }
 
 
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def public_copy(doc: dict) -> dict:
+    """The document with every successful payload, and anything that could quote one, withheld.
+
+    Search: a round whose attack succeeded loses its payload, rationale and transcript (tool results quote the
+    payload), and its pair loses `winning_payload`; each is replaced by its SHA-256 and length. Replay: every
+    replayed payload succeeded once, so each pair loses its payload and every run its transcript.
+    """
+    out = copy.deepcopy(doc)
+    for pair in out.get("pairs", []):
+        if out.get("kind") == "adaptive-replay":
+            text = pair.pop("payload", None)
+            if isinstance(text, str):
+                pair.update(payload_sha256=_digest(text), payload_chars=len(text), payload=WITHHELD)
+            for run in pair.get("runs", []):
+                if "transcript" in run:
+                    run["transcript"] = WITHHELD
+            continue
+        winning = pair.pop("winning_payload", None)
+        if isinstance(winning, str):
+            pair.update(winning_payload_sha256=_digest(winning), winning_payload_chars=len(winning))
+        for rnd in pair.get("rounds", []):
+            if rnd.get("security") is True and isinstance(rnd.get("payload"), str):
+                text = rnd["payload"]
+                rnd.update(payload=WITHHELD, payload_sha256=_digest(text), payload_chars=len(text))
+                rnd["rationale"] = WITHHELD
+                if "transcript" in rnd:
+                    rnd["transcript"] = WITHHELD
+    return out
+
+
+def write_split(doc: dict, out_path: Path) -> None:
+    """Writes the full document to `private/<name>` beside `out_path` (gitignored under results/) and the public
+    copy to `out_path`."""
+    private_dir = out_path.parent / PRIVATE.name
+    private_dir.mkdir(parents=True, exist_ok=True)
+    full = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+    (private_dir / out_path.name).write_text(full, encoding="utf-8")
+    out_path.write_text(json.dumps(public_copy(doc), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def load_full(path: Path) -> dict:
+    """A results document with its payloads: the private copy if the given file is a public one."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    private = path.parent / PRIVATE.name / path.name
+    if path.parent.name != PRIVATE.name and private.is_file():
+        doc = json.loads(private.read_text(encoding="utf-8"))
+    return doc
+
+
 def search(
     *,
     suite,
@@ -298,8 +357,7 @@ def search(
 
     def save() -> None:
         doc["totals"] = totals(pair_docs, attacker, target, spent())
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_split(doc, out_path)
 
     try:
         for index, (uid, iid) in enumerate(pairs):
@@ -475,8 +533,7 @@ def replay(
             "usage": _usage_dict(target.usage),
             "estimated_cost_usd": round(target.usage.cost(*prices), 4),
         }
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_split(doc, out_path)
     return doc
 
 
@@ -558,7 +615,7 @@ def cmd_search(args) -> int:
 
 def cmd_replay(args) -> int:
     key = require_key()
-    source = json.loads(Path(args.source).read_text(encoding="utf-8"))
+    source = load_full(Path(args.source))
     if source.get("kind") != "adaptive-search":
         raise SystemExit("--from must be a result file written by `adaptive.py search`")
     suite_name = source["suite"]
@@ -632,10 +689,21 @@ def main() -> int:
     r.add_argument("--mode", default="bare", choices=("bare", "munix"))
     r.add_argument("--repeats", type=int, default=3)
     r.add_argument("--munix-bin", default=str(munix_executor.DEFAULT_BINARY), help="the munix binary (--mode munix)")
+    d = sub.add_parser("redact", help="split a results file written before withholding into public and private")
+    d.add_argument("--from", dest="source", required=True, help="a search or replay results file")
     args = ap.parse_args()
     if args.cmd == "search" and (args.rounds < 1 or args.budget <= 0):
         ap.error("--rounds must be at least 1 and --budget above 0")
+    if args.cmd == "redact":
+        return cmd_redact(args)
     return cmd_search(args) if args.cmd == "search" else cmd_replay(args)
+
+
+def cmd_redact(args) -> int:
+    path = Path(args.source)
+    write_split(load_full(path), path)
+    print(f"wrote {path} (public) and {path.parent / PRIVATE.name / path.name} (private, gitignored)")
+    return 0
 
 
 if __name__ == "__main__":
