@@ -8,6 +8,27 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, early morning PT, by Claude (Opus 5.5)._
 
+- **Refinement pass (Oct 27), done, offline, merged on `main`:**
+  - **Second security review: no invariant break.** Fixes merged:
+    - The planner keeps forbids on payment args; it drops them only on tier-0 reads.
+    - Amended steps get `no_private` DLP, are marked for the reviewer, and their ledger entries link back to the
+      original request.
+    - Terminal output is escaped, and colliding tool names are rejected.
+    - Numeric, bool and enum selectors and destinations are traced against delivered values, failing closed.
+    - DLP covers Unicode spaces, fails closed above the split-check bound, and checks pairs of pieces.
+  - **Utility-ceiling audit** (`eval/agentdojo/oracle.py`, no model): a perfect honest agent completes 4 of 16
+    banking tasks.
+    - 8 tasks: Lockdown `confirm_user` after reading transaction history (trust 15) or a file (trust 10).
+    - 2 tasks: untraceable destination. UT0's IBAN is only in a file; UT9's ground truth uses a schedule id it
+      never read.
+    - 2 tasks: AgentDojo ground truth pays by name.
+    - Clean and injected environments give the same result.
+  - **Tuning options waiting on the owner:**
+    1. Split transaction subjects by who wrote them, and have the planner read third-party text only when needed.
+    2. A typed document Reader.
+    3. Report results with no human and with a labeled simulated user who approves only fully traced
+       destinations.
+
 - **Standing rules from the owner:**
   - No Meta API request and no `git push` without the owner's explicit OK for that specific run or push.
   - No local open-weights models.
