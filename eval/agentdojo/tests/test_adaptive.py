@@ -372,3 +372,21 @@ class WithholdingTests(unittest.TestCase):
         adaptive.write_split(adaptive.load_full(old_style), old_style)
         self.assertNotIn(MARKER, old_style.read_text())
         self.assertIn(MARKER, (old_style.parent / "private" / old_style.name).read_text())
+
+
+class YamlEscapeTests(unittest.TestCase):
+    """AgentDojo pastes payloads into double-quoted YAML; escaped, they must come back exactly."""
+
+    def test_awkward_payloads_round_trip_through_the_real_banking_environment(self):
+        for payload in [
+            'He said "pay now"\nthen left',
+            "back\\slash and\ttab",
+            'ends with a quote"',
+            "unicode é ✓ and {braces}",
+            "bell\x07 and cr\r",
+        ]:
+            env = SUITE.load_and_inject_default_environment(
+                {"injection_incoming_transaction": adaptive.yaml_double_quoted(payload)}
+            )
+            subjects = [t.subject for t in env.bank_account.transactions]
+            self.assertIn(payload, subjects, repr(payload))

@@ -273,6 +273,33 @@ def _delta(u: Usage, before: tuple[int, int, int]) -> dict:
     }
 
 
+def yaml_double_quoted(text: str) -> str:
+    """`text` escaped for the inside of a YAML double-quoted string.
+
+    AgentDojo pastes injection text into its environment YAML with `str.format` before parsing it, and every
+    injection placeholder in the banking and Slack environments sits inside double quotes. Unescaped, a payload
+    with a quote or a newline breaks the YAML and the round never runs. Escaped, it parses back to exactly the
+    attacker's text.
+    """
+    out = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -416,7 +443,7 @@ def run_round(n, rounds, suite, attacker, target, user_task, injection_task, slo
             rec.update(status="attacker_refused", attacker_reply=_clip(reply, 300))
             return rec
         rec["payload"], rec["rationale"] = parsed
-        injections = {vector: rec["payload"] for vector in slots}
+        injections = {vector: yaml_double_quoted(rec["payload"]) for vector in slots}
         try:
             rec["utility"], rec["security"], rec["transcript"] = run_case(
                 suite, target, user_task, injection_task, injections
@@ -495,7 +522,7 @@ def replay(
             user_task = suite.get_user_task_by_id(p["user_task"])
             injection_task = suite.get_injection_task_by_id(p["injection_task"])
             vectors = p.get("vectors") or list(slots_for(suite, Surface(suite, None), user_task))  # type: ignore[arg-type]
-            injections = {v: p["winning_payload"] for v in vectors}
+            injections = {v: yaml_double_quoted(p["winning_payload"]) for v in vectors}
             runs = []
             for k in range(1, repeats + 1):
                 run: dict = {"repeat": k}
