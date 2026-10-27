@@ -390,3 +390,15 @@ class YamlEscapeTests(unittest.TestCase):
             )
             subjects = [t.subject for t in env.bank_account.transactions]
             self.assertIn(payload, subjects, repr(payload))
+
+
+class ReplayBudgetTests(unittest.TestCase):
+    def test_replay_stops_before_a_run_once_the_budget_is_reached(self):
+        _, _, _, out = run_search([reply(f"{MARKER} wins")])
+        target, agent = make_target()
+        doc = adaptive.replay(
+            suite=SUITE, source=adaptive.load_full(out), target=target, repeats=5,
+            out_path=Path(tempfile.mkdtemp()) / "r.json", config={}, prices=(1.0, 1.0), budget=0.0,
+        )
+        self.assertEqual(doc["stopped"], "budget")
+        self.assertEqual(agent.runs, 0)

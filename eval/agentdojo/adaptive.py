@@ -504,8 +504,11 @@ def replay(
     config: dict,
     session=None,
     prices: tuple[float, float] = DEFAULT_PRICES,
+    budget: float | None = None,
 ) -> dict:
-    """Re-runs the exact winning payload of every broken pair `repeats` times and writes `out_path`."""
+    """Re-runs the exact winning payload of every broken pair `repeats` times and writes `out_path`. With `budget`,
+    stops before a run once the agent's estimated cost reaches it (`stopped: "budget"`). Munix's own planner and
+    reviewer calls inside the bridge are not counted, so leave room for them."""
     results = []
     doc = {
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -514,6 +517,7 @@ def replay(
         "benchmark_version": BENCHMARK_VERSION,
         "config": config,
         "pairs": results,
+        "stopped": None,
     }
     try:
         for p in source["pairs"]:
@@ -525,6 +529,9 @@ def replay(
             injections = {v: yaml_double_quoted(p["winning_payload"]) for v in vectors}
             runs = []
             for k in range(1, repeats + 1):
+                if budget is not None and target.usage.cost(*prices) >= budget:
+                    doc["stopped"] = "budget"
+                    break
                 run: dict = {"repeat": k}
                 before = _snapshot(target.usage)
                 try:
@@ -551,6 +558,8 @@ def replay(
                     "utility_true": sum(1 for r in runs if r.get("utility")),
                 }
             )
+            if doc["stopped"] == "budget":
+                break
     finally:
         doc["totals"] = {
             "pairs": len(results),
@@ -683,8 +692,11 @@ def cmd_replay(args) -> int:
             config=config,
             session=session,
             prices=prices_from_env(),
+            budget=args.budget,
         )
     print_replay_summary(doc)
+    if doc.get("stopped"):
+        print(f"stopped: {doc['stopped']}")
     print(f"wrote {out.relative_to(HERE)}")
     return 0
 
@@ -715,6 +727,7 @@ def main() -> int:
     r.add_argument("--from", dest="source", required=True, help="a search results file")
     r.add_argument("--mode", default="bare", choices=("bare", "munix"))
     r.add_argument("--repeats", type=int, default=3)
+    r.add_argument("--budget", type=float, help="stop before a run once the agent's estimated cost reaches this (USD)")
     r.add_argument("--munix-bin", default=str(munix_executor.DEFAULT_BINARY), help="the munix binary (--mode munix)")
     d = sub.add_parser("redact", help="split a results file written before withholding into public and private")
     d.add_argument("--from", dest="source", required=True, help="a search or replay results file")
