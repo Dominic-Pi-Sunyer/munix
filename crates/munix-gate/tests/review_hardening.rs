@@ -229,7 +229,7 @@ fn a_60_kib_request_with_200_refs_is_traced_quickly() {
 }
 
 #[test]
-fn the_split_check_still_runs_for_small_requests_and_is_skipped_for_huge_ones() {
+fn the_split_check_runs_for_small_requests_and_huge_ones_fail_closed() {
     let mut refs = RefTable::new();
     let secret = "alice-salary-185000";
     refs.issue(
@@ -252,8 +252,9 @@ fn the_split_check_still_runs_for_small_requests_and_is_skipped_for_huge_ones() 
     let started = Instant::now();
     let facts = trace_request(&specs, &huge, &refs, &[]);
     assert!(started.elapsed() < BUDGET);
-    // Over 64 KiB in total: only the per-argument checks ran, and neither piece holds the whole secret.
-    assert_eq!(facts["a"].confidential, Confidential::Public);
+    // Over 64 KiB in total: the split check does not run, so the request fails closed (see review2_trace.rs).
+    assert_eq!(facts["a"].confidential, Confidential::Secret);
+    assert!(facts["a"].split_unchecked);
 }
 
 // ---- core's default text cap ----
