@@ -34,8 +34,10 @@ pub enum DenyCode {
     UnknownRef,
     /// The current band never allows this request (destinations outside the plan at 0-19).
     BandLimit,
-    /// The Supervisor's review or the user said no.
+    /// The Supervisor's review said no.
     Reviewer,
+    /// The user said no at the Console.
+    UserDenied,
 }
 
 impl DenyCode {

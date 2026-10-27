@@ -26,7 +26,9 @@ Return a JSON object with:
 - \"reads\": array of region types the agent may read (choose from: \"operator_legal\", \
 \"operator_content\", \"operator_ui\", \"product_listing\", \"editorial\", \"search_snippet\", \
 \"ugc_post\", \"ugc_review\", \"profile\", \"ugc_comment\", \"ad\", \"embedded_third_party\", \
-\"user_content\", \"message\", \"unclassified\"; never \"hidden\").
+\"user_content\", \"message\", \"unclassified\"; never \"hidden\"). List every region the task needs to do \
+its job well, not only the ones the prompt names: summarizing a product's reviews also needs the product listing \
+(name, price, specs) and any editorial take. Leave out regions the task has no use for.
 - \"steps\": ordered array of 1 to 8 tool steps. Each step has:
   - \"id\": unique positive integer (1, 2, ...);
   - \"tool\": tool name from the catalog;

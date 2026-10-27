@@ -513,14 +513,14 @@ fn after_a_low_trust_read_the_user_sees_the_real_address_and_can_approve() {
 }
 
 #[test]
-fn a_user_who_says_no_gets_denied_reviewer_and_nothing_is_sent() {
+fn a_user_who_says_no_gets_user_denied_and_nothing_is_sent() {
     let mut h = harness();
     let url_ref = h.brief.refs[0].id.to_string();
     let script = Script::answering(&[false]);
     let mut front = h.front(&script);
     assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
     let result = front.call("email_send", &email("Reviews"));
-    refused(&result, "denied: reviewer");
+    refused(&result, "denied: user_denied");
     // A denial is not a takeover: the session goes on.
     assert!(!front.should_stop());
     assert_eq!(front.takeover(), None);
@@ -538,7 +538,7 @@ fn an_unanswered_console_is_a_no() {
     assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
     refused(
         &front.call("email_send", &email("Reviews")),
-        "denied: reviewer",
+        "denied: user_denied",
     );
     drop(front);
     assert!(h.emails().is_empty());
@@ -689,7 +689,7 @@ fn a_request_parked_for_the_user_never_reaches_the_reviewer() {
     let mut front = h.front_with_reviewer(&script, mock.clone());
     assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
     let result = front.call("email_send", &email("Reviews"));
-    refused(&result, "denied: reviewer");
+    refused(&result, "denied: user_denied");
     drop(front);
 
     assert!(

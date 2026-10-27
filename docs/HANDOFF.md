@@ -11,8 +11,8 @@ _Last updated: Mon Oct 26, 2026, ~5:30 PM PT, by Claude (Opus 5.5)._
 - **Supervisor done and pushed:** review follow-ups fixed (`edb0438`).
   - **Live `munix run` without `--plan` works:** Muse Spark wrote a 2-step plan; the recipient traced to
     `store contacts.boss`; the prompt URL in the body traced to the prompt. 15 ledger entries, about $0.019.
-  - **To tune:** the planner reads only `ugc_review`, so the listing and editorial (price, specs) are withheld.
-  - **Ambiguous code:** a Console "no" reaches the agent as `denied: reviewer`, the same code as a reviewer deny.
+  - **Tuned since:** the planner now reads the listing and editorial too (2 of 2 live runs), and a Console "no" is
+    `denied: user_denied`, distinct from a reviewer's `denied: reviewer`.
   - **Reviewer path:** the reviewer only runs at the Elevated and Restricted bands. The demo page drops trust to
     15 (Lockdown), where a tier-3 email always goes to the user.
 
@@ -147,5 +147,3 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 - `munix run` reads `.env` as a fallback layer, not into the process environment: `set_var` needs `unsafe`.
 - A tool name that can't become a `ToolName` is treated as a takeover but isn't written to the ledger, since there is
   no `Request` to log.
-- The live planner reads only `ugc_review`, so the listing and the editor's take (price, specs) are withheld. That's
-  safe but thin; nudge the planner prompt to list every region the task needs.

@@ -500,12 +500,11 @@ impl Gate {
             }
             Verdict::Deny | Verdict::RequireAmendment => {
                 self.remove_pending(&request.task, &hash);
-                self.finish_deny(
-                    &case,
-                    DenyCode::Reviewer,
-                    &["decision.not_approved".to_owned()],
-                    false,
-                )
+                let code = match body.stage {
+                    Stage::User => DenyCode::UserDenied,
+                    _ => DenyCode::Reviewer,
+                };
+                self.finish_deny(&case, code, &["decision.not_approved".to_owned()], false)
             }
             Verdict::ConfirmUser => {
                 if needs != Stage::LlmReview {
