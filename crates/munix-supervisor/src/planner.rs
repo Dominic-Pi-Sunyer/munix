@@ -42,8 +42,9 @@ this step's tool to null). Each rule object has:
 embed refs or values from earlier steps or prompt; \"min_trust\" is required when \"from\" includes \
 a \"step.<id>\" source) or null;
     - \"forbid\": true to forbid an optional argument (when true, all other fields on that rule \
-must be null), or null. Never forbid control arguments (counts, dates, flags): they carry no \
-destination or data;
+must be null), or null. On read-only tools (tier 0) never forbid control arguments (counts, \
+flags): they carry no destination or data. On any other tool, forbid a control argument (amount, \
+date, recurring) whenever the task does not call for changing it;
   - \"budget\": maximum calls for this step (integer 1 to 10).
 - \"amendments\": {\"auto_max_tier\": 0 or 1}.
 
@@ -150,15 +151,20 @@ pub const MAX_STEPS: usize = 8;
 /// from a user review into an email) is raised to this.
 pub const MIN_STEP_TRUST: u8 = 60;
 
-/// Drops a `forbid` the model wrote on a control argument (a count, a date, a flag). Control arguments are checked
-/// for shape only and carry no destination or data, so forbidding one adds no protection and only makes honest
-/// calls fail (the live planner forbade an optional `date`, which denied a legitimate payment update). Forbids on
-/// destination, selector and content arguments stay.
+/// Drops a `forbid` the model wrote on a control argument of a read-only tool (tier 0, no egress: a local read with
+/// a count or a flag). Such arguments are checked for shape only and carry no destination or data, so forbidding
+/// one adds no protection and only makes honest calls fail. On every other tool a forbid stays: on a write or a
+/// payment tool a control argument (`amount`, `date`, `recurring`) changes what the call does, and the planner's
+/// forbid is how a task like "change only the subject" pins it. Forbids on destination, selector and content
+/// arguments always stay.
 fn allow_control_args(plan: &mut Plan, catalog: &Catalog) {
     for step in &mut plan.steps {
         let Some(manifest) = catalog.get(&step.tool) else {
             continue;
         };
+        if manifest.tier != 0 || manifest.egress {
+            continue;
+        }
         step.args.retain(|name, rule| {
             let control = manifest
                 .args
@@ -627,8 +633,8 @@ mod tests {
     }
 
     #[test]
-    fn forbids_on_control_args_are_dropped_and_others_kept() {
-        let manifest = munix_core::manifest::ToolManifest::from_yaml(
+    fn forbids_on_control_args_are_dropped_only_on_read_only_tools() {
+        let payment = munix_core::manifest::ToolManifest::from_yaml(
             "
 tool: bank.update
 description: Update a scheduled payment.
@@ -637,6 +643,7 @@ egress: true
 args:
   id:        {type: int,  role: selector}
   recipient: {type: iban, role: destination, optional: true}
+  amount:    {type: int,  role: control, optional: true}
   date:      {type: date, role: control, optional: true}
   recurring: {type: bool, role: control, optional: true}
   note:      {type: text, role: content, optional: true}
@@ -645,7 +652,20 @@ output:
 ",
         )
         .unwrap();
-        let catalog = Catalog::from_manifests([manifest]).unwrap();
+        let read = munix_core::manifest::ToolManifest::from_yaml(
+            "
+tool: notes.list
+description: List local notes.
+tier: 0
+args:
+  n:    {type: int, role: control, optional: true}
+  tag:  {type: text, role: selector, optional: true}
+output:
+  message: {type: text, region: operator_content, confidential: public}
+",
+        )
+        .unwrap();
+        let catalog = Catalog::from_manifests([payment, read]).unwrap();
         let mut plan = Plan::from_yaml(&format!(
             "
 plan: P-1
@@ -658,9 +678,16 @@ steps:
     args:
       id:        {{from: [prompt]}}
       recipient: {{forbid: true}}
+      amount:    {{forbid: true}}
       date:      {{forbid: true}}
       recurring: {{forbid: true}}
       note:      {{forbid: true}}
+    budget: 1
+  - id: 2
+    tool: notes.list
+    args:
+      n:   {{forbid: true}}
+      tag: {{forbid: true}}
     budget: 1
 amendments:
   auto_max_tier: 0
@@ -669,18 +696,20 @@ amendments:
         ))
         .unwrap();
         allow_control_args(&mut plan, &catalog);
-        let args = &plan.steps[0].args;
+        let pay = &plan.steps[0].args;
+        for name in ["amount", "date", "recurring", "recipient", "note"] {
+            assert!(
+                pay[name].is_forbidden(),
+                "{name} stays forbidden on a tier 3 tool"
+            );
+        }
+        assert!(pay["id"].from.is_some(), "other rules are untouched");
+        let read = &plan.steps[1].args;
         assert!(
-            !args.contains_key("date"),
-            "a control arg's forbid is dropped"
+            !read.contains_key("n"),
+            "a read-only tool's control forbid is dropped"
         );
-        assert!(!args.contains_key("recurring"));
-        assert!(
-            args["recipient"].is_forbidden(),
-            "a destination stays forbidden"
-        );
-        assert!(args["note"].is_forbidden(), "content stays forbidden");
-        assert!(args["id"].from.is_some(), "other rules are untouched");
+        assert!(read["tag"].is_forbidden(), "a selector stays forbidden");
     }
 
     #[test]

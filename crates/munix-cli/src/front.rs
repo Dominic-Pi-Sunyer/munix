@@ -23,6 +23,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::confirm::Confirmer;
+use crate::term::terminal_safe;
 
 /// Progress on one agent instance's MCP channel, read by the watchdog.
 pub struct FrontProgress {
@@ -179,7 +180,10 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
         let (reviewer, prompt) = self.reviewer.as_ref()?;
         let view = self.gate.review_view(&self.brief.task, request_hash)?;
         let plan = self.gate.plan(&self.brief.task)?;
-        let signed = reviewer.review(prompt, plan, &view, request_hash).ok()?;
+        let signed_steps = self.gate.signed_steps(&self.brief.task)?;
+        let signed = reviewer
+            .review(prompt, plan, signed_steps, &view, request_hash)
+            .ok()?;
         Some(self.gate.decide(&signed))
     }
 
@@ -389,18 +393,19 @@ pub fn blocked_lines(
     };
     let mut lines = vec![format!(
         "munix: BLOCKED {} ({}): {what}",
-        tool.as_str(),
+        terminal_safe(tool.as_str()),
         code_text(code)
     )];
     for arg in args {
         let sources = if arg.sources.is_empty() {
             "untraced".to_owned()
         } else {
-            arg.sources.join(", ")
+            terminal_safe(&arg.sources.join(", "))
         };
         lines.push(format!(
             "munix:   {} = {}  <- {sources}",
-            arg.name, arg.value
+            terminal_safe(&arg.name),
+            terminal_safe(&arg.value)
         ));
     }
     lines

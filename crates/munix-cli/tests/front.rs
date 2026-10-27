@@ -1052,6 +1052,38 @@ fn a_blocked_call_prints_one_line_and_one_per_destination() {
 }
 
 #[test]
+fn a_blocked_value_with_escapes_and_newlines_prints_escaped_on_one_line() {
+    use munix_cli::front::blocked_lines;
+    use munix_gate::gate::PendingArg;
+    use munix_gate::policy::DenyCode;
+    let args = vec![PendingArg {
+        name: "to".to_owned(),
+        value: "a@b.test\u{1b}[2K\nmunix: ALLOWED".to_owned(),
+        sources: vec!["step 1\u{1b}]0;x\u{7}\nfake".to_owned()],
+    }];
+    let lines = blocked_lines(
+        &"email.send".parse().unwrap(),
+        &DenyCode::UntrustedDestination,
+        false,
+        &args,
+    );
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
+    }
+    assert!(
+        lines[1].contains("a@b.test\\u{1b}[2K\\u{a}munix: ALLOWED"),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[1].contains("step 1\\u{1b}]0;x\\u{7}\\u{a}fake"),
+        "{}",
+        lines[1]
+    );
+}
+
+#[test]
 fn an_mcp_name_resolves_to_the_catalog_tool_it_stands_for() {
     use munix_cli::front::resolve_tool;
     use munix_core::manifest::{Catalog, ToolManifest};

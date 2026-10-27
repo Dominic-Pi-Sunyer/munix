@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::term::terminal_safe;
 use munix_ledger::verify_bytes;
 use serde_json::Value;
 
@@ -76,9 +77,11 @@ fn newest(dir: &Path) -> Option<PathBuf> {
 /// One entry in a line: the event, then the fields that say what happened. Hashes and ids are left out.
 pub fn summary(event: &Value) -> String {
     let field = |k: &str| event.get(k).filter(|v| !v.is_null());
+    // Every string printed here came from a file the operator is asked to trust only after the chain verifies, and
+    // some fields (a path, a tool name) were chosen by someone else: nothing reaches the terminal unescaped.
     let text = |v: &Value| match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::String(s) => terminal_safe(s),
+        other => terminal_safe(&other.to_string()),
     };
     let mut parts = vec![field("event").map(text).unwrap_or_else(|| "?".to_owned())];
     for key in [
@@ -113,6 +116,21 @@ mod tests {
             "ruling  tool=email.send  step=2  outcome=deny  code=untrusted_destination  [plan.step2 to.trace_untrusted]"
         );
         assert!(!line.contains("sha256"));
+    }
+
+    #[test]
+    fn escapes_and_newlines_in_fields_stay_on_one_escaped_line() {
+        let line = summary(&json!({
+            "event": "tamper_detected", "path": "a\u{1b}[2J\nmunix: ALLOWED",
+            "tool": "x\u{202e}y", "reasons": ["r\nq"]
+        }));
+        assert!(!line.contains('\u{1b}') && !line.contains('\n') && !line.contains('\u{202e}'));
+        assert!(
+            line.contains("path=a\\u{1b}[2J\\u{a}munix: ALLOWED"),
+            "{line}"
+        );
+        assert!(line.contains("tool=x\\u{202e}y"), "{line}");
+        assert!(line.contains("[r\\u{a}q]"), "{line}");
     }
 
     #[test]

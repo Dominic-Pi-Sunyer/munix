@@ -24,6 +24,9 @@ You see redacted metadata only, by design: reference IDs, where each value came 
 never see page text or argument values, so do not deny or hesitate just because content is hidden or trust is low; \
 those are expected here.
 
+Steps in the plan marked \"auto-added, not in the signed plan\" were added by code during the task, not planned \
+with the prompt: check that they still fit the prompt.
+
 Decide one thing: does this request, by its tool and where its destinations came from, plausibly serve what the \
 user's prompt asked for?
 - \"approve\": the tool and destinations match the prompt (for example, the user asked to email their boss and the \
@@ -117,7 +120,8 @@ impl Reviewer {
     /// - **What the model sees:** a fixed system message explaining the job, the verdicts and that the view
     ///   holds no page text; and a user message with exactly three parts:
     ///   - the prompt's own text (the user's words, which are trusted);
-    ///   - [`plan_summary`];
+    ///   - [`plan_summary`] (`signed_steps` is how many steps the signed plan had; later steps are marked as
+    ///     auto-added);
     ///   - `view.render()`.
     ///
     ///   Nothing else: no page text, no argument values.
@@ -131,10 +135,11 @@ impl Reviewer {
         &self,
         prompt: &PromptEnvelope,
         plan: &Plan,
+        signed_steps: usize,
         view: &ReviewView,
         request_hash: &Digest,
     ) -> Result<Signed<Decision>, ReviewError> {
-        let summary = plan_summary(plan);
+        let summary = plan_summary(plan, signed_steps);
         let rendered_view = view.render();
         let user = format!(
             "PROMPT\n{}\n\nPLAN\n{summary}\n\nVIEW\n{rendered_view}",
@@ -171,22 +176,27 @@ impl Reviewer {
 /// budget, and per argument only the rule's kind and the source paths it names (`from prompt`, `from
 /// store.contacts.boss`, `forbidden`, `dlp no_secret`, `may embed step.1 at trust >= 60`), then the region types
 /// it reads. The plan is written on the clean side, so this holds no attacker text.
-pub fn plan_summary(plan: &Plan) -> String {
+///
+/// `signed_steps` is how many steps the signed plan had (`Gate::signed_steps`). The steps after those were added
+/// by the Gate's automatic amendment and not by the planner, so each is marked `(auto-added, not in the signed
+/// plan)`. Pass `plan.steps.len()` for a plan with no amendments.
+pub fn plan_summary(plan: &Plan, signed_steps: usize) -> String {
     let mut lines = Vec::with_capacity(plan.steps.len() + 1);
-    for step in &plan.steps {
+    for (index, step) in plan.steps.iter().enumerate() {
+        let label = if index < signed_steps {
+            format!("step {}", step.id)
+        } else {
+            format!("step {} (auto-added, not in the signed plan)", step.id)
+        };
         let mut args = Vec::with_capacity(step.args.len());
         for (name, rule) in &step.args {
             args.push(format!("{name}: {}", format_rule(rule)));
         }
         if args.is_empty() {
-            lines.push(format!(
-                "step {}: {} (budget {})",
-                step.id, step.tool, step.budget
-            ));
+            lines.push(format!("{label}: {} (budget {})", step.tool, step.budget));
         } else {
             lines.push(format!(
-                "step {}: {} (budget {}) — {}",
-                step.id,
+                "{label}: {} (budget {}) — {}",
                 step.tool,
                 step.budget,
                 args.join("; ")
@@ -388,7 +398,7 @@ mod tests {
     fn plan_summary_is_exact_for_demo_plan() {
         let plan = demo_plan();
         assert_eq!(
-            plan_summary(&plan),
+            plan_summary(&plan, plan.steps.len()),
             "step 1: web.open (budget 3) — url: from prompt\n\
              step 2: email.send (budget 1) — attachments: forbidden; body: dlp no_secret, may embed prompt, step.1 at trust >= 60; cc: forbidden; subject: dlp no_secret; to: from store.contacts.boss\n\
              reads: operator_content, product_listing, editorial, ugc_review"
@@ -407,10 +417,27 @@ mod tests {
             field: None,
         }];
         assert!(
-            plan_summary(&single_embed).contains("may embed step.1 at trust >= 60"),
+            plan_summary(&single_embed, 2).contains("may embed step.1 at trust >= 60"),
             "{}",
-            plan_summary(&single_embed)
+            plan_summary(&single_embed, 2)
         );
+    }
+
+    #[test]
+    fn plan_summary_marks_steps_after_the_signed_ones() {
+        let mut plan = demo_plan();
+        let mut extra = plan.steps[0].clone();
+        extra.id = 3;
+        plan.steps.push(extra);
+        let summary = plan_summary(&plan, 2);
+        let lines: Vec<&str> = summary.lines().collect();
+        assert!(lines[0].starts_with("step 1: web.open"), "{summary}");
+        assert!(lines[1].starts_with("step 2: email.send"), "{summary}");
+        assert!(
+            lines[2].starts_with("step 3 (auto-added, not in the signed plan): web.open"),
+            "{summary}"
+        );
+        assert!(!lines[0].contains("auto-added") && !lines[1].contains("auto-added"));
     }
 
     #[test]
@@ -424,10 +451,12 @@ mod tests {
         let plan = demo_plan();
         let view = sample_view();
         let rendered_view = view.render();
-        let summary = plan_summary(&plan);
+        let summary = plan_summary(&plan, plan.steps.len());
         let hash = Digest::of_bytes(b"parked-request");
 
-        let _ = reviewer.review(&prompt, &plan, &view, &hash).unwrap();
+        let _ = reviewer
+            .review(&prompt, &plan, plan.steps.len(), &view, &hash)
+            .unwrap();
         let seen = mock.seen();
         assert_eq!(seen.len(), 1);
         let req = &seen[0];
@@ -477,7 +506,9 @@ mod tests {
         let hash = Digest::of_bytes(b"req-1");
 
         for (_, expected_verdict, expected_reason) in cases {
-            let signed = reviewer.review(&prompt, &plan, &view, &hash).unwrap();
+            let signed = reviewer
+                .review(&prompt, &plan, plan.steps.len(), &view, &hash)
+                .unwrap();
             let verified = signed.verify(&signing_key, Purpose::Decision).unwrap();
             assert_eq!(verified.verdict, expected_verdict);
             assert_eq!(verified.stage, Stage::LlmReview);
@@ -510,7 +541,9 @@ mod tests {
         let hash = Digest::of_bytes(b"req-fail-safe");
 
         for _ in 0..count {
-            let signed = reviewer.review(&prompt, &plan, &view, &hash).unwrap();
+            let signed = reviewer
+                .review(&prompt, &plan, plan.steps.len(), &view, &hash)
+                .unwrap();
             let verified = signed.verify(&signing_key, Purpose::Decision).unwrap();
             assert_eq!(verified.verdict, Verdict::ConfirmUser);
             assert_eq!(verified.stage, Stage::LlmReview);
@@ -534,6 +567,7 @@ mod tests {
             .review(
                 &summary_only,
                 &demo_plan(),
+                2,
                 &sample_view(),
                 &Digest::of_bytes(b"live-off-task"),
             )
@@ -559,6 +593,7 @@ mod tests {
             .review(
                 &prompt(),
                 &demo_plan(),
+                2,
                 &sample_view(),
                 &Digest::of_bytes(b"live"),
             )

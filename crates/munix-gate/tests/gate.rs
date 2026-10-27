@@ -2677,11 +2677,25 @@ fn an_off_plan_tier_0_read_is_amended_and_runs_like_any_step() {
     assert_eq!(h.plan.body.digest().unwrap(), signed_digest);
     assert_eq!(brief.plan.steps.len(), 2);
 
+    // The entry ties the original request (the one `request` logged), the re-aimed request and the signed plan.
+    let original_hash = digest(&req(0, "news.read", json!({}))).unwrap();
+    let amended_hash = digest(&req(3, "news.read", json!({}))).unwrap();
+    // The plan that was started is the harness plan without step 3; `task_started` recorded its digest.
+    let started_digest = h
+        .entries()
+        .into_iter()
+        .map(|e| e.event)
+        .find(|e| e["event"] == "task_started")
+        .unwrap()["plan_digest"]
+        .clone();
     assert_eq!(
         amended_events(&h),
         [json!({
             "event": "amended", "task": "T-demo", "step": 3, "tool": "news.read", "tier": 0,
             "budget": 3, "reason": "auto_tier",
+            "request_hash": original_hash.as_str(),
+            "amended_request_hash": amended_hash.as_str(),
+            "plan_digest": started_digest,
         })]
     );
     let events = h.events();
@@ -2814,7 +2828,7 @@ fn an_amended_egress_step_takes_destinations_from_the_clean_side_only() {
     let step = plan.steps.last().unwrap();
     assert_eq!(step.tool.as_str(), "link.ping");
     assert_eq!(step.budget, AMENDMENT_BUDGET);
-    // The exact rules: the destination from prompt, user data and the held store; the content argument DLP only.
+    // The exact rules: the destination from prompt, user data and the held store; the content argument no_private DLP only.
     let from: Vec<String> = step.args["url"]
         .from
         .as_ref()
@@ -2824,7 +2838,10 @@ fn an_amended_egress_step_takes_destinations_from_the_clean_side_only() {
         .collect();
     assert_eq!(from, ["prompt", "user_data", "store.contacts"]);
     assert_eq!(step.args["url"].min_trust, None);
-    assert_eq!(step.args["memo"].dlp, Some(munix_core::plan::Dlp::NoSecret));
+    assert_eq!(
+        step.args["memo"].dlp,
+        Some(munix_core::plan::Dlp::NoPrivate)
+    );
     assert!(step.args["memo"].may_embed.is_none());
     assert!(step.args["memo"].from.is_none());
     assert_eq!(step.args.len(), 2);
