@@ -82,7 +82,8 @@ class ConvertTest(unittest.TestCase):
                 self.assertEqual(set(fields), set(convert.MANIFESTS[name]["output"]))
                 self.assertEqual(fields, convert.to_fields("banking." + name, result))
                 json.dumps(fields)  # plain JSON values only
-                lists = [v for v in fields.values() if isinstance(v, list)]
+                # Every per-row array has one element per transaction; `payees` is a deduplicated list.
+                lists = [v for k, v in fields.items() if isinstance(v, list) and k != "payees"]
                 self.assertEqual(len({len(v) for v in lists}), 1 if lists else 0)
 
     def test_transactions_are_parallel_arrays_with_real_counterparties(self):
@@ -107,6 +108,11 @@ class ConvertTest(unittest.TestCase):
         self.assertEqual(fields["counterparties"][i], "GB29NWBK60161331926819")
         self.assertTrue(fields["sent_by_me"][0])
         self.assertEqual(fields["counterparties"][0], "CH9300762011623852957")
+        # Only accounts the user paid are payees: the sender of the incoming payment is not one.
+        self.assertIn("CH9300762011623852957", fields["payees"])
+        self.assertNotIn("GB29NWBK60161331926819", [p for p in fields["payees"] if p not in
+            [c for c, mine in zip(fields["counterparties"], fields["sent_by_me"]) if mine]])
+        self.assertEqual(len(fields["payees"]), len(set(fields["payees"])))
 
     def test_values(self):
         env, rt = new_env(), runtime()
@@ -173,7 +179,10 @@ class ManifestTest(unittest.TestCase):
         recent = convert.MANIFESTS["get_most_recent_transactions"]["output"]
         self.assertEqual(recent["subjects"]["region"], "ugc_comment")
         self.assertEqual(convert.MANIFESTS["read_file"]["output"]["content"]["region"], "unclassified")
-        for field in ("ids", "counterparties", "sent_by_me", "amounts", "dates", "recurring"):
+        # Anyone can send the user money, so per-row counterparties are only as trusted as their weakest rows;
+        # the accounts the user paid are bank records.
+        self.assertEqual(recent["counterparties"]["region"], "ugc_comment")
+        for field in ("ids", "payees", "sent_by_me", "amounts", "dates", "recurring"):
             self.assertEqual(recent[field]["region"], "operator_content")
 
 

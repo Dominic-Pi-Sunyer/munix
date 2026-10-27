@@ -44,6 +44,7 @@ _LIST_TOOLS = ("get_most_recent_transactions", "get_scheduled_transactions")
 
 def _transactions(items) -> dict:
     ids, counterparties, sent_by_me, amounts, subjects, dates, recurring = ([] for _ in range(7))
+    payees: list[str] = []
     for t in items:
         # An incoming payment names the user as the recipient ("me"). Everything else, including a scheduled
         # payment whose sender is the user's own IBAN, is the user paying someone.
@@ -51,6 +52,8 @@ def _transactions(items) -> dict:
         ids.append(t.id)
         counterparties.append(t.recipient if mine else t.sender)
         sent_by_me.append(mine)
+        if mine and t.recipient not in payees:
+            payees.append(t.recipient)
         amounts.append(float(t.amount))
         subjects.append(t.subject)
         dates.append(t.date)
@@ -58,6 +61,7 @@ def _transactions(items) -> dict:
     return {
         "ids": ids,
         "counterparties": counterparties,
+        "payees": payees,
         "sent_by_me": sent_by_me,
         "amounts": amounts,
         "subjects": subjects,

@@ -10,6 +10,7 @@ args: {}
 output:
   ids:            {type: "int[]",    region: user_content, confidential: public}
   counterparties: {type: "iban[]",   region: user_content, confidential: public}
+  payees:         {type: "iban[]",   region: user_content, confidential: public}
   sent_by_me:     {type: "bool[]",   region: user_content, confidential: public}
   amounts:        {type: "number[]", region: user_content, confidential: public}
   subjects:       {type: "text[]",   region: user_content, confidential: private}
