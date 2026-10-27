@@ -43,3 +43,8 @@ expect_used = "deny"
 
 [profile.release]
 overflow-checks = true
+
+# The Integrity Seal hashes every sealed file at task start (Web Speed's venv alone is about 230 MB); unoptimized
+# SHA-256 would add seconds to every dev-build `munix run`.
+[profile.dev.package.sha2]
+opt-level = 3

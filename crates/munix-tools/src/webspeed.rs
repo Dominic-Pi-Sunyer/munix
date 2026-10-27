@@ -149,6 +149,11 @@ impl Tool for WebSpeedOpen {
 }
 
 /// The single `url` argument, checked once more here because the tool also runs without the Gate.
+/// Where Web Speed's Python writes and reads bytecode caches: a per-process directory outside every sealed tree.
+fn pycache_prefix() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("munix-webspeed-pycache-{}", std::process::id()))
+}
+
 fn url_arg(args: &BTreeMap<String, Value>) -> Result<&str, ToolFailure> {
     if args.len() != 1 {
         return Err(ToolFailure::BadInput);
@@ -207,6 +212,9 @@ impl Session {
         // Web Speed OSS shares every page map it builds with a hosted registry unless told not to. Pages the agent
         // reads stay on this machine, so sync is always off and not configurable.
         command.env("WEB_SPEED_REGISTRY_SYNC", "false");
+        // Python must not read bytecode caches from inside Web Speed's tree: the Integrity Seal skips `__pycache__`,
+        // so a planted `.pyc` there would run unsealed code. Caches go to a private directory instead.
+        command.env("PYTHONPYCACHEPREFIX", pycache_prefix());
         let mut child = command.spawn().map_err(|_| ToolFailure::Unavailable)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();

@@ -28,7 +28,7 @@ use munix_core::validate::Scalar;
 use munix_gate::gate::{Gate, QuarantineNote, RecoverError, Store, StoreValue, TripReason};
 use munix_gate::policy::DenyCode;
 use munix_gate::quarantine::Cause;
-use munix_gate::seal::{Root, Seal, SealGuard, SealWatch, Tamper};
+use munix_gate::seal::{Root, Seal, SealCheck, SealGuard, SealWatch, Tamper};
 use munix_gate::tool::Tool;
 use munix_gate::vault::{Credential, Vault};
 use munix_ledger::Ledger;
@@ -503,36 +503,36 @@ fn limits_from(env: &Env) -> Result<Limits, Failure> {
     })
 }
 
-/// What the Integrity Seal covers (invariant 11), relative to the current directory (the repo root): the running
-/// binary, the workspace files and `crates/`, the manifests, site templates and example plans, `.env`, the `--plan`
-/// file, and Web Speed OSS's top-level source, since it is spawned as a tool.
+/// What the Integrity Seal covers (invariant 11): the running binary; the workspace files and `crates/` where this
+/// binary was built from; what `munix run` reads from the current directory (the manifests, site templates, example
+/// plans, `.env` and the `--plan` file); and all of Web Speed OSS, which is spawned as a tool: its source tree and
+/// its `venv` (the interpreter link, site-packages). Bytecode caches are skipped, and Web Speed is started with
+/// `PYTHONPYCACHEPREFIX` pointing elsewhere so Python never reads them.
 fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path) -> Vec<Root> {
+    // `crates/` and the workspace files are the source this binary was built from, wherever it is run.
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     let mut roots = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         roots.push(Root::File(exe));
     }
-    for file in ["Cargo.toml", "Cargo.lock", "clippy.toml", ".env"] {
-        roots.push(Root::File(PathBuf::from(file)));
+    for file in ["Cargo.toml", "Cargo.lock", "clippy.toml"] {
+        roots.push(Root::File(workspace.join(file)));
     }
-    for dir in ["crates", "manifests", "sites", "examples"] {
+    roots.push(Root::Tree(workspace.join("crates")));
+    roots.push(Root::File(PathBuf::from(".env")));
+    for dir in ["manifests", "sites", "examples"] {
         roots.push(Root::Tree(PathBuf::from(dir)));
     }
     if let Some(plan) = plan {
         roots.push(Root::File(plan.to_path_buf()));
     }
-    if let Ok(entries) = std::fs::read_dir(webspeed_dir) {
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && (p.extension().is_some_and(|x| x == "py")
-                        || p.file_name().is_some_and(|n| n == "requirements.txt"))
-            })
-            .collect();
-        files.sort();
-        roots.extend(files.into_iter().map(Root::File));
-    }
+    // The tree skips `venv` by name (SKIP_DIRS), so the venv is its own root.
+    roots.push(Root::Tree(webspeed_dir.to_path_buf()));
+    roots.push(Root::Tree(webspeed_dir.join("venv")));
     roots
 }
 
@@ -568,6 +568,12 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         seal.digest().get(..12).unwrap_or(seal.digest())
     );
     let seal = Arc::new(SealGuard::new(seal));
+    // `.env` was read just before the seal was taken; a change in between would become the sealed baseline.
+    if Env::load(Path::new(".env"))?.file != env.file {
+        return Err(Failure::config(
+            ".env changed while munix run was starting; run it again",
+        ));
+    }
 
     // Identity: a fresh signing key and random ids for this run.
     let key =
@@ -738,6 +744,12 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone_from(&container_name);
+        // Check the seal before every new agent: the watcher may have tripped after the last check, while no agent
+        // was running to be killed.
+        if let Err(tamper) = seal.verify() {
+            gate.tamper(&tamper);
+            return Err(Failure::failed(tamper_message(&tamper)));
+        }
         let mut sandbox = Sandbox::launch(spec)
             .map_err(|e| Failure::failed(format!("cannot start the sandbox: {e}")))?;
         let channel = (sandbox.child.stdout.take(), sandbox.child.stdin.take());
@@ -837,6 +849,10 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             return Err(Failure::failed(format!(
                 "could not remove the sandbox: {e}"
             )));
+        }
+        if let Err(tamper) = seal.verify() {
+            gate.tamper(&tamper);
+            return Err(Failure::failed(tamper_message(&tamper)));
         }
         match gate.recover(&task) {
             Ok(recovery) => {
@@ -1212,12 +1228,39 @@ mod tests {
             Some(Path::new("my-plan.yaml")),
             Path::new("no-such-webspeed-dir"),
         );
-        for dir in ["crates", "manifests", "sites", "examples"] {
-            assert!(roots.contains(&Root::Tree(PathBuf::from(dir))), "{dir}");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workspace = workspace.components().collect::<PathBuf>();
+        let has_tree = |p: &Path| {
+            roots
+                .iter()
+                .any(|r| matches!(r, Root::Tree(t) if t.components().eq(p.components())))
+        };
+        let has_file = |p: &Path| {
+            roots
+                .iter()
+                .any(|r| matches!(r, Root::File(f) if f.components().eq(p.components())))
+        };
+        // The source tree is anchored where this binary was built from; what `munix run` reads is relative.
+        assert!(
+            roots
+                .iter()
+                .any(|r| matches!(r, Root::Tree(t) if t.ends_with("crates") && t.is_absolute()))
+        );
+        assert!(
+            roots.iter().any(
+                |r| matches!(r, Root::File(f) if f.ends_with("Cargo.lock") && f.is_absolute())
+            )
+        );
+        let _ = workspace;
+        for dir in ["manifests", "sites", "examples"] {
+            assert!(has_tree(Path::new(dir)), "{dir}");
         }
-        for file in ["Cargo.toml", "Cargo.lock", ".env", "my-plan.yaml"] {
-            assert!(roots.contains(&Root::File(PathBuf::from(file))), "{file}");
+        for file in [".env", "my-plan.yaml"] {
+            assert!(has_file(Path::new(file)), "{file}");
         }
+        // All of Web Speed, venv included.
+        assert!(has_tree(Path::new("no-such-webspeed-dir")));
+        assert!(has_tree(Path::new("no-such-webspeed-dir/venv")));
         let tamper = Tamper {
             path: "manifests/email.send.yaml".into(),
             old: None,
