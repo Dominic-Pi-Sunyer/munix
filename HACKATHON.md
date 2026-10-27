@@ -30,6 +30,10 @@ It opens on that result and makes the case for Munix in three steps that don't d
 3. **Proof and resilience.** The ledger shows why the call was denied. A model's refusal leaves nothing to audit. The
    watchdog ends a stalled agent like the one the red-team found.
 
+What is on screen: the two terminals, Mailpit for each side, the trace line naming where the attacker's address
+came from, and raw ledger lines with the chain check. The `munix dashboard` page is a debugging tool for reviewing
+runs, not part of the video: a dashboard would read as monitoring, while Munix decides in code before a call runs.
+
 The simulated takeover is a demo-agent switch that makes the agent obey instructions in tool results. It is shown as
 a simulation, never as the model failing.
 

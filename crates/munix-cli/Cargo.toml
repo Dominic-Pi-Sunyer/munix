@@ -24,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+tiny_http.workspace = true
 
 [lints]
 workspace = true

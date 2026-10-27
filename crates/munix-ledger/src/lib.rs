@@ -82,8 +82,8 @@ fn malformed(line: usize, reason: &str) -> LedgerError {
     }
 }
 
-/// Verify a whole file's bytes and return its entries.
-fn verify_bytes(bytes: &[u8]) -> Result<Vec<Entry>, LedgerError> {
+/// Verify a whole file's bytes and return its entries. A reader tailing a live ledger passes only complete lines.
+pub fn verify_bytes(bytes: &[u8]) -> Result<Vec<Entry>, LedgerError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }

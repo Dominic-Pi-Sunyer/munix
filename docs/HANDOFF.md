@@ -6,8 +6,21 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~9:30 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~10:15 PM PT, by Claude (Opus 5.5)._
 
+- **Rough dashboard works, as a debugging tool only.** The owner decided it stays out of the video and pitch: it
+  would read as a generic agent dashboard. Run `cargo run -p munix-cli -- dashboard`, then open
+  http://127.0.0.1:8090.
+  - **What it shows:** the context-trust gauge and band, a trust-over-time chart, and tiles for allowed, denied by
+    code, reviewer, user, takeovers, recoveries and the seal. A plain-English timeline of the ledger, with a
+    chain-verified badge and a run picker.
+  - **How it's built:** `crates/munix-cli/src/dashboard.rs` and `dashboard/index.html` (Gemini, reviewed).
+    - The server is read-only, binds `127.0.0.1` only, and refuses other `Host` headers (DNS rebinding).
+    - Ids are validated as `TaskId` before any path is built.
+    - A half-written last ledger line is ignored.
+    - The page uses no CDN and sets ledger text only with `textContent`.
+  - **Checked:** against the existing `runs/` ledgers in the browser.
+  - **Not yet:** the left (unprotected) side, Mailpit status, a run-finished event in the ledger.
 - **Rough Integrity Seal works live (invariant 11)** (`demo/tamper.sh`):
   - **What it covers:** `munix run` seals 95 files at start: the binary, `Cargo.*`, `crates/`, `manifests/`,
     `sites/`, `examples/`, `.env`, the `--plan` file and Web Speed's top-level `.py`. The digest goes in
@@ -38,7 +51,7 @@ _Last updated: Mon Oct 26, 2026, ~9:30 PM PT, by Claude (Opus 5.5)._
   - `demo/services.sh` starts Mailpit and the mock site.
   - `demo/right.sh` runs the same prompt under `munix run` (`PLAN=`, `TAKEOVER=1`).
   - `demo/left.sh` also takes `TAKEOVER=1`.
-- **Next (rough-draft pass):** rough dashboard, red-team against Munix, README draft.
+- **Next (rough-draft pass):** red-team against Munix, README draft.
 
 - **Day 6 works live, with the takeover switch on.**
   - **Instance 1** emailed `hacker@evil.com` (takeover). Recovery 1 withheld exactly `step 1 reviews[1]` (cause
