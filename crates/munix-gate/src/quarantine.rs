@@ -86,26 +86,33 @@ pub fn items_of(
     items
 }
 
+/// Blocked values shorter than this (after trimming) are ignored: a short one (`x.io`) would match inside
+/// unrelated words and withhold innocent items.
+pub const MIN_BLOCKED_LEN: usize = 6;
+
 /// Which items to withhold, by position in `items`, in item order and each at most once.
 ///
-/// Items whose text contains one of `blocked` (compared case-insensitively after trimming; blank values are ignored)
-/// are the matches, and are withheld with `Cause::TracedValue` by this rule:
+/// Items whose text contains one of `blocked` (compared case-insensitively after trimming; values shorter than
+/// [`MIN_BLOCKED_LEN`] characters are ignored) are the matches, and are withheld with `Cause::TracedValue` by this
+/// rule:
 /// - If at least one match has trust below `fallback_below`, only the matches below `fallback_below` are withheld.
 ///   They are the likely carriers of the attack. A value an attacker planted in a low-trust review can also appear
 ///   legitimately in a trusted region (the listing, the editorial); withholding that content too would let the
 ///   attacker deny the agent its useful input.
-/// - If every match is at or above `fallback_below`, all matches are withheld. The attack then really came from
-///   trusted-looking content (a payload planted in the listing, say), and withholding it is right.
+/// - If every match is at or above `fallback_below`, all matches are withheld, and so is every item below
+///   `fallback_below` (with `Cause::LowTrustFallback`). The value showed up in trusted-looking content, but the
+///   real carrier may be a low-trust item that hid it (split, encoded or otherwise disguised), so the low-trust
+///   items go too.
 ///
 /// If nothing matches, every item with trust below `fallback_below` is withheld, with `Cause::LowTrustFallback`.
 pub fn choose(items: &[Item], blocked: &[String], fallback_below: Trust) -> Vec<(usize, Cause)> {
     let needles: Vec<String> = blocked
         .iter()
         .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
+        .filter(|s| s.chars().count() >= MIN_BLOCKED_LEN)
         .map(str::to_lowercase)
         .collect();
-    let matches: Vec<usize> = items
+    let matches: BTreeSet<usize> = items
         .iter()
         .enumerate()
         .filter_map(|(i, item)| {
@@ -116,19 +123,18 @@ pub fn choose(items: &[Item], blocked: &[String], fallback_below: Trust) -> Vec<
                 .then_some(i)
         })
         .collect();
-    if !matches.is_empty() {
-        let any_low = matches.iter().any(|&i| items[i].trust < fallback_below);
-        return matches
-            .into_iter()
-            .filter(|&i| !any_low || items[i].trust < fallback_below)
-            .map(|i| (i, Cause::TracedValue))
-            .collect();
-    }
+    let any_low = matches.iter().any(|&i| items[i].trust < fallback_below);
     items
         .iter()
         .enumerate()
         .filter_map(|(i, item)| {
-            (item.trust < fallback_below).then_some((i, Cause::LowTrustFallback))
+            let low = item.trust < fallback_below;
+            if matches.contains(&i) {
+                (low || !any_low).then_some((i, Cause::TracedValue))
+            } else {
+                // Without any match, or when no match is low trust, the low-trust items go too.
+                (low && !any_low).then_some((i, Cause::LowTrustFallback))
+            }
         })
         .collect()
 }
@@ -352,9 +358,14 @@ mod tests {
             ("Fine product.", 30),
         ]);
         let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        // The real carrier may have hidden the value, so the low-trust item goes too.
         assert_eq!(
             chosen,
-            vec![(0, Cause::TracedValue), (1, Cause::TracedValue)]
+            vec![
+                (0, Cause::TracedValue),
+                (1, Cause::TracedValue),
+                (2, Cause::LowTrustFallback)
+            ]
         );
         // The threshold is exclusive: an item exactly at it counts as trusted.
         let items = trust_items(&[("see orders@shop.test", 50), ("see orders@shop.test", 49)]);
@@ -365,6 +376,55 @@ mod tests {
         assert_eq!(
             chosen,
             vec![(0, Cause::TracedValue), (1, Cause::TracedValue)]
+        );
+    }
+
+    #[test]
+    fn choose_ignores_blocked_values_shorter_than_six_characters() {
+        let items = trust_items(&[
+            ("Unbox.io is a fine box.io shop", 80),
+            ("Fine product.", 30),
+            ("Nothing here", 60),
+        ]);
+        // `x.io`-style needles match inside unrelated words, so they are dropped (also after trimming).
+        for short in ["x.io", "ox.io", "  x.io  ", "abcde"] {
+            let chosen = choose(&items, &[short.to_owned()], Trust::new(50));
+            assert_eq!(chosen, vec![(1, Cause::LowTrustFallback)], "{short:?}");
+        }
+        // Six characters are enough.
+        let chosen = choose(&items, &["fine box".to_owned()], Trust::new(50));
+        assert_eq!(
+            chosen,
+            vec![(0, Cause::TracedValue), (1, Cause::LowTrustFallback)]
+        );
+        // A short value next to a long one only loses the short one.
+        let items = trust_items(&[("see a@b.i or orders@shop.test", 30), ("a@b.i only", 30)]);
+        let blocked = ["a@b.i".to_owned(), "orders@shop.test".to_owned()];
+        let chosen = choose(&items, &blocked, Trust::new(50));
+        assert_eq!(chosen, vec![(0, Cause::TracedValue)]);
+        let chosen = choose(&items, &["a@b.i".to_owned()], Trust::new(50));
+        assert_eq!(
+            chosen,
+            vec![(0, Cause::LowTrustFallback), (1, Cause::LowTrustFallback)]
+        );
+    }
+
+    #[test]
+    fn choose_also_withholds_low_trust_items_when_every_match_is_trusted() {
+        let items = trust_items(&[
+            ("Low review one", 20),
+            ("Contact orders@shop.test for help.", 80),
+            ("Fine product.", 50),
+            ("Low review two", 49),
+        ]);
+        let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        assert_eq!(
+            chosen,
+            vec![
+                (0, Cause::LowTrustFallback),
+                (1, Cause::TracedValue),
+                (3, Cause::LowTrustFallback),
+            ]
         );
     }
 

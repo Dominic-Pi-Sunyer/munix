@@ -9,7 +9,7 @@ use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use munix_core::ids::{RefId, find_embedded};
 use munix_core::label::Confidential;
 use munix_core::manifest::{ArgRole, ArgSpec};
-use munix_core::validate::Scalar;
+use munix_core::validate::{Scalar, is_hidden_format_char};
 use serde_json::Value;
 
 use crate::facts::{ArgFacts, Traced};
@@ -28,7 +28,10 @@ use crate::vault::Credential;
 ///   entries' labels and of table entries (at least 6 characters long) whose value is copied into the text;
 ///   `contains_credential` is set when any credential appears in the text plainly, base64 encoded (standard or
 ///   URL-safe, with or without padding) or hex encoded (either case). Known values and credentials are looked
-///   for in the raw text and in its percent-decoded form (`%XX`, `+` as a space, decoded once). Table entries
+///   for in the raw text and in its percent-decoded form (`%XX`, `+` as a space, decoded once), exactly and also
+///   normalized (lowercased, without white space and invisible format characters; the value must still have at
+///   least 6 characters after that). A run of glued `scheme://` URLs in one token counts once per `://` in
+///   `raw_destinations` but is traced once in `embedded`. Table entries
 ///   labelled `private` or `secret` (at least 8 characters long) are also found base64 or hex encoded, and
 ///   raise `confidential` to their level exactly like a plain copy.
 /// - Content `ref`/`ref[]` values (such as attachments) resolve like embedded refs.
@@ -133,10 +136,10 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
     for (_, _, id) in find_embedded(text) {
         note_embedded(&id, refs, facts);
     }
-    for token in raw_destination_tokens(text) {
+    for (token, count) in raw_destination_counts(text) {
         let entries = refs.find_value(&token);
         if entries.is_empty() {
-            facts.raw_destinations = facts.raw_destinations.saturating_add(1);
+            facts.raw_destinations = facts.raw_destinations.saturating_add(count);
         } else {
             for (_, entry) in &entries {
                 facts.confidential = facts.confidential.max(entry.label.confidential);
@@ -174,6 +177,8 @@ struct View {
     /// `text` without white space (encoded copies may be wrapped across lines).
     compact: String,
     compact_lower: String,
+    /// `text` lowercased, without white space or invisible format characters (see [`normalize`]).
+    norm: String,
 }
 
 impl View {
@@ -184,8 +189,19 @@ impl View {
             text: text.to_owned(),
             compact,
             compact_lower,
+            norm: normalize(text),
         }
     }
+}
+
+/// Lowercases `text` and drops ASCII white space and the invisible format characters that core refuses in free
+/// text (zero-width, bidi, tag and similar), so that a copy that differs only in case, spacing or hidden
+/// characters reads the same as the original.
+fn normalize(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_ascii_whitespace() && !is_hidden_format_char(*c))
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The raw text and, when it differs, its percent-decoded form.
@@ -203,6 +219,11 @@ fn views_of(text: &str) -> Vec<View> {
 /// Decodes `%XX` pairs and turns `+` into a space, once (the result is not decoded again). A `%` not followed by
 /// two hex digits is left as it is. Bytes that do not form valid UTF-8 become the replacement character.
 fn percent_decode(text: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_bytes(text)).into_owned()
+}
+
+/// [`percent_decode`] before the bytes are read as UTF-8.
+fn percent_decode_bytes(text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -231,7 +252,7 @@ fn percent_decode(text: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -243,29 +264,55 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
-/// Finds `value` in any view: plainly when it has at least `min_plain` characters, and (when `encoded` is set and
-/// it has at least [`MIN_ENCODED_LEN`] bytes) hex or base64 encoded.
-fn value_in_views(views: &[View], value: &str, min_plain: usize, encoded: bool) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    if value.len() >= min_plain && views.iter().any(|v| v.text.contains(value)) {
-        return true;
-    }
-    if !encoded || value.len() < MIN_ENCODED_LEN {
-        return false;
-    }
-    let hex = hex::encode(value.as_bytes());
-    let needles = base64_needles(value.as_bytes());
-    views.iter().any(|v| {
-        v.compact_lower.contains(&hex) || needles.iter().any(|n| v.compact.contains(n.as_str()))
-    })
+/// Everything needed to look for one value in text, computed once per value (and per call), not per view.
+struct Needle<'a> {
+    /// The value itself, when it has at least `min_plain` bytes.
+    plain: Option<&'a str>,
+    /// The value lowercased and without white space or invisible characters, when that has at least
+    /// `max(min_plain, MIN_COPIED_LEN)` characters.
+    norm: Option<String>,
+    /// Hex and base64 forms, when asked for and the value has at least [`MIN_ENCODED_LEN`] bytes.
+    hex: Option<String>,
+    base64: Vec<String>,
 }
 
-/// The most confidential level among table entries found in `views`: plainly when at least `min_plain` characters
-/// long, and encoded when labelled `private` or `secret`. Entries below `floor` are skipped, and so are entries
-/// found whole in any of the `alone` view sets (one per piece of text; those are handled per argument). `None`
-/// when nothing is found.
+impl<'a> Needle<'a> {
+    /// `encoded` also looks for the hex and base64 forms of a value.
+    fn new(value: &'a str, min_plain: usize, encoded: bool) -> Needle<'a> {
+        let plain = (!value.is_empty() && value.len() >= min_plain).then_some(value);
+        let norm = Some(normalize(value))
+            .filter(|n| !value.is_empty() && n.chars().count() >= min_plain.max(MIN_COPIED_LEN));
+        let encoded = encoded && !value.is_empty() && value.len() >= MIN_ENCODED_LEN;
+        Needle {
+            plain,
+            norm,
+            hex: encoded.then(|| hex::encode(value.as_bytes())),
+            base64: if encoded {
+                base64_needles(value.as_bytes())
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// True when the value shows up in any view: exactly, normalized, hex or base64 encoded.
+    fn in_views(&self, views: &[View]) -> bool {
+        views.iter().any(|v| {
+            self.plain.is_some_and(|p| v.text.contains(p))
+                || self.norm.as_deref().is_some_and(|n| v.norm.contains(n))
+                || self
+                    .hex
+                    .as_deref()
+                    .is_some_and(|h| v.compact_lower.contains(h))
+                || self.base64.iter().any(|n| v.compact.contains(n.as_str()))
+        })
+    }
+}
+
+/// The most confidential level among table entries found in `views`: plainly (or normalized) when at least
+/// `min_plain` characters long, and encoded when labelled `private` or `secret`. Entries below `floor` are
+/// skipped, and so are entries found whole in any of the `alone` view sets (one per piece of text; those are
+/// handled per argument). `None` when nothing is found.
 fn known_value_level(
     views: &[View],
     refs: &RefTable,
@@ -279,12 +326,8 @@ fn known_value_level(
         if level < floor || found.is_some_and(|f| f >= level) {
             continue;
         }
-        let encoded = level >= Confidential::Private;
-        if value_in_views(views, &entry.value, min_plain, encoded)
-            && !alone
-                .iter()
-                .any(|v| value_in_views(v, &entry.value, min_plain, encoded))
-        {
+        let needle = Needle::new(&entry.value, min_plain, level >= Confidential::Private);
+        if needle.in_views(views) && !alone.iter().any(|v| needle.in_views(v)) {
             found = Some(level);
         }
     }
@@ -294,7 +337,7 @@ fn known_value_level(
 fn text_has_credential(views: &[View], credentials: &[&Credential], min_plain: usize) -> bool {
     credentials
         .iter()
-        .any(|credential| value_in_views(views, credential.expose_secret(), min_plain, true))
+        .any(|credential| Needle::new(credential.expose_secret(), min_plain, true).in_views(views))
 }
 
 /// The orders in which `n` pieces of text are joined to look for a split value: every order for up to
@@ -321,6 +364,9 @@ fn orderings(n: usize) -> Vec<Vec<usize>> {
     all
 }
 
+/// The split check is skipped when the content pieces of a request add up to more bytes than this.
+const MAX_SPLIT_CHECK_BYTES: usize = 64 * 1024;
+
 /// Up to this many pieces of content text are joined in every order (at most 24 orders).
 const MAX_PERMUTED_PIECES: usize = 4;
 
@@ -333,7 +379,8 @@ const MAX_PERMUTED_PIECES: usize = 4;
 /// `secret` (plain, percent-decoded, base64 or hex; values shorter than 8 characters are ignored). Only a value
 /// that is not found whole inside any single piece counts as split. A hit raises
 /// EVERY content argument to that level (`contains_credential` for a credential), so the strictest `dlp` rule
-/// among them decides. Needs at least two non-empty pieces of content text.
+/// among them decides. Needs at least two non-empty pieces of content text, and is skipped when the pieces add up
+/// to more than 64 KiB (the per-argument checks still ran).
 pub fn trace_request(
     specs: &BTreeMap<String, ArgSpec>,
     args: &BTreeMap<String, Value>,
@@ -356,23 +403,36 @@ pub fn trace_request(
             pieces.extend(items(value).into_iter().flatten().filter(|t| !t.is_empty()));
         }
     }
-    if pieces.len() < 2 {
+    // The split check joins pieces in many orders; past this much text it is skipped (the per-argument checks
+    // above still ran), so one request cannot cost more than a bounded amount of scanning.
+    let total: usize = pieces.iter().map(|p| p.len()).sum();
+    if pieces.len() < 2 || total > MAX_SPLIT_CHECK_BYTES {
         return out;
-    }
-    let mut views = Vec::new();
-    for order in orderings(pieces.len()) {
-        let ordered: Vec<&str> = order.iter().map(|&i| pieces[i]).collect();
-        views.extend(views_of(&ordered.concat()));
-        views.extend(views_of(&ordered.join(" ")));
     }
     // A value found whole inside one piece is that argument's own business (`trace_arg`), not a split.
     let alone: Vec<Vec<View>> = pieces.iter().map(|p| views_of(p)).collect();
+    // A value that is not inside one piece but is inside a join must cross a boundary, so only the text near each
+    // piece's ends matters: long pieces are cut down to their first and last `width` bytes before joining.
+    let longest = refs
+        .iter()
+        .filter(|(_, e)| e.label.confidential >= Confidential::Private)
+        .map(|(_, e)| e.value.len())
+        .chain(credentials.iter().map(|c| c.expose_secret().len()))
+        .max()
+        .unwrap_or(0);
+    let width = longest.saturating_mul(2).saturating_add(CROP_MARGIN);
+    let parts: Vec<Part> = pieces
+        .iter()
+        .zip(&alone)
+        .map(|(piece, views)| Part::new(piece, views, width))
+        .collect();
+    let mut views = Vec::new();
+    for order in orderings(pieces.len()) {
+        join_views(&pieces, &parts, &order, &mut views);
+    }
     let credential = credentials.iter().any(|c| {
-        let secret = c.expose_secret();
-        value_in_views(&views, secret, MIN_SPLIT_LEN, true)
-            && !alone
-                .iter()
-                .any(|v| value_in_views(v, secret, MIN_SPLIT_LEN, true))
+        let needle = Needle::new(c.expose_secret(), MIN_SPLIT_LEN, true);
+        needle.in_views(&views) && !alone.iter().any(|v| needle.in_views(v))
     });
     let level = known_value_level(&views, refs, MIN_SPLIT_LEN, Confidential::Private, &alone);
     for name in content_names {
@@ -384,6 +444,127 @@ pub fn trace_request(
         }
     }
     out
+}
+
+/// Extra bytes kept on each side of a cropped piece, beyond twice the longest value looked for (room for
+/// character boundaries and lowercase expansion).
+const CROP_MARGIN: usize = 16;
+
+/// Stands in for the text cut out of a long piece; no value is looked for across it.
+const CUT: char = '\u{FFFF}';
+
+/// The four readings of one piece of text, each cut down to its first and last `width` bytes.
+struct Forms {
+    text: String,
+    compact: String,
+    compact_lower: String,
+    norm: String,
+}
+
+impl Forms {
+    fn new(view: &View, width: usize) -> Forms {
+        Forms {
+            text: crop(&view.text, width),
+            compact: crop(&view.compact, width),
+            compact_lower: crop(&view.compact_lower, width),
+            norm: crop(&view.norm, width),
+        }
+    }
+}
+
+/// `text` as it is when short, else its first and last `width` bytes (cut at character boundaries) around [`CUT`].
+fn crop(text: &str, width: usize) -> String {
+    if text.len() <= width.saturating_mul(2).saturating_add(8) {
+        return text.to_owned();
+    }
+    let mut head = width;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - width;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{CUT}{}", &text[..head], &text[tail..])
+}
+
+/// One piece of content text, prepared for joining.
+struct Part {
+    raw: Forms,
+    /// The percent-decoded reading, when the text has one that differs from the text.
+    decoded: Option<Forms>,
+    /// True when the text has a `%` or `+`, so it may read differently inside a join.
+    marked: bool,
+    /// True when decoding the piece alone could differ from decoding it inside a join: it ends in half an escape
+    /// (`%`, `%4`) or its decoded bytes are not valid UTF-8 (a character may continue in the next piece).
+    risky: bool,
+}
+
+impl Part {
+    fn new(piece: &str, views: &[View], width: usize) -> Part {
+        let decoded = views.get(1);
+        let marked = piece.contains(['%', '+']);
+        let risky = marked && {
+            let bytes = piece.as_bytes();
+            let n = bytes.len();
+            let half_escape = bytes.last() == Some(&b'%')
+                || (n >= 2 && bytes[n - 2] == b'%' && hex_digit(bytes[n - 1]).is_some());
+            half_escape || std::str::from_utf8(&percent_decode_bytes(piece)).is_err()
+        };
+        Part {
+            raw: Forms::new(&views[0], width),
+            decoded: decoded.map(|v| Forms::new(v, width)),
+            marked,
+            risky,
+        }
+    }
+}
+
+/// Adds the views of the pieces joined in `order`: with no separator and with a single space, raw and (when any
+/// piece has one) percent-decoded. Only the plain text differs between the two joins, so the space join carries
+/// just that. When a piece is risky to decode alone, the decoded readings come from decoding the whole join.
+fn join_views(pieces: &[&str], parts: &[Part], order: &[usize], out: &mut Vec<View>) {
+    push_joined(
+        out,
+        &order.iter().map(|&i| &parts[i].raw).collect::<Vec<_>>(),
+    );
+    if !order.iter().any(|&i| parts[i].marked) {
+        return;
+    }
+    if order.iter().any(|&i| parts[i].risky) {
+        let ordered: Vec<&str> = order.iter().map(|&i| pieces[i]).collect();
+        out.extend(views_of(&ordered.concat()).into_iter().skip(1));
+        out.extend(views_of(&ordered.join(" ")).into_iter().skip(1));
+        return;
+    }
+    let forms: Vec<&Forms> = order
+        .iter()
+        .map(|&i| parts[i].decoded.as_ref().unwrap_or(&parts[i].raw))
+        .collect();
+    push_joined(out, &forms);
+}
+
+/// Pushes the no-separator join of `forms` (all four readings) and the single-space join (plain text only).
+fn push_joined(out: &mut Vec<View>, forms: &[&Forms]) {
+    let cat = |field: fn(&Forms) -> &String| -> String {
+        forms.iter().map(|f| field(f).as_str()).collect()
+    };
+    out.push(View {
+        text: cat(|f| &f.text),
+        compact: cat(|f| &f.compact),
+        compact_lower: cat(|f| &f.compact_lower),
+        norm: cat(|f| &f.norm),
+    });
+    out.push(View {
+        text: forms
+            .iter()
+            .map(|f| f.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        compact: String::new(),
+        compact_lower: String::new(),
+        norm: String::new(),
+    });
 }
 
 /// The base64 strings that show up wherever `secret` is encoded, whatever its byte offset inside the encoded
@@ -416,11 +597,24 @@ fn base64_needles(secret: &[u8]) -> Vec<String> {
 /// cleaned text exactly matches a [`RefTable`] value is traced in `embedded` instead of counted in
 /// `raw_destinations`.
 pub fn raw_destinations(text: &str) -> u32 {
-    u32::try_from(raw_destination_tokens(text).len()).unwrap_or(u32::MAX)
+    raw_destination_counts(text)
+        .iter()
+        .fold(0u32, |sum, (_, count)| sum.saturating_add(*count))
 }
 
-/// Extracts each raw destination token from `text` in order of appearance.
+/// Extracts each raw destination token from `text` in order of appearance. A token that holds several
+/// `scheme://` URLs (`x://x://x://...`) is listed once, not once per URL.
 pub(crate) fn raw_destination_tokens(text: &str) -> Vec<String> {
+    raw_destination_counts(text)
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect()
+}
+
+/// Like [`raw_destination_tokens`], each token with how many destinations it counts as (always 1, except for a
+/// run of `scheme://` URLs glued into one token, which counts once per `://`). Memory stays linear in the text:
+/// the repeated token is stored once and the count carries the rest.
+pub(crate) fn raw_destination_counts(text: &str) -> Vec<(String, u32)> {
     let cleaned = strip_refs_and_normalize(text);
     let mut out = Vec::new();
     for token in cleaned.split(is_separator).filter(|t| !t.is_empty()) {
@@ -524,21 +718,21 @@ fn trim_host(s: &str) -> &str {
 }
 
 /// Extracts the raw destination tokens in one token (already free of white space and quoting characters).
-fn tokens_in_token(token: &str, out: &mut Vec<String>) {
-    // Any `scheme://` with something after it: collect each and stop, the URL covers what follows.
+fn tokens_in_token(token: &str, out: &mut Vec<(String, u32)>) {
+    // Any `scheme://` with something after it: the token counts once per `://` and is stored once; stop, the
+    // URL covers what follows.
     let urls = token
         .match_indices("://")
         .filter(|(at, _)| at + 3 < token.len())
         .count();
     if urls > 0 {
         let trimmed = token.trim_end_matches(['.', ':', '!', '?']);
-        for _ in 0..urls {
-            out.push(trimmed.to_owned());
-        }
+        out.push((trimmed.to_owned(), u32::try_from(urls).unwrap_or(u32::MAX)));
         return;
     }
     let bytes = token.as_bytes();
-    // Byte ranges already counted as part of an email address.
+    // Byte ranges already counted as part of an email address. Their starts and ends only grow (each address
+    // ends before the next `@`), so a cursor finds the one that could cover a position.
     let mut consumed: Vec<(usize, usize)> = Vec::new();
     for (at, &b) in bytes.iter().enumerate() {
         if b != b'@' {
@@ -554,10 +748,11 @@ fn tokens_in_token(token: &str, out: &mut Vec<String>) {
         }
         let domain = trim_host(&token[at + 1..end]);
         if start < at && domain.contains('.') && domain.split('.').all(is_host_label) {
-            out.push(trim_host(&token[start..end]).to_owned());
+            out.push((trim_host(&token[start..end]).to_owned(), 1));
             consumed.push((start, end));
         }
     }
+    let mut cursor = 0;
     let mut i = 0;
     while i < bytes.len() {
         if !is_host_byte(bytes[i]) {
@@ -568,7 +763,10 @@ fn tokens_in_token(token: &str, out: &mut Vec<String>) {
         while i < bytes.len() && is_host_byte(bytes[i]) {
             i += 1;
         }
-        if consumed.iter().any(|&(s, e)| start >= s && start < e) {
+        while cursor < consumed.len() && consumed[cursor].1 <= start {
+            cursor += 1;
+        }
+        if consumed.get(cursor).is_some_and(|&(s, _)| s <= start) {
             continue;
         }
         let run = &token[start..i];
@@ -578,7 +776,7 @@ fn tokens_in_token(token: &str, out: &mut Vec<String>) {
         }
         let host_end = start + run.find(host).unwrap_or(0) + host.len();
         if is_bare_host(host, &token[host_end..]) {
-            out.push(host.to_owned());
+            out.push((host.to_owned(), 1));
         }
     }
 }

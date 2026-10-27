@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 
 /// The most elements a list argument may have when its manifest sets no `max`.
 pub const DEFAULT_LIST_MAX: u32 = 100;
+/// The most characters a string-shaped argument may have when its manifest sets no `max_len`.
+pub const DEFAULT_MAX_TEXT_LEN: usize = 65_536;
 /// Integers beyond this magnitude are not exactly representable in JSON consumers, so they are refused.
 const MAX_SAFE_INT: i64 = (1 << 53) - 1;
 
@@ -161,10 +163,8 @@ fn check_scalar(spec: &ArgSpec, v: &Value, value_max: Option<u32>) -> Result<(),
             if s.parse::<RefId>().is_ok() {
                 return Ok(());
             }
-            if spec
-                .max_len
-                .is_some_and(|max| s.chars().count() > max as usize)
-            {
+            let max_len = spec.max_len.map_or(DEFAULT_MAX_TEXT_LEN, |m| m as usize);
+            if s.chars().count() > max_len {
                 return Err(ViolationCode::TooLong);
             }
             if scalar == Scalar::Text && spec.single_line && !is_clean_text(s, true) {
@@ -537,6 +537,37 @@ mod tests {
             check_arg_value(&e, &json!(1)),
             Err(ViolationCode::WrongType)
         );
+    }
+
+    #[test]
+    fn text_without_max_len_is_capped() {
+        let s = spec("text");
+        let at_cap = "a".repeat(DEFAULT_MAX_TEXT_LEN);
+        assert_eq!(check_arg_value(&s, &json!(at_cap)), Ok(()));
+        let over = "a".repeat(DEFAULT_MAX_TEXT_LEN + 1);
+        assert_eq!(
+            check_arg_value(&s, &json!(over)),
+            Err(ViolationCode::TooLong)
+        );
+        // Characters are counted, not bytes.
+        let wide = "\u{65e5}".repeat(DEFAULT_MAX_TEXT_LEN);
+        assert_eq!(check_arg_value(&s, &json!(wide)), Ok(()));
+        // Every string-shaped type, and each element of a list.
+        for ty in ["id", "url", "email"] {
+            assert_eq!(
+                check_arg_value(&spec(ty), &json!(over)),
+                Err(ViolationCode::TooLong),
+                "{ty}"
+            );
+        }
+        assert_eq!(
+            check_arg_value(&spec("text[]"), &json!([over])),
+            Err(ViolationCode::TooLong)
+        );
+        // An explicit max_len is the manifest's call, even above the default.
+        let mut big = spec("text");
+        big.max_len = Some(DEFAULT_MAX_TEXT_LEN as u32 + 10);
+        assert_eq!(check_arg_value(&big, &json!(over)), Ok(()));
     }
 
     #[test]

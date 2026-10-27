@@ -96,7 +96,7 @@ pub fn is_valid(scalar: Scalar, s: &str) -> bool {
 }
 
 /// Characters that are invisible or that reorder or hide text, which free text must never contain.
-fn is_hidden_format_char(c: char) -> bool {
+pub fn is_hidden_format_char(c: char) -> bool {
     matches!(
         c as u32,
         0x00AD                  // soft hyphen
