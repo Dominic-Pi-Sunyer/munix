@@ -8,6 +8,15 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
+- **Parked by the owner (Oct 27): cutting Munix's cost**, about 2x bare today.
+  - **Where the cost is:** the agent costs the same under Munix ($0.022 per case). The extra is about all the
+    planner: one call per task, ~$0.015 (4.6k prompt and 2.3k output tokens at `low`). The reviewer is almost
+    never called, and Readers cost ~$0.002 per call.
+  - **Idea 1, plan on the first write:** start with a deterministic read-only plan (own records and Reader outputs
+    only), and call the planner the first time the agent asks for a write or send tool. Its inputs are unchanged
+    (prompt and catalog), so its plan is the same.
+  - **Idea 2:** `MUNIX_PLANNER_EFFORT=minimal`.
+  - **Measure both** in one utility run, which would also measure the refs note (`ddfaf57`, unmeasured).
 - **Utility fixes: done (Oct 27 evening), $1.26 for the utility re-run.** Write-up: the "After the utility
   fixes" section of `docs/redteam/agentdojo.md`.
   - **Utility, no attack:** no human 7/16 → 9/16; simulated user 8/16 → 10/16; offline audit 9/16 → 12/16.
