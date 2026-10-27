@@ -7,7 +7,7 @@ Two pieces, shared by both sides of the split screen:
 | `agent/` | An ordinary Muse Spark tool-calling agent (OpenAI SDK + MCP stdio client). Not Munix code: it never imports from this repo | Both sides, unchanged |
 | `direct-server/` | MCP server with the demo tools wired straight to Web Speed OSS and Mailpit. No Munix | Left side only |
 
-The right side runs the same agent under `munix run` (Munix runtime, Day 4), which serves the same tool names
+The right side runs the same agent under `munix run` (the Munix runtime), which serves the same tool names
 through the Gate.
 
 ## Tool contract (both sides must match)
