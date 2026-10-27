@@ -18,7 +18,9 @@ use munix_core::plan::Plan;
 use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{Request, ViolationCode};
 use munix_core::validate::Scalar;
-use munix_gate::gate::{Gate, GateError, Reply, Store, StoreValue, TaskBrief};
+use munix_gate::gate::{
+    AMENDMENT_BUDGET, Gate, GateError, MAX_AMENDMENTS, Reply, Store, StoreValue, TaskBrief,
+};
 use munix_gate::policy::DenyCode;
 use munix_gate::tool::{Tool, ToolFailure};
 use munix_gate::vault::{Credential, Vault};
@@ -44,6 +46,36 @@ description: Read the headline of the day.
 tier: 0
 output:
   headline: {type: text, region: editorial, confidential: public}
+";
+
+/// Tier 0 tools for the amendment tests: their output is operator content, so reading them lowers nothing.
+const PROBE_NAMES: [&str; 5] = ["probe.a", "probe.b", "probe.c", "probe.d", "probe.e"];
+const PROBE_TEMPLATE: &str = "
+tool: NAME
+description: A harmless read.
+tier: 0
+output:
+  value: {type: text, region: operator_content, confidential: public}
+";
+/// A tier 1 egress tool with a destination, to test the rules an amended step gets.
+const LINK_PING: &str = "
+tool: link.ping
+description: Ping a link.
+tier: 1
+egress: true
+args:
+  url:  {type: url,  role: destination}
+  memo: {type: text, role: content, optional: true}
+output:
+  ack: {type: id, region: operator_content, confidential: internal}
+";
+/// A tier 2 tool.
+const FILE_WRITE: &str = "
+tool: file.write
+description: Write a file.
+tier: 2
+output:
+  ack: {type: id, region: operator_content, confidential: internal}
 ";
 
 const BOSS: &str = "boss@corp.example";
@@ -174,6 +206,15 @@ fn harness() -> Harness {
 }
 
 fn build(register_email: bool, with_credential: bool) -> Harness {
+    build_with(register_email, with_credential, false)
+}
+
+/// The harness plus the extra tools the amendment tests need (probe.*, link.ping, file.write).
+fn amend_harness() -> Harness {
+    build_with(true, true, true)
+}
+
+fn build_with(register_email: bool, with_credential: bool, with_extras: bool) -> Harness {
     let key = signing_key();
     let web = manifest(WEB_OPEN);
     let email = manifest(EMAIL_SEND);
@@ -183,7 +224,18 @@ fn build(register_email: bool, with_credential: bool) -> Harness {
         email.digest().unwrap(),
         news.digest().unwrap(),
     );
-    let catalog = Catalog::from_manifests([web, email, news]).unwrap();
+    let mut extras: Vec<ToolManifest> = Vec::new();
+    if with_extras {
+        extras = PROBE_NAMES
+            .iter()
+            .map(|name| manifest(&PROBE_TEMPLATE.replace("NAME", name)))
+            .collect();
+        extras.push(manifest(LINK_PING));
+        extras.push(manifest(FILE_WRITE));
+    }
+    let extra_digests: Vec<_> = extras.iter().map(|m| m.digest().unwrap()).collect();
+    let extra_names: Vec<_> = extras.iter().map(|m| m.tool.clone()).collect();
+    let catalog = Catalog::from_manifests([web, email, news].into_iter().chain(extras)).unwrap();
     let dir = fresh_dir();
     let ledger = Ledger::create(dir.join("ledger.jsonl")).unwrap();
     let vault = if with_credential {
@@ -250,6 +302,15 @@ fn build(register_email: bool, with_credential: bool) -> Harness {
         tool(|_, _| Ok(args(&[("headline", json!("A quiet day"))]))),
     )
     .unwrap();
+    for (name, digest) in extra_names.into_iter().zip(extra_digests) {
+        let output = if name.as_str().starts_with("probe.") {
+            args(&[("value", json!("fine"))])
+        } else {
+            args(&[("ack", json!("ack-1"))])
+        };
+        gate.register(name, digest, tool(move |_, _| Ok(output.clone())))
+            .unwrap();
+    }
 
     let prompt = Signed::sign(&key, Purpose::Prompt, prompt_envelope()).unwrap();
     let plan_body = test_plan(prompt_envelope().digest().unwrap());
@@ -2565,4 +2626,253 @@ fn a_credential_split_across_subject_and_body_is_denied_not_sent() {
         h.gate.submit(&email_to_boss("Fine")),
         Reply::Delivered(_)
     ));
+}
+
+// ---- automatic amendments (design spec 7.4) ----
+
+/// Starts the task on the harness's plan with `edit` applied (the plan is signed again for the Gate).
+fn start_edited(h: &mut Harness, edit: impl FnOnce(&mut Plan)) -> TaskBrief {
+    let mut body = h.plan_body();
+    edit(&mut body);
+    let plan = h.sign_plan(body);
+    h.gate.start_task(&h.prompt, &plan, &h.store).unwrap()
+}
+
+/// The harness's plan without the tier 0 `news.read` step.
+fn start_without_news(h: &mut Harness) -> TaskBrief {
+    start_edited(h, |plan| plan.steps.retain(|s| s.id != 3))
+}
+
+fn amended_events(h: &Harness) -> Vec<Value> {
+    h.entries()
+        .into_iter()
+        .map(|e| e.event)
+        .filter(|e| e["event"] == "amended")
+        .collect()
+}
+
+#[test]
+fn an_off_plan_tier_0_read_is_amended_and_runs_like_any_step() {
+    let mut h = amend_harness();
+    let brief = start_without_news(&mut h);
+    assert_eq!(brief.plan.steps.len(), 2);
+    let signed_digest = h.plan.body.digest().unwrap();
+
+    // The request names step 0: the Gate re-aims it at the step it adds (max id + 1 = 3).
+    let reply = h.gate.submit(&req(0, "news.read", json!({})));
+    let Reply::Delivered(news) = reply else {
+        panic!("the off-plan read should have been amended in and run: {reply:?}");
+    };
+    assert_eq!(news.min_trust, Some(Trust::new(75)));
+    assert_eq!(h.gate.context_trust(&task_id()), Some(Trust::new(75)));
+    assert_eq!(h.gate.calls_made(&task_id(), 3), Some(1));
+
+    let plan = h.gate.plan(&task_id()).unwrap();
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.steps[2].id, 3);
+    assert_eq!(plan.steps[2].tool.as_str(), "news.read");
+    assert_eq!(plan.steps[2].budget, AMENDMENT_BUDGET);
+    assert!(plan.steps[2].args.is_empty());
+    // The signed plan and its digest are untouched, and the brief keeps the planned steps only.
+    assert_eq!(h.plan.body.digest().unwrap(), signed_digest);
+    assert_eq!(brief.plan.steps.len(), 2);
+
+    assert_eq!(
+        amended_events(&h),
+        [json!({
+            "event": "amended", "task": "T-demo", "step": 3, "tool": "news.read", "tier": 0,
+            "budget": 3, "reason": "auto_tier",
+        })]
+    );
+    let events = h.events();
+    let at = events.iter().position(|e| e == "amended").unwrap();
+    assert_eq!(events[at - 1], "request");
+    assert_eq!(events[at + 1], "ruling");
+    assert!(events.iter().any(|e| e == "executed"));
+    assert!(events.iter().any(|e| e == "context_lowered"));
+    assert_ledger_clean(&h);
+}
+
+#[test]
+fn the_amended_step_has_a_budget_and_running_out_is_not_a_takeover() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    // The first call may name any step; the Gate adds step 3 and later calls name it.
+    assert!(matches!(
+        h.gate.submit(&req(0, "news.read", json!({}))),
+        Reply::Delivered(_)
+    ));
+    for _ in 1..AMENDMENT_BUDGET {
+        assert!(matches!(
+            h.gate.submit(&req(3, "news.read", json!({}))),
+            Reply::Delivered(_)
+        ));
+    }
+    assert_eq!(
+        h.gate.submit(&req(3, "news.read", json!({}))),
+        Reply::Denied(DenyCode::BudgetExhausted)
+    );
+    // Still running, and only one amendment was made for the three calls.
+    assert!(matches!(
+        h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
+        Reply::Delivered(_)
+    ));
+    assert_eq!(amended_events(&h).len(), 1);
+    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 3);
+}
+
+#[test]
+fn off_plan_tier_2_and_3_tools_are_still_takeovers() {
+    // file.write is tier 2.
+    let mut h = amend_harness();
+    h.start();
+    assert_eq!(
+        h.gate.submit(&req(0, "file.write", json!({}))),
+        Reply::Takeover(DenyCode::OffPlan)
+    );
+    assert!(amended_events(&h).is_empty());
+    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 3);
+
+    // email.send is tier 3 and has no step in this plan.
+    let mut h = amend_harness();
+    start_edited(&mut h, |plan| plan.steps.retain(|s| s.id == 1));
+    assert_eq!(
+        h.gate.submit(&email_to_boss("Hi")),
+        Reply::Takeover(DenyCode::OffPlan)
+    );
+    assert_eq!(h.emails_sent(), 0);
+    assert!(amended_events(&h).is_empty());
+}
+
+#[test]
+fn a_plan_with_auto_max_tier_0_amends_tier_0_only() {
+    let mut h = amend_harness();
+    start_edited(&mut h, |plan| plan.amendments.auto_max_tier = 0);
+    // link.ping is tier 1: above the plan's limit.
+    assert_eq!(
+        h.gate
+            .submit(&req(0, "link.ping", json!({"url": "ref:u1"}))),
+        Reply::Takeover(DenyCode::OffPlan)
+    );
+    assert!(amended_events(&h).is_empty());
+
+    // A tier 0 tool is still amended in.
+    let mut h = amend_harness();
+    start_edited(&mut h, |plan| plan.amendments.auto_max_tier = 0);
+    assert!(matches!(
+        h.gate.submit(&req(0, "probe.a", json!({}))),
+        Reply::Delivered(_)
+    ));
+    assert_eq!(amended_events(&h).len(), 1);
+}
+
+#[test]
+fn the_fifth_distinct_amendment_is_a_takeover() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    assert_eq!(MAX_AMENDMENTS, 4);
+    for (n, name) in PROBE_NAMES.iter().take(4).enumerate() {
+        assert!(
+            matches!(h.gate.submit(&req(0, name, json!({}))), Reply::Delivered(_)),
+            "{name}"
+        );
+        let plan = h.gate.plan(&task_id()).unwrap();
+        assert_eq!(plan.steps.len(), 3 + n);
+    }
+    let ids: Vec<u32> = h
+        .gate
+        .plan(&task_id())
+        .unwrap()
+        .steps
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
+    // A tool that already has a step is not a new amendment.
+    assert!(matches!(
+        h.gate.submit(&req(3, "probe.a", json!({}))),
+        Reply::Delivered(_)
+    ));
+    assert_eq!(
+        h.gate.submit(&req(0, "probe.e", json!({}))),
+        Reply::Takeover(DenyCode::OffPlan)
+    );
+    assert_eq!(amended_events(&h).len(), 4);
+    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 6);
+}
+
+#[test]
+fn an_amended_egress_step_takes_destinations_from_the_clean_side_only() {
+    // From the prompt: allowed.
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    let reply = h
+        .gate
+        .submit(&req(0, "link.ping", json!({"url": "ref:u1"})));
+    assert!(matches!(reply, Reply::Delivered(_)), "{reply:?}");
+    let plan = h.gate.plan(&task_id()).unwrap();
+    let step = plan.steps.last().unwrap();
+    assert_eq!(step.tool.as_str(), "link.ping");
+    assert_eq!(step.budget, AMENDMENT_BUDGET);
+    // The exact rules: the destination from prompt, user data and the held store; the content argument DLP only.
+    let from: Vec<String> = step.args["url"]
+        .from
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(from, ["prompt", "user_data", "store.contacts"]);
+    assert_eq!(step.args["url"].min_trust, None);
+    assert_eq!(step.args["memo"].dlp, Some(munix_core::plan::Dlp::NoSecret));
+    assert!(step.args["memo"].may_embed.is_none());
+    assert!(step.args["memo"].from.is_none());
+    assert_eq!(step.args.len(), 2);
+    assert_ledger_clean(&h);
+
+    // From a page's link (a step output): a takeover, as for a planned step.
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    let links = h.read_page();
+    let reply = h
+        .gate
+        .submit(&req(0, "link.ping", json!({"url": links[0]})));
+    assert_eq!(reply, Reply::Takeover(DenyCode::UntrustedDestination));
+    // The step was added before the ruling, and the ledger says so.
+    assert_eq!(amended_events(&h).len(), 1);
+}
+
+#[test]
+fn a_malformed_or_unknown_call_does_not_use_up_an_amendment() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    // A shape violation on a tool with no step: malformed, nothing amended.
+    let reply = h
+        .gate
+        .submit(&req(0, "probe.a", json!({"surprise": "arg"})));
+    assert!(matches!(reply, Reply::Malformed(_)), "{reply:?}");
+    assert!(amended_events(&h).is_empty());
+    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 2);
+    // A tool outside the catalog is a takeover.
+    assert_eq!(
+        h.gate.submit(&req(0, "mail.read", json!({}))),
+        Reply::Takeover(DenyCode::OffPlan)
+    );
+    assert!(amended_events(&h).is_empty());
+}
+
+#[test]
+fn recovery_hands_the_new_agent_the_planned_steps_only() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    assert!(matches!(
+        h.gate.submit(&req(0, "probe.a", json!({}))),
+        Reply::Delivered(_)
+    ));
+    h.gate.halt_for_takeover(&task_id(), DenyCode::OffPlan);
+    let recovery = h.gate.recover(&task_id()).unwrap();
+    assert_eq!(recovery.brief.plan.steps.len(), 2);
+    // The Gate keeps the amendment (and counts it toward the limit).
+    assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 3);
+    assert_eq!(h.gate.context_trust(&task_id()), Some(Trust::FULL));
 }

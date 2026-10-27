@@ -8,7 +8,7 @@ use std::time::Instant;
 use munix_core::crypto::{Digest, Purpose, Signed, SigningKey};
 use munix_core::decision::{Decision, Stage, Verdict};
 use munix_core::ids::ToolName;
-use munix_core::manifest::ArgSpec;
+use munix_core::manifest::{ArgSpec, Catalog};
 use munix_core::plan::Step;
 use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{DEFAULT_LIST_MAX, Request};
@@ -122,26 +122,23 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
         self.takeover
     }
 
-    /// The tool a call names: the plan's tool whose MCP name matches, else the name with `_` read as `.`.
+    /// The tool a call names (see [`resolve_tool`]). Only the brief's planned steps are preferred, so amended
+    /// tools are never advertised.
     fn tool_named(&self, name: &str) -> Option<ToolName> {
-        let in_plan = self
-            .brief
-            .plan
-            .steps
-            .iter()
-            .map(|step| &step.tool)
-            .find(|tool| mcp_name(tool) == name);
-        match in_plan {
-            Some(tool) => Some(tool.clone()),
-            None => name.replace('_', ".").parse().ok(),
-        }
+        resolve_tool(
+            name,
+            self.brief.plan.steps.iter().map(|step| &step.tool),
+            self.gate.catalog(),
+        )
     }
 
-    /// The first plan step with this tool that still has budget, else the last one with it, else step 0.
+    /// The first step with this tool that still has budget, else the last one with it, else step 0. Steps come from
+    /// the Gate's current plan for the task, so a step the Gate amended in earlier is found like a planned one.
     fn step_for(&self, tool: &ToolName) -> u32 {
-        let steps: Vec<&Step> = self
-            .brief
-            .plan
+        let Some(plan) = self.gate.plan(&self.brief.task) else {
+            return 0;
+        };
+        let steps: Vec<&Step> = plan
             .steps
             .iter()
             .filter(|step| &step.tool == tool)
@@ -312,8 +309,9 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     /// - The name maps back by replacing `_` with `.`. A name that isn't a valid tool name, or any tool, is still
     ///   submitted (with step 0 when no plan step uses it), so the Gate rules on it and logs it. A name that can't
     ///   become a `ToolName` at all is answered `denied: off_plan` and treated as a takeover.
-    /// - The step is the first plan step with that tool whose budget isn't used up (`Gate::calls_made`), else the
-    ///   last step with that tool.
+    /// - The step is the first step of the Gate's current plan (planned or amended) with that tool whose budget isn't
+    ///   used up (`Gate::calls_made`), else the last step with that tool. A tool no step uses is sent as step 0 and
+    ///   the Gate may amend a step in for it (low tiers only).
     /// - `arguments` must be an object (`null` counts as `{}`); anything else is answered `denied: wrong_type`.
     ///
     /// Replies, as text (`is_error` for everything but `Delivered`):
@@ -406,6 +404,30 @@ pub fn blocked_lines(
         ));
     }
     lines
+}
+
+/// The tool an MCP name stands for: a planned tool whose MCP name matches; else the one catalog tool whose MCP name
+/// matches (so `banking_get_balance` is `banking.get_balance`, a tool the Gate may amend in); else the name with
+/// every `_` read as `.` (not in the catalog, so the Gate takes it over as off plan). Two catalog tools with the same
+/// MCP name resolve to neither.
+pub fn resolve_tool<'t>(
+    name: &str,
+    planned: impl Iterator<Item = &'t ToolName>,
+    catalog: &Catalog,
+) -> Option<ToolName> {
+    let mut planned = planned;
+    if let Some(tool) = planned.find(|tool| mcp_name(tool) == name) {
+        return Some(tool.clone());
+    }
+    let mut in_catalog = catalog
+        .iter()
+        .map(|(tool, _)| tool)
+        .filter(|tool| mcp_name(tool) == name);
+    match (in_catalog.next(), in_catalog.next()) {
+        (Some(tool), None) => Some(tool.clone()),
+        (Some(_), Some(_)) => None,
+        (None, _) => name.replace('_', ".").parse().ok(),
+    }
 }
 
 /// The MCP name of a tool: `web.open` is `web_open`.

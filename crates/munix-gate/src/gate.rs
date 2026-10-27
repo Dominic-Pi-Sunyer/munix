@@ -11,7 +11,7 @@ use munix_core::decision::{Decision, Stage, Verdict};
 use munix_core::ids::{RefId, TaskId, ToolName, find_embedded};
 use munix_core::label::{Author, Capacity, Confidential, Label, RegionType, Source, Trust};
 use munix_core::manifest::{ArgRole, Catalog, ToolManifest};
-use munix_core::plan::{Plan, SourcePath};
+use munix_core::plan::{ArgRule, Dlp, Plan, SourcePath, Step};
 use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{Request, Violation};
 use munix_core::validate::{Scalar, is_email, is_iban, is_url, is_valid};
@@ -162,7 +162,13 @@ struct Instance {
 }
 
 struct Task {
+    /// The Gate's own copy of the plan: the signed steps first, then any automatic amendments. The signed plan is
+    /// never modified or re-signed; its digest stays in the ledger.
     plan: Plan,
+    /// How many steps the signed plan had. Steps after these are amendments.
+    planned_steps: usize,
+    /// Names of the operator stores this task holds refs for (what an amended step may take values from).
+    store_names: BTreeSet<String>,
     brief_refs: Vec<BriefRef>,
     instance: Instance,
     refs: RefTable,
@@ -186,6 +192,12 @@ struct Task {
 
 /// Denials on one step before the task pauses (design spec 7.4).
 pub const MAX_DENIALS_PER_STEP: u32 = 3;
+
+/// Automatic amendments per task (design spec 7.4). The fifth distinct new tool is a takeover.
+pub const MAX_AMENDMENTS: u32 = 4;
+
+/// The budget of an amended step.
+pub const AMENDMENT_BUDGET: u32 = 3;
 
 /// Recoveries per task before it pauses and the user is asked (design spec 6, "Recovery").
 pub const MAX_RECOVERIES: u32 = 2;
@@ -401,6 +413,7 @@ impl Gate {
                 brief_refs.push(BriefRef { id, what });
             }
         }
+        let mut store_names: BTreeSet<String> = BTreeSet::new();
         for (name, key) in named_store_values(body, store) {
             let Some(entry) = store.get(&name).and_then(|keys| keys.get(&key)) else {
                 continue;
@@ -414,6 +427,7 @@ impl Gate {
                 key: key.clone(),
             };
             let id = refs.issue(&entry.value, entry.scalar, origin, label);
+            store_names.insert(name.clone());
             if seen.insert(id.clone()) {
                 brief_refs.push(BriefRef {
                     id,
@@ -440,6 +454,8 @@ impl Gate {
             envelope.task.clone(),
             Task {
                 plan: body.clone(),
+                planned_steps: body.steps.len(),
+                store_names,
                 brief_refs,
                 instance: Instance {
                     context: ContextState::fresh(),
@@ -466,6 +482,9 @@ impl Gate {
     ///    `Takeover(OffPlan)`).
     /// 2. `check_shape` against the tool's manifest (a tool not in the catalog is `Takeover(OffPlan)`):
     ///    violations give `Malformed`, counted as a denial on the step.
+    ///    A well-formed call to a catalog tool that no step uses is first amended in when its tier is at most the
+    ///    plan's `auto_max_tier` and fewer than `MAX_AMENDMENTS` amendments were made (see `try_amend`); it is then
+    ///    ruled on against the new step like any other. Otherwise it is `Takeover(OffPlan)`.
     /// 3. Trace every argument (`trace::trace_arg`, with the vault's credentials for the DLP check), then
     ///    `policy::evaluate` with the task's band and the step's executed-call count.
     /// 4. `Allow`: execute. `Gray`: park the request and reply `Pending { needs: LlmReview }`. `ConfirmUser`:
@@ -534,6 +553,28 @@ impl Gate {
         if let Err(violations) = request.check_shape(&manifest) {
             return self.finish_malformed(&case, violations);
         }
+        // A well-formed call to a catalog tool that no step covers: low tiers are amended in automatically
+        // (design spec 7.4); everything else falls through to the plan check, which takes it over as off plan.
+        let amended = match self.try_amend(request, &manifest) {
+            Ok(amended) => amended,
+            Err(reply) => return reply,
+        };
+        let amended_hash;
+        let (request, hash): (&Request, &Digest) = match &amended {
+            Some(rewritten) => {
+                let Ok(new_hash) = crypto::digest(rewritten) else {
+                    return Reply::Failed(ToolFailure::Internal);
+                };
+                amended_hash = new_hash;
+                (rewritten, &amended_hash)
+            }
+            None => (request, &hash),
+        };
+        let case = Case {
+            request,
+            hash,
+            band,
+        };
         let Some(ruling) = self
             .tasks
             .get(&request.task)
@@ -552,6 +593,98 @@ impl Gate {
             Outcome::ConfirmUser => self.park(&case, &ruling, Stage::User, "confirm_user"),
             Outcome::Deny(code) => self.finish_deny(&case, code, &ruling.reasons, true),
         }
+    }
+
+    /// Adds a step for a tool the plan never mentioned, when design spec 7.4 lets the Gate do it alone: the tool's
+    /// tier is at most the plan's `auto_max_tier`, the task has made fewer than [`MAX_AMENDMENTS`] amendments, no
+    /// step already uses the tool, the tool can actually run, and the plan with the new step still validates.
+    /// Anything else is `Ok(None)` and the request is ruled on as it stands (off plan).
+    ///
+    /// The step goes into the Gate's own copy of the plan only (the signed plan is untouched), after an `amended`
+    /// ledger entry (a failed write is `Failed(Internal)` and changes nothing). Its rules are the tightest a
+    /// planned step could have: destination and selector arguments may come from the prompt, user data and the
+    /// stores the task holds, never from a step's output; content arguments of an egress tool get `dlp: no_secret`
+    /// and no `may_embed`. Returns the request re-aimed at the new step.
+    fn try_amend(
+        &mut self,
+        request: &Request,
+        manifest: &ToolManifest,
+    ) -> Result<Option<Request>, Reply> {
+        let Some(task) = self.tasks.get(&request.task) else {
+            return Err(Reply::Halted);
+        };
+        if task.plan.steps.iter().any(|s| s.tool == request.tool) {
+            return Ok(None);
+        }
+        let amended = task.plan.steps.len().saturating_sub(task.planned_steps);
+        if manifest.tier > task.plan.amendments.auto_max_tier
+            || amended >= MAX_AMENDMENTS as usize
+            || !self.tools.contains_key(&request.tool)
+            || manifest
+                .credentials
+                .as_ref()
+                .is_some_and(|at| !self.vault.contains(at))
+        {
+            return Ok(None);
+        }
+        let id = task
+            .plan
+            .steps
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .map_or(1, |m| m.saturating_add(1));
+        let mut sources = vec![SourcePath::Prompt, SourcePath::UserData];
+        sources.extend(task.store_names.iter().map(|name| SourcePath::Store {
+            name: name.clone(),
+            key: None,
+        }));
+        let mut args = BTreeMap::new();
+        for (name, spec) in &manifest.args {
+            let rule = match spec.role {
+                ArgRole::Destination | ArgRole::Selector => ArgRule {
+                    from: Some(sources.clone()),
+                    ..ArgRule::default()
+                },
+                ArgRole::Content if manifest.egress => ArgRule {
+                    dlp: Some(Dlp::NoSecret),
+                    ..ArgRule::default()
+                },
+                ArgRole::Content | ArgRole::Control => continue,
+            };
+            args.insert(name.clone(), rule);
+        }
+        let step = Step {
+            id,
+            tool: request.tool.clone(),
+            args,
+            budget: AMENDMENT_BUDGET,
+        };
+        let mut candidate = task.plan.clone();
+        candidate.steps.push(step.clone());
+        if candidate.validate(&self.catalog).is_err() {
+            return Ok(None);
+        }
+        let logged = self.log(json!({
+            "event": "amended",
+            "task": request.task.as_str(),
+            "step": id,
+            "tool": request.tool.as_str(),
+            "tier": manifest.tier,
+            "budget": AMENDMENT_BUDGET,
+            "reason": "auto_tier",
+        }));
+        if !logged {
+            return Err(Reply::Failed(ToolFailure::Internal));
+        }
+        let Some(task) = self.tasks.get_mut(&request.task) else {
+            return Err(Reply::Halted);
+        };
+        task.plan = candidate;
+        Ok(Some(Request {
+            step: id,
+            ..request.clone()
+        }))
     }
 
     /// Applies a signed decision to a parked request.
@@ -778,9 +911,12 @@ impl Gate {
         t.pending.clear();
         t.denials.clear();
         t.status = Status::Running;
+        // The new instance is told about the planned steps only; amended tools are never advertised.
+        let mut brief_plan = t.plan.clone();
+        brief_plan.steps.truncate(t.planned_steps);
         let brief = TaskBrief {
             task: task.clone(),
-            plan: t.plan.clone(),
+            plan: brief_plan,
             refs: t.brief_refs.clone(),
         };
         Ok(Recovery {
