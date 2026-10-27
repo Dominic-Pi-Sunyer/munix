@@ -77,9 +77,12 @@ class PlanTest(unittest.TestCase):
         self.assertEqual((source["step"], source["field"]), (4, "paid_to"))
         self.assertNotIn("untraceable", source)
 
-    def test_a_value_only_in_a_file_comes_from_the_files_text(self):
-        plan, _, _ = plan_for("user_task_0")
-        self.assertEqual(step(plan, "send_money")["args"]["recipient"], {"from": ["step.1.content"], "min_trust": 60})
+    def test_a_value_only_in_a_file_is_untraceable_because_the_agent_never_sees_the_files_text(self):
+        # The file goes through a Reader, which returns no strings: its account number can't be a destination.
+        plan, traces, _ = plan_for("user_task_0")
+        self.assertEqual(step(plan, "send_money")["args"]["recipient"], {"from": ["prompt"]})
+        send = next(t for t in traces if t["tool"] == "send_money")
+        self.assertTrue(send["args"]["recipient"][0]["untraceable"])
 
     def test_value_found_nowhere_keeps_a_prompt_rule_and_is_flagged(self):
         calls = [("send_money", {"recipient": "ZZ00NOWHERE", "amount": 1.0, "subject": "x", "date": "2022-01-01"})]
