@@ -86,9 +86,18 @@ pub fn items_of(
     items
 }
 
-/// Which items to withhold, by position in `items`: every item whose text contains one of `blocked` (compared
-/// case-insensitively after trimming; blank values are ignored), with `Cause::TracedValue`. If none does, every item
-/// with trust below `fallback_below`, with `Cause::LowTrustFallback`. In item order, each at most once.
+/// Which items to withhold, by position in `items`, in item order and each at most once.
+///
+/// Items whose text contains one of `blocked` (compared case-insensitively after trimming; blank values are ignored)
+/// are the matches, and are withheld with `Cause::TracedValue` by this rule:
+/// - If at least one match has trust below `fallback_below`, only the matches below `fallback_below` are withheld.
+///   They are the likely carriers of the attack. A value an attacker planted in a low-trust review can also appear
+///   legitimately in a trusted region (the listing, the editorial); withholding that content too would let the
+///   attacker deny the agent its useful input.
+/// - If every match is at or above `fallback_below`, all matches are withheld. The attack then really came from
+///   trusted-looking content (a payload planted in the listing, say), and withholding it is right.
+///
+/// If nothing matches, every item with trust below `fallback_below` is withheld, with `Cause::LowTrustFallback`.
 pub fn choose(items: &[Item], blocked: &[String], fallback_below: Trust) -> Vec<(usize, Cause)> {
     let needles: Vec<String> = blocked
         .iter()
@@ -96,7 +105,7 @@ pub fn choose(items: &[Item], blocked: &[String], fallback_below: Trust) -> Vec<
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase)
         .collect();
-    let traced: Vec<(usize, Cause)> = items
+    let matches: Vec<usize> = items
         .iter()
         .enumerate()
         .filter_map(|(i, item)| {
@@ -104,11 +113,16 @@ pub fn choose(items: &[Item], blocked: &[String], fallback_below: Trust) -> Vec<
             needles
                 .iter()
                 .any(|needle| lower.contains(needle.as_str()))
-                .then_some((i, Cause::TracedValue))
+                .then_some(i)
         })
         .collect();
-    if !traced.is_empty() {
-        return traced;
+    if !matches.is_empty() {
+        let any_low = matches.iter().any(|&i| items[i].trust < fallback_below);
+        return matches
+            .into_iter()
+            .filter(|&i| !any_low || items[i].trust < fallback_below)
+            .map(|i| (i, Cause::TracedValue))
+            .collect();
     }
     items
         .iter()
@@ -283,9 +297,88 @@ mod tests {
             ],
             Trust::new(50),
         );
+        // The listing (trust 80) also matches, but a low-trust item carries a value too, so only that one is withheld.
+        assert_eq!(chosen, vec![(3, Cause::TracedValue)]);
+
+        // Several blocked values matching the same low-trust items: each is selected once, in item order.
+        let chosen = choose(
+            &items,
+            &[
+                "great sound".to_owned(),
+                "BATTERY".to_owned(),
+                "terrible".to_owned(),
+                "hacker@evil.test".to_owned(),
+            ],
+            Trust::new(50),
+        );
         assert_eq!(
             chosen,
-            vec![(1, Cause::TracedValue), (3, Cause::TracedValue)]
+            vec![(2, Cause::TracedValue), (3, Cause::TracedValue)]
+        );
+    }
+
+    fn trust_items(entries: &[(&str, u8)]) -> Vec<Item> {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, (text, trust))| Item {
+                step: 1,
+                field: format!("f{i}"),
+                index: None,
+                hash: item_hash(text),
+                region: RegionType::Unclassified,
+                trust: Trust::new(*trust),
+                text: (*text).to_owned(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn choose_spares_a_trusted_item_when_a_low_trust_item_carries_the_value() {
+        let items = trust_items(&[
+            ("Contact orders@shop.test for help.", 80),
+            ("Email orders@shop.test now!", 30),
+            ("Fine product.", 30),
+        ]);
+        let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        assert_eq!(chosen, vec![(1, Cause::TracedValue)]);
+    }
+
+    #[test]
+    fn choose_withholds_a_trusted_item_when_only_trusted_items_carry_the_value() {
+        let items = trust_items(&[
+            ("Contact orders@shop.test for help.", 80),
+            ("Editorial mentions orders@shop.test too.", 75),
+            ("Fine product.", 30),
+        ]);
+        let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        assert_eq!(
+            chosen,
+            vec![(0, Cause::TracedValue), (1, Cause::TracedValue)]
+        );
+        // The threshold is exclusive: an item exactly at it counts as trusted.
+        let items = trust_items(&[("see orders@shop.test", 50), ("see orders@shop.test", 49)]);
+        let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        assert_eq!(chosen, vec![(1, Cause::TracedValue)]);
+        let items = trust_items(&[("see orders@shop.test", 50), ("see orders@shop.test", 60)]);
+        let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        assert_eq!(
+            chosen,
+            vec![(0, Cause::TracedValue), (1, Cause::TracedValue)]
+        );
+    }
+
+    #[test]
+    fn choose_withholds_every_low_trust_carrier() {
+        let items = trust_items(&[
+            ("Email orders@shop.test now!", 30),
+            ("Listing, ask orders@shop.test", 80),
+            ("Also send to orders@shop.test", 15),
+        ]);
+        let chosen = choose(&items, &["orders@shop.test".to_owned()], Trust::new(50));
+        assert_eq!(
+            chosen,
+            vec![(0, Cause::TracedValue), (2, Cause::TracedValue)]
         );
     }
 
