@@ -6,7 +6,17 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~5:30 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~6:30 PM PT, by Claude (Opus 5.5)._
+
+- **Day 6 core built:**
+  - **Gate recovery** (`Gate::trip`, `Gate::recover`, quarantine by content hash, with blocked values that record
+    only what actually failed).
+  - **The watchdog** (`munix-runtime/src/watchdog.rs`).
+- **In progress (Gemini):** the `munix run` loop. It restarts a fresh sandboxed agent after a takeover or watchdog
+  trip, at most 2 times, and reports what was withheld.
+
+- **Finding from design:** after recovery the two honest reviews are still `ugc_review` at trust 15, so the email
+  still needs the user. Day 7 Readers keep trust high and remove that step.
 
 - **Supervisor done and pushed:** review follow-ups fixed (`edb0438`).
   - **Live `munix run` without `--plan` works:** Muse Spark wrote a 2-step plan; the recipient traced to

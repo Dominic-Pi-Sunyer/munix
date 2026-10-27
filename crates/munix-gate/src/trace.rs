@@ -216,7 +216,7 @@ pub fn raw_destinations(text: &str) -> u32 {
 }
 
 /// Extracts each raw destination token from `text` in order of appearance.
-fn raw_destination_tokens(text: &str) -> Vec<String> {
+pub(crate) fn raw_destination_tokens(text: &str) -> Vec<String> {
     let cleaned = strip_refs_and_normalize(text);
     let mut out = Vec::new();
     for token in cleaned.split(is_separator).filter(|t| !t.is_empty()) {

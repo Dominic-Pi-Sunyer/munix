@@ -15,6 +15,7 @@ use munix_core::prompt::PromptEnvelope;
 use munix_core::request::{Request, Violation};
 use munix_core::validate::{Scalar, is_email, is_url, is_valid};
 use munix_ledger::Ledger;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::facts::Origin;
@@ -156,6 +157,7 @@ struct Instance {
 
 struct Task {
     plan: Plan,
+    brief_refs: Vec<BriefRef>,
     instance: Instance,
     refs: RefTable,
     status: Status,
@@ -164,10 +166,73 @@ struct Task {
     /// Denials per step (any code, including malformed requests).
     denials: BTreeMap<u32, u32>,
     pending: BTreeMap<Digest, Pending>,
+    /// Delivered items across the task, for quarantine attribution.
+    items: Vec<crate::quarantine::Item>,
+    /// Digests of quarantined items. Only grows.
+    quarantine: BTreeSet<Digest>,
+    /// Everything withheld so far in this task, oldest first.
+    quarantined_notes: Vec<QuarantineNote>,
+    /// Values blocked by the latest takeover (cleared on a watchdog trip or recovery).
+    blocked: Vec<String>,
+    /// Recoveries already performed on this task.
+    recoveries: u32,
 }
 
 /// Denials on one step before the task pauses (design spec 7.4).
 pub const MAX_DENIALS_PER_STEP: u32 = 3;
+
+/// Recoveries per task before it pauses and the user is asked (design spec 6, "Recovery").
+pub const MAX_RECOVERIES: u32 = 2;
+
+/// Items below this trust are withheld when a takeover or a stall traces to nothing.
+pub const FALLBACK_QUARANTINE_BELOW: u8 = 50;
+
+/// Why the watchdog ended an agent instance (design spec 3, "Watchdog"). A trip is treated like a takeover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TripReason {
+    /// No tool or model call for too long.
+    Liveness,
+    /// The task ran past its deadline.
+    Deadline,
+    /// Too many model calls or tokens since the last completed step.
+    SpinBudget,
+}
+
+/// One withheld item, as recorded in the ledger and reported to the user: where it was and why, never its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QuarantineNote {
+    pub step: u32,
+    pub field: String,
+    pub index: Option<usize>,
+    pub region: RegionType,
+    pub trust: Trust,
+    pub cause: crate::quarantine::Cause,
+    pub hash: Digest,
+}
+
+/// What a recovery did. The runtime starts a fresh agent with `brief`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovery {
+    /// 1 for the first recovery of the task.
+    pub attempt: u32,
+    /// The items newly withheld by this recovery.
+    pub quarantined: Vec<QuarantineNote>,
+    pub brief: TaskBrief,
+}
+
+/// Why a task can't be recovered.
+#[derive(Debug, thiserror::Error)]
+pub enum RecoverError {
+    #[error("no such task")]
+    UnknownTask,
+    #[error("the task is not halted")]
+    NotHalted,
+    #[error("the task has used its recoveries; the user must decide")]
+    LimitReached,
+    #[error("ledger: {0}")]
+    Ledger(#[from] munix_ledger::LedgerError),
+}
 
 /// What the ruling and denial paths need to know about the request in hand.
 struct Case<'a> {
@@ -322,12 +387,13 @@ impl Gate {
         let brief = TaskBrief {
             task: envelope.task.clone(),
             plan: body.clone(),
-            refs: brief_refs,
+            refs: brief_refs.clone(),
         };
         self.tasks.insert(
             envelope.task.clone(),
             Task {
                 plan: body.clone(),
+                brief_refs,
                 instance: Instance {
                     context: ContextState::fresh(),
                     lowest: None,
@@ -337,6 +403,11 @@ impl Gate {
                 calls: BTreeMap::new(),
                 denials: BTreeMap::new(),
                 pending: BTreeMap::new(),
+                items: Vec::new(),
+                quarantine: BTreeSet::new(),
+                quarantined_notes: Vec::new(),
+                blocked: Vec::new(),
+                recoveries: 0,
             },
         );
         Ok(brief)
@@ -523,6 +594,128 @@ impl Gate {
                 }
             }
         }
+    }
+
+    /// Halts a running task because the watchdog tripped: refuses further requests, clears parked ones and writes
+    /// `watchdog_trip` (reason). Nothing traces from a trip, so the next recovery uses the low-trust fallback.
+    /// Returns `Reply::Halted`; an unknown or already halted task is also `Halted` and changes nothing.
+    pub fn trip(&mut self, task: &TaskId, reason: TripReason) -> Reply {
+        let Some(t) = self.tasks.get_mut(task) else {
+            return Reply::Halted;
+        };
+        if !matches!(t.status, Status::Running) {
+            return Reply::Halted;
+        }
+        t.status = Status::Halted;
+        t.pending.clear();
+        t.blocked.clear();
+        let _ = self.log(json!({
+            "event": "watchdog_trip",
+            "task": task.as_str(),
+            "reason": reason,
+        }));
+        Reply::Halted
+    }
+
+    /// Starts a fresh agent instance on the same signed plan after a takeover or a watchdog trip.
+    ///
+    /// - **When:** only for a `Halted` task (else `NotHalted`), at most `MAX_RECOVERIES` times. The next attempt
+    ///   pauses the task (`Status::Paused`, writes `paused`) and returns `LimitReached`.
+    /// - **Quarantine:** `quarantine::choose` over every item delivered so far in the task, with the values the
+    ///   takeover blocked and `FALLBACK_QUARANTINE_BELOW`. The chosen items' digests join the task's quarantine set,
+    ///   and every later tool output is passed through `quarantine::filter` before it is labeled. The set only
+    ///   grows, and outlives the instance.
+    /// - **The values the takeover blocked:** recorded when the takeover happened. They are the real values (refs
+    ///   resolved) of the destination arguments that failed their trace, plus the raw link and address tokens of
+    ///   content arguments. A watchdog trip records none.
+    /// - **Fresh instance:** a new `Instance` (context `ContextState::fresh()`, no lowest read), no parked requests,
+    ///   denial counts reset, status `Running`. Call counts and the ref table carry over.
+    /// - **Ledger:** writes `recovered` (attempt, the quarantine notes) before returning; if that write fails,
+    ///   nothing changes and the error is returned.
+    pub fn recover(&mut self, task: &TaskId) -> Result<Recovery, RecoverError> {
+        let t = self.tasks.get(task).ok_or(RecoverError::UnknownTask)?;
+        if !matches!(t.status, Status::Halted) {
+            return Err(RecoverError::NotHalted);
+        }
+        if t.recoveries >= MAX_RECOVERIES {
+            let recoveries = t.recoveries;
+            self.ledger.append(json!({
+                "event": "paused",
+                "task": task.as_str(),
+                "recoveries": recoveries,
+            }))?;
+            if let Some(t) = self.tasks.get_mut(task) {
+                t.status = Status::Paused;
+            }
+            return Err(RecoverError::LimitReached);
+        }
+
+        let unquarantined: Vec<crate::quarantine::Item> = t
+            .items
+            .iter()
+            .filter(|item| !t.quarantine.contains(&item.hash))
+            .cloned()
+            .collect();
+        let chosen = crate::quarantine::choose(
+            &unquarantined,
+            &t.blocked,
+            Trust::new(FALLBACK_QUARANTINE_BELOW),
+        );
+        let mut seen = t.quarantine.clone();
+        let mut quarantined = Vec::new();
+        for (idx, cause) in chosen {
+            if let Some(item) = unquarantined.get(idx)
+                && seen.insert(item.hash.clone())
+            {
+                quarantined.push(QuarantineNote {
+                    step: item.step,
+                    field: item.field.clone(),
+                    index: item.index,
+                    region: item.region,
+                    trust: item.trust,
+                    cause,
+                    hash: item.hash.clone(),
+                });
+            }
+        }
+        let attempt = t.recoveries.saturating_add(1);
+        self.ledger.append(json!({
+            "event": "recovered",
+            "task": task.as_str(),
+            "attempt": attempt,
+            "quarantined": quarantined,
+        }))?;
+
+        let t = self.tasks.get_mut(task).ok_or(RecoverError::UnknownTask)?;
+        t.recoveries = attempt;
+        t.quarantine = seen;
+        t.quarantined_notes.extend(quarantined.clone());
+        t.blocked.clear();
+        t.instance = Instance {
+            context: ContextState::fresh(),
+            lowest: None,
+        };
+        t.pending.clear();
+        t.denials.clear();
+        t.status = Status::Running;
+        let brief = TaskBrief {
+            task: task.clone(),
+            plan: t.plan.clone(),
+            refs: t.brief_refs.clone(),
+        };
+        Ok(Recovery {
+            attempt,
+            quarantined,
+            brief,
+        })
+    }
+
+    /// Everything withheld so far in a task, oldest first (for the final report).
+    pub fn quarantined(&self, task: &TaskId) -> Vec<QuarantineNote> {
+        self.tasks
+            .get(task)
+            .map(|t| t.quarantined_notes.clone())
+            .unwrap_or_default()
     }
 
     /// The context trust of a task's current agent instance.
@@ -734,9 +927,11 @@ impl Gate {
         // A deny stands whether or not the ledger write works.
         let _ = self.log_ruling(case, "deny", Some(code), reasons);
         if takeover_allowed && code.is_takeover() {
+            let blocked = self.blocked_values(case.request);
             if let Some(task) = self.tasks.get_mut(&case.request.task) {
                 task.status = Status::Halted;
                 task.pending.clear();
+                task.blocked = blocked;
             }
             let _ = self.log(request_event(
                 "takeover",
@@ -748,6 +943,79 @@ impl Gate {
         }
         self.count_denial(&case.request.task, case.request.step);
         Reply::Denied(code)
+    }
+
+    /// Extracts the values blocked by a takeover request: the real values (refs resolved) of destination
+    /// arguments whose trace failed the step's rule, plus untraced raw destination tokens and embedded values in
+    /// content arguments that failed `may_embed`.
+    fn blocked_values(&self, request: &Request) -> Vec<String> {
+        let Some(manifest) = self.catalog.get(&request.tool) else {
+            return Vec::new();
+        };
+        let Some(task) = self.tasks.get(&request.task) else {
+            return Vec::new();
+        };
+        let Some(step) = task
+            .plan
+            .steps
+            .iter()
+            .find(|s| s.id == request.step && s.tool == request.tool)
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (name, value) in &request.args {
+            let Some(spec) = manifest.args.get(name) else {
+                continue;
+            };
+            if !spec.ty.scalar.is_string_shaped() {
+                continue;
+            }
+            match spec.role {
+                ArgRole::Destination => {
+                    let rule = step.args.get(name);
+                    let from = rule.and_then(|r| r.from.as_deref());
+                    let min_trust = rule.and_then(|r| r.min_trust);
+                    let facts = trace_arg(spec, value, &task.refs, &[]);
+                    for (raw, traced) in value_strings(value).into_iter().zip(facts.values.iter()) {
+                        let ok = match from {
+                            Some(from) => traced.satisfies(from, min_trust),
+                            None => manifest.tier == 0,
+                        };
+                        if !ok && let Some(real) = resolve_text(raw, false, &task.refs) {
+                            out.push(real);
+                        }
+                    }
+                }
+                ArgRole::Content if spec.ty.scalar != Scalar::Ref => {
+                    let embed = step.args.get(name).and_then(|r| r.may_embed.as_ref());
+                    for text in value_strings(value) {
+                        for token in crate::trace::raw_destination_tokens(text) {
+                            if task.refs.find_value(&token).is_empty() {
+                                out.push(token);
+                            }
+                        }
+                        let facts =
+                            trace_arg(spec, &Value::String(text.to_owned()), &task.refs, &[]);
+                        for traced in &facts.embedded {
+                            let allowed = traced.matches.iter().any(|m| m.origin.is_clean_side())
+                                || embed.is_some_and(|e| traced.satisfies(&e.from, e.min_trust));
+                            if !allowed {
+                                for m in &traced.matches {
+                                    if let Some(id) = &m.id
+                                        && let Some(entry) = task.refs.get(id)
+                                    {
+                                        out.push(entry.value.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn finish_malformed(&mut self, case: &Case<'_>, violations: Vec<Violation>) -> Reply {
@@ -865,6 +1133,12 @@ impl Gate {
             }
         };
 
+        let (raw_output, removed) = match self.tasks.get(&request.task) {
+            Some(task) => crate::quarantine::filter(output, &task.quarantine),
+            None => return Reply::Halted,
+        };
+        let quarantined = removed.len();
+
         let source = if has_url_destination(&manifest) {
             let host = url_destination_host(&manifest, &resolved);
             Source::Web {
@@ -881,7 +1155,7 @@ impl Gate {
                 request.step,
                 &source,
                 &task.plan.reads,
-                output,
+                raw_output.clone(),
                 &mut task.refs,
             ),
             None => return Reply::Halted,
@@ -901,6 +1175,11 @@ impl Gate {
 
         // Trust drops whether or not the ledger write below works.
         if let Some(task) = self.tasks.get_mut(&request.task) {
+            task.items.extend(crate::quarantine::items_of(
+                request.step,
+                &raw_output,
+                &delivered.labels,
+            ));
             for (field, label) in &delivered.labels {
                 if task
                     .instance
@@ -930,6 +1209,7 @@ impl Gate {
                 "ok": true,
                 "ran": true,
                 "withheld": delivered.withheld,
+                "quarantined": quarantined,
                 "min_trust": delivered.min_trust.map(Trust::value),
             }),
         ));

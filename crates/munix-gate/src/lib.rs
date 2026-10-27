@@ -9,6 +9,7 @@ pub mod facts;
 pub mod gate;
 pub mod ingest;
 pub mod policy;
+pub mod quarantine;
 pub mod refs;
 pub mod tool;
 pub mod trace;
