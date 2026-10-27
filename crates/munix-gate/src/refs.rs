@@ -21,8 +21,9 @@ pub struct RefEntry {
 }
 
 impl RefEntry {
-    pub fn to_match(&self) -> Match {
+    pub fn to_match(&self, id: RefId) -> Match {
         Match {
+            id: Some(id),
             origin: self.origin.clone(),
             trust: self.label.trust,
             confidential: self.label.confidential,
@@ -283,7 +284,8 @@ mod tests {
             step(3, "body"),
             label(42, Confidential::Private),
         );
-        let m = t.get(&id).unwrap().to_match();
+        let m = t.get(&id).unwrap().to_match(id.clone());
+        assert_eq!(m.id, Some(id));
         assert_eq!(m.origin, step(3, "body"));
         assert_eq!(m.trust, Trust::new(42));
         assert_eq!(m.confidential, Confidential::Private);

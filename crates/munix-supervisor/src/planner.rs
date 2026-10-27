@@ -628,6 +628,48 @@ mod tests {
     }
 
     #[test]
+    fn from_step_rule_low_trust_is_raised_and_missing_min_trust_is_rejected() {
+        let mut draft = valid_demo_draft();
+        draft["steps"][1]["args"]["to"] = json!({"from": ["step.1"], "min_trust": 0});
+        let mock = Arc::new(MockAdapter::new(vec![Ok(draft)]));
+        let signing_key = key();
+        let planner = Planner::new(mock, signing_key.clone());
+        let signed = planner
+            .plan(
+                &prompt(),
+                &catalog(),
+                &stores(),
+                "P-to-floor".parse().unwrap(),
+            )
+            .unwrap();
+        let plan = signed.verify(&signing_key, Purpose::Plan).unwrap();
+        assert_eq!(
+            plan.steps[1].args["to"].min_trust,
+            Some(munix_core::label::Trust::new(MIN_STEP_TRUST))
+        );
+
+        let mut missing_min_trust = valid_demo_draft();
+        missing_min_trust["steps"][1]["args"]["to"] = json!({"from": ["step.1"]});
+        let mock = Arc::new(MockAdapter::new(vec![
+            Ok(missing_min_trust.clone()),
+            Ok(missing_min_trust),
+        ]));
+        let planner = Planner::new(mock, key());
+        let err = planner
+            .plan(
+                &prompt(),
+                &catalog(),
+                &stores(),
+                "P-no-floor".parse().unwrap(),
+            )
+            .unwrap_err();
+        let PlanError::NoPlan(msg) = err else {
+            panic!("expected NoPlan, got {err:?}");
+        };
+        assert!(msg.contains("a step source needs min_trust"), "{msg}");
+    }
+
+    #[test]
     fn good_draft_produces_signed_demo_plan() {
         let mock = Arc::new(MockAdapter::new(vec![Ok(valid_demo_draft())]));
         let signing_key = key();

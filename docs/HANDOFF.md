@@ -6,7 +6,11 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~4:30 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~5:30 PM PT, by Claude (Opus 5.5)._
+
+- **In progress (Gemini through `agy`):** fixing the seven review follow-ups in `crates/munix-gate` (facts, refs,
+  trace, gate, view, tests) and one planner test. Then a live `munix run` without `--plan`, then push `7d806c8`,
+  `f37ee74` and the fixes.
 
 - **Supervisor built (Day 5 code), not yet wired into `munix run`:**
   - **`Gate::review_view`** (Gemini G1) builds the redacted metadata view. Poison tests fill pages and requests with

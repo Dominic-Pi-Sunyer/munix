@@ -345,6 +345,7 @@ args:
 
     fn matched(origin: Origin, trust: u8, confidential: Confidential) -> Match {
         Match {
+            id: None,
             origin,
             trust: Trust::new(trust),
             confidential,

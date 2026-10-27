@@ -88,7 +88,7 @@ fn trace_value(raw: &str, refs: &RefTable, unknown_refs: &mut u32) -> Traced {
     {
         return match refs.get(&id) {
             Some(entry) => Traced {
-                matches: vec![entry.to_match()],
+                matches: vec![entry.to_match(id)],
             },
             None => {
                 *unknown_refs = unknown_refs.saturating_add(1);
@@ -100,7 +100,7 @@ fn trace_value(raw: &str, refs: &RefTable, unknown_refs: &mut u32) -> Traced {
         matches: refs
             .find_value(raw)
             .into_iter()
-            .map(|(_, entry)| entry.to_match())
+            .map(|(id, entry)| entry.to_match(id.clone()))
             .collect(),
     }
 }
@@ -112,7 +112,7 @@ fn note_embedded(id: &RefId, refs: &RefTable, facts: &mut ArgFacts) {
         Some(entry) => {
             facts.confidential = facts.confidential.max(entry.label.confidential);
             facts.embedded.push(Traced {
-                matches: vec![entry.to_match()],
+                matches: vec![entry.to_match(id.clone())],
             });
         }
         None => {
@@ -138,7 +138,7 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
             facts.embedded.push(Traced {
                 matches: entries
                     .into_iter()
-                    .map(|(_, entry)| entry.to_match())
+                    .map(|(id, entry)| entry.to_match(id.clone()))
                     .collect(),
             });
         }
@@ -661,6 +661,7 @@ mod tests {
         assert_eq!(facts.values.len(), 1);
         assert_eq!(facts.values[0].matches.len(), 1);
         let m = &facts.values[0].matches[0];
+        assert_eq!(m.id, Some(id));
         assert_eq!(m.origin, Origin::Prompt);
         assert_eq!(m.trust, Trust::new(90));
         assert_eq!(m.confidential, Confidential::Private);

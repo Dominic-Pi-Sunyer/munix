@@ -49,6 +49,8 @@ pub struct ValueView {
     /// The ref the agent used, or the ref a raw value matched; `None` when untraced.
     #[serde(rename = "ref")]
     pub ref_id: Option<RefId>,
+    /// The entry's scalar type name when traced; `None` when untraced.
+    pub ty: Option<String>,
     /// Every source the value traces to (one per match), or `[Untraced]`.
     pub sources: Vec<SourceView>,
 }
@@ -123,7 +125,7 @@ impl ReviewView {
             if !arg.values.is_empty() {
                 for (i, value) in arg.values.iter().enumerate() {
                     let slot = format!("{}[{i}]", arg.name);
-                    let ty = value_scalar_type(value.ref_id.as_ref(), base_ty);
+                    let ty = value.ty.as_deref().unwrap_or(base_ty);
                     lines.push(format!("ARG {slot:<5} {}", render_value(value, ty)));
                 }
             } else if let Some(chars) = arg.chars {
@@ -136,7 +138,7 @@ impl ReviewView {
                     confidential_name(arg.confidential),
                 ));
                 for embed in &arg.embeds {
-                    let ty = value_scalar_type(embed.ref_id.as_ref(), base_ty);
+                    let ty = embed.ty.as_deref().unwrap_or(base_ty);
                     lines.push(format!("          {}", render_value(embed, ty)));
                 }
             } else if !arg.embeds.is_empty() {
@@ -148,7 +150,7 @@ impl ReviewView {
                     confidential_name(arg.confidential),
                 ));
                 for embed in &arg.embeds {
-                    let ty = value_scalar_type(embed.ref_id.as_ref(), base_ty);
+                    let ty = embed.ty.as_deref().unwrap_or(base_ty);
                     lines.push(format!("          {}", render_value(embed, ty)));
                 }
             } else {
@@ -168,18 +170,6 @@ impl ReviewView {
         ));
         lines.push(format!("CHECKS    {}", self.checks.join(" · ")));
         lines.join("\n")
-    }
-}
-
-fn value_scalar_type<'a>(ref_id: Option<&RefId>, fallback: &'a str) -> &'a str {
-    if !matches!(fallback, "text" | "ref") {
-        return fallback;
-    }
-    match ref_id.map(RefId::as_str) {
-        Some(id) if id.starts_with("ref:u") => "url",
-        Some(id) if id.starts_with("ref:e") => "email",
-        Some(id) if id.starts_with("ref:p") => "phone",
-        _ => fallback,
     }
 }
 
@@ -318,6 +308,7 @@ mod tests {
                     role: ArgRole::Destination,
                     values: vec![ValueView {
                         ref_id: Some("ref:e2".parse().unwrap()),
+                        ty: Some("email".to_owned()),
                         sources: vec![SourceView::Store {
                             name: "contacts".to_owned(),
                             key: "boss".to_owned(),
@@ -338,6 +329,7 @@ mod tests {
                     chars: Some(412),
                     embeds: vec![ValueView {
                         ref_id: Some("ref:u3".parse().unwrap()),
+                        ty: Some("url".to_owned()),
                         sources: vec![SourceView::Step {
                             step: 1,
                             field: "links".to_owned(),

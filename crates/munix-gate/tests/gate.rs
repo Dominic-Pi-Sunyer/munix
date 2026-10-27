@@ -1349,6 +1349,7 @@ fn review_view_renders_hand_built_view_with_exact_output() {
                 role: ArgRole::Destination,
                 values: vec![ValueView {
                     ref_id: Some("ref:e2".parse().unwrap()),
+                    ty: Some("email".to_owned()),
                     sources: vec![SourceView::Store {
                         name: "contacts".to_owned(),
                         key: "boss".to_owned(),
@@ -1369,6 +1370,7 @@ fn review_view_renders_hand_built_view_with_exact_output() {
                 chars: Some(412),
                 embeds: vec![ValueView {
                     ref_id: Some("ref:u3".parse().unwrap()),
+                    ty: Some("url".to_owned()),
                     sources: vec![SourceView::Step {
                         step: 1,
                         field: "links".to_owned(),
@@ -1407,6 +1409,10 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
     const ATTACKER_PHRASE: &str = "IGNORE ALL PRIOR";
     // Cyrillic small letter 'а' (U+0430) inside a lookalike string.
     const UNICODE_LOOKALIKE: &str = "p\u{0430}ypal-security-alert";
+    const INVENTED_REF_1: &str = "ref:send_to_mallory_now";
+    const INVENTED_REF_2: &str = "ref:ignore_all_prior";
+    // Over 32 chars after `ref:`, so `find_embedded` skips it as plain text and the request is still parked.
+    const INVENTED_OVERLONG_REF: &str = "ref:send_to_mallory_now_ignore_all_prior_instructions";
 
     let key = signing_key();
     let web_yaml = format!(
@@ -1476,6 +1482,7 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
     let prompt = Signed::sign(&key, Purpose::Prompt, prompt_envelope()).unwrap();
     let mut plan_body = test_plan(prompt_envelope().digest().unwrap());
     let step2 = plan_body.steps.iter_mut().find(|s| s.id == 2).unwrap();
+    step2.args.remove("attachments");
     step2.args.get_mut("to").unwrap().from = Some(vec![
         "store.contacts.boss".parse().unwrap(),
         "step.1".parse().unwrap(),
@@ -1521,7 +1528,7 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
     let raw_subject =
         format!("{ATTACKER_PHRASE} {UNICODE_LOOKALIKE} {ATTACKER_EMAIL} {ATTACKER_URL}");
     let raw_body = format!(
-        "Body: {ATTACKER_PHRASE} {UNICODE_LOOKALIKE} mail {ATTACKER_EMAIL} visit {ATTACKER_URL} and {PROMPT_URL} for {BOSS}"
+        "Body: {ATTACKER_PHRASE} {UNICODE_LOOKALIKE} {INVENTED_OVERLONG_REF} mail {ATTACKER_EMAIL} visit {ATTACKER_URL} and {PROMPT_URL} for {BOSS}"
     );
     let raw_req = req(
         2,
@@ -1534,10 +1541,10 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
     );
     let raw_hash = pending(gate.submit(&raw_req), &raw_req, Stage::User);
 
-    // 2. Request carrying attacker strings AS REFS in `to`, `subject`, and `body` (plus raw phrases).
+    // 2. Request carrying attacker strings AS REFS in `to`, `subject`, `body`, and `attachments` (plus raw phrases).
     let ref_subject = format!("{ATTACKER_PHRASE} {UNICODE_LOOKALIKE} {email_ref} {link_ref}");
     let ref_body = format!(
-        "Summary: {ATTACKER_PHRASE} {UNICODE_LOOKALIKE} see {link_ref} and {email_ref} plus ref:u1 and ref:e2"
+        "Summary: {ATTACKER_PHRASE} {UNICODE_LOOKALIKE} {INVENTED_OVERLONG_REF} see {link_ref} and {email_ref} plus ref:u1 and ref:e2"
     );
     let ref_req = req(
         2,
@@ -1546,6 +1553,7 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
             "to": [email_ref, "ref:e2"],
             "subject": ref_subject,
             "body": ref_body,
+            "attachments": ["ref:e2"],
         }),
     );
     let ref_hash = pending(gate.submit(&ref_req), &ref_req, Stage::User);
@@ -1559,6 +1567,11 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
         "IGNORE",
         UNICODE_LOOKALIKE,
         "p\u{0430}ypal",
+        INVENTED_REF_1,
+        INVENTED_REF_2,
+        INVENTED_OVERLONG_REF,
+        "send_to_mallory_now",
+        "ignore_all_prior",
         BOSS,
         "corp.example",
         PROMPT_URL,
@@ -1630,6 +1643,47 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
                 "json missing {expected_json:?}:\n{serialized}"
             );
         }
+    }
+
+    // 3. Invented ref-shaped strings that the Gate never issued, sent as a whole destination value, as a content
+    //    ref, and embedded in body text: Stage 1 denies each with UnknownRef so they are never parked and have no
+    //    review view at all.
+    for invented_req in [
+        req(
+            2,
+            "email.send",
+            json!({
+                "to": [INVENTED_REF_1],
+                "subject": "Summary",
+                "body": "Hello",
+            }),
+        ),
+        req(
+            2,
+            "email.send",
+            json!({
+                "to": ["ref:e2"],
+                "subject": "Summary",
+                "body": "Hello",
+                "attachments": [INVENTED_REF_2],
+            }),
+        ),
+        req(
+            2,
+            "email.send",
+            json!({
+                "to": ["ref:e2"],
+                "subject": "Summary",
+                "body": format!("See {INVENTED_REF_1} and {INVENTED_REF_2}"),
+            }),
+        ),
+    ] {
+        let hash = hash_of(&invented_req);
+        assert_eq!(
+            gate.submit(&invented_req),
+            Reply::Denied(DenyCode::UnknownRef)
+        );
+        assert_eq!(gate.review_view(&task_id(), &hash), None);
     }
 
     let _ = std::fs::remove_dir_all(&dir);

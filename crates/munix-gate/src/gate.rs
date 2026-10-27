@@ -146,9 +146,17 @@ struct Pending {
     reasons: Vec<String>,
 }
 
+/// State bound to one Worker instance. A fresh Worker instance (recovery, rotation) replaces the whole
+/// `Instance`, and only [`ContextState::fresh`] starts one (invariant 4).
+struct Instance {
+    context: ContextState,
+    /// The lowest-trust field delivered to this agent instance, as (step, field, label), for the Supervisor's view.
+    lowest: Option<(u32, String, Label)>,
+}
+
 struct Task {
     plan: Plan,
-    context: ContextState,
+    instance: Instance,
     refs: RefTable,
     status: Status,
     /// Executed calls per step.
@@ -156,8 +164,6 @@ struct Task {
     /// Denials per step (any code, including malformed requests).
     denials: BTreeMap<u32, u32>,
     pending: BTreeMap<Digest, Pending>,
-    /// The lowest-trust field delivered to this agent instance, as (step, field, label), for the Supervisor's view.
-    lowest: Option<(u32, String, Label)>,
 }
 
 /// Denials on one step before the task pauses (design spec 7.4).
@@ -322,13 +328,15 @@ impl Gate {
             envelope.task.clone(),
             Task {
                 plan: body.clone(),
-                context: ContextState::fresh(),
+                instance: Instance {
+                    context: ContextState::fresh(),
+                    lowest: None,
+                },
                 refs,
                 status: Status::Running,
                 calls: BTreeMap::new(),
                 denials: BTreeMap::new(),
                 pending: BTreeMap::new(),
-                lowest: None,
             },
         );
         Ok(brief)
@@ -369,7 +377,7 @@ impl Gate {
             (
                 matches!(t.status, Status::Running),
                 t.plan.plan == request.plan,
-                t.context.band(),
+                t.instance.context.band(),
             )
         });
         let Some((true, plan_ok, band)) = state else {
@@ -520,7 +528,7 @@ impl Gate {
 
     /// The context trust of a task's current agent instance.
     pub fn context_trust(&self, task: &TaskId) -> Option<Trust> {
-        self.tasks.get(task).map(|t| t.context.trust())
+        self.tasks.get(task).map(|t| t.instance.context.trust())
     }
 
     /// The opaque numbers of the hosts seen so far.
@@ -576,7 +584,8 @@ impl Gate {
         // The lowest-trust field delivered to this agent instance (text fields never become refs, so the ref table
         // alone can't say).
         let lowest_read =
-            t.lowest
+            t.instance
+                .lowest
                 .as_ref()
                 .map(|(step, field, label)| crate::view::SourceView::Step {
                     step: *step,
@@ -595,7 +604,7 @@ impl Gate {
             steps_in_plan: t.plan.steps.len(),
             calls_made: t.calls.get(&parked.request.step).copied().unwrap_or(0),
             budget: step.budget,
-            context_trust: t.context.trust(),
+            context_trust: t.instance.context.trust(),
             band: parked.band,
             lowest_read,
             args,
@@ -681,7 +690,7 @@ impl Gate {
             tool: &request.tool,
             manifest,
             calls_so_far: task.calls.get(&request.step).copied().unwrap_or(0),
-            band: task.context.band(),
+            band: task.instance.context.band(),
             args: &args,
         })
     }
@@ -787,7 +796,7 @@ impl Gate {
             return Err("plan");
         }
         let parked = task.pending.get(&body.request_hash).ok_or("no_pending")?;
-        if body.band != parked.band || task.context.band() != parked.band {
+        if body.band != parked.band || task.instance.context.band() != parked.band {
             return Err("stale_band");
         }
         let stage_ok = body.stage == parked.needs
@@ -895,20 +904,22 @@ impl Gate {
         if let Some(task) = self.tasks.get_mut(&request.task) {
             for (field, label) in &delivered.labels {
                 if task
+                    .instance
                     .lowest
                     .as_ref()
                     .is_none_or(|(_, _, low)| label.trust < low.trust)
                 {
-                    task.lowest = Some((request.step, field.clone(), label.clone()));
+                    task.instance.lowest = Some((request.step, field.clone(), label.clone()));
                 }
             }
         }
         let lowered = match (self.tasks.get_mut(&request.task), delivered.min_trust) {
             (Some(task), Some(min)) => {
-                let from = task.context.trust();
-                task.context
+                let from = task.instance.context.trust();
+                task.instance
+                    .context
                     .lower_to(min)
-                    .then(|| (from, task.context.trust()))
+                    .then(|| (from, task.instance.context.trust()))
             }
             _ => None,
         };
@@ -1194,7 +1205,33 @@ fn entry_source_view(entry: &crate::refs::RefEntry) -> crate::view::SourceView {
 fn untraced_value_view() -> crate::view::ValueView {
     crate::view::ValueView {
         ref_id: None,
+        ty: None,
         sources: vec![crate::view::SourceView::Untraced],
+    }
+}
+
+fn traced_value_view(traced: &crate::facts::Traced, refs: &RefTable) -> crate::view::ValueView {
+    let mut sources = Vec::with_capacity(traced.matches.len());
+    let mut first: Option<(RefId, String)> = None;
+    for m in &traced.matches {
+        let Some(id) = &m.id else {
+            continue;
+        };
+        let Some(entry) = refs.get(id) else {
+            continue;
+        };
+        if first.is_none() {
+            first = Some((id.clone(), entry.scalar.name().to_owned()));
+        }
+        sources.push(entry_source_view(entry));
+    }
+    match first {
+        Some((ref_id, ty)) => crate::view::ValueView {
+            ref_id: Some(ref_id),
+            ty: Some(ty),
+            sources,
+        },
+        None => untraced_value_view(),
     }
 }
 
@@ -1232,13 +1269,18 @@ fn review_arg(
     let facts = trace_arg(spec, value, refs, credentials);
     match role {
         ArgRole::Destination | ArgRole::Selector => {
-            let mut values = Vec::new();
-            let mut confidential = Confidential::Public;
-            for raw in value_strings(value) {
-                let (view, conf) = review_value(raw, refs);
-                confidential = confidential.max(conf);
-                values.push(view);
-            }
+            let confidential = facts
+                .values
+                .iter()
+                .flat_map(|t| &t.matches)
+                .map(|m| m.confidential)
+                .max()
+                .unwrap_or(Confidential::Public);
+            let values = facts
+                .values
+                .iter()
+                .map(|t| traced_value_view(t, refs))
+                .collect();
             crate::view::ArgView {
                 name: name.to_owned(),
                 ty,
@@ -1251,47 +1293,20 @@ fn review_arg(
                 control: false,
             }
         }
-        ArgRole::Content if spec.ty.scalar == Scalar::Ref => {
-            let embeds = value_strings(value)
-                .into_iter()
-                .map(|raw| match raw.parse::<RefId>() {
-                    Ok(id) => match refs.get(&id) {
-                        Some(entry) => crate::view::ValueView {
-                            ref_id: Some(id),
-                            sources: vec![entry_source_view(entry)],
-                        },
-                        None => untraced_value_view(),
-                    },
-                    Err(_) => untraced_value_view(),
-                })
+        ArgRole::Content => {
+            let chars = (spec.ty.scalar != Scalar::Ref)
+                .then(|| value_strings(value).iter().map(|s| s.chars().count()).sum());
+            let embeds = facts
+                .embedded
+                .iter()
+                .map(|t| traced_value_view(t, refs))
                 .collect();
             crate::view::ArgView {
                 name: name.to_owned(),
                 ty,
                 role,
                 values: Vec::new(),
-                chars: None,
-                embeds,
-                raw_destinations: 0,
-                confidential: facts.confidential,
-                control: false,
-            }
-        }
-        ArgRole::Content => {
-            let texts = value_strings(value);
-            let chars: usize = texts.iter().map(|s| s.chars().count()).sum();
-            let mut embeds = Vec::new();
-            for text in texts {
-                let single = Value::String(text.to_owned());
-                let item_facts = trace_arg(spec, &single, refs, &[]);
-                embeds.extend(review_text_embeds(text, &item_facts.embedded, refs));
-            }
-            crate::view::ArgView {
-                name: name.to_owned(),
-                ty,
-                role,
-                values: Vec::new(),
-                chars: Some(chars),
+                chars,
                 embeds,
                 raw_destinations: facts.raw_destinations,
                 confidential: facts.confidential,
@@ -1302,144 +1317,100 @@ fn review_arg(
     }
 }
 
-fn review_value(raw: &str, refs: &RefTable) -> (crate::view::ValueView, Confidential) {
-    if raw.starts_with("ref:")
-        && let Ok(id) = raw.parse::<RefId>()
-    {
-        return match refs.get(&id) {
-            Some(entry) => (
-                crate::view::ValueView {
-                    ref_id: Some(id),
-                    sources: vec![entry_source_view(entry)],
-                },
-                entry.label.confidential,
-            ),
-            None => (untraced_value_view(), Confidential::Public),
-        };
-    }
-    let matches = refs.find_value(raw);
-    if matches.is_empty() {
-        return (untraced_value_view(), Confidential::Public);
-    }
-    let ref_id = Some(matches[0].0.clone());
-    let mut confidential = Confidential::Public;
-    let mut sources = Vec::with_capacity(matches.len());
-    for (_, entry) in matches {
-        confidential = confidential.max(entry.label.confidential);
-        sources.push(entry_source_view(entry));
-    }
-    (crate::view::ValueView { ref_id, sources }, confidential)
-}
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-fn review_text_embeds(
-    text: &str,
-    traced_embeds: &[crate::facts::Traced],
-    refs: &RefTable,
-) -> Vec<crate::view::ValueView> {
-    let embedded_ids: Vec<(usize, usize, RefId)> = find_embedded(text);
-    let mut out = Vec::with_capacity(traced_embeds.len());
-    for (_, _, id) in &embedded_ids {
-        let view = match refs.get(id) {
-            Some(entry) => crate::view::ValueView {
-                ref_id: Some(id.clone()),
-                sources: vec![entry_source_view(entry)],
+    use super::*;
+    use crate::view::{ReviewView, SourceView};
+    use munix_core::manifest::{ArgSpec, ArgType};
+
+    fn spec(scalar: Scalar, list: bool, role: ArgRole) -> ArgSpec {
+        ArgSpec {
+            ty: ArgType { scalar, list },
+            role,
+            optional: false,
+            max: None,
+            max_len: None,
+            values: Vec::new(),
+            single_line: false,
+        }
+    }
+
+    #[test]
+    fn review_arg_never_leaks_invented_refs_in_destination_content_ref_or_body() {
+        let mut refs = RefTable::new();
+        let boss = refs.issue(
+            "boss@corp.example",
+            Scalar::Email,
+            Origin::Store {
+                name: "contacts".to_owned(),
+                key: "boss".to_owned(),
             },
-            None => untraced_value_view(),
+            user_label(Source::Store, Confidential::Private),
+        );
+        assert_eq!(boss.as_str(), "ref:e1");
+
+        let to_view = review_arg(
+            "to",
+            &spec(Scalar::Email, true, ArgRole::Destination),
+            &json!(["ref:send_to_mallory_now", boss.as_str()]),
+            &refs,
+            &[],
+        );
+        let attachments_view = review_arg(
+            "attachments",
+            &spec(Scalar::Ref, true, ArgRole::Content),
+            &json!(["ref:ignore_all_prior", boss.as_str()]),
+            &refs,
+            &[],
+        );
+        let body_view = review_arg(
+            "body",
+            &spec(Scalar::Text, false, ArgRole::Content),
+            &json!(format!(
+                "Summary with ref:send_to_mallory_now and ref:ignore_all_prior for {boss}"
+            )),
+            &refs,
+            &[],
+        );
+
+        let view = ReviewView {
+            tool: "email.send".parse().unwrap(),
+            tier: 3,
+            step: 2,
+            steps_in_plan: 2,
+            calls_made: 0,
+            budget: 1,
+            context_trust: Trust::new(10),
+            band: Band::Lockdown,
+            lowest_read: None,
+            args: vec![attachments_view, body_view, to_view],
+            checks: vec!["plan.step2".to_owned()],
         };
-        out.push(view);
-    }
-    let normalized = normalize_without_refs(text, &embedded_ids);
-    let mut search_from = 0usize;
-    for traced in traced_embeds.iter().skip(embedded_ids.len()) {
-        out.push(review_traced_embed(
-            traced,
-            &normalized,
-            &mut search_from,
-            refs,
-        ));
-    }
-    out
-}
-
-fn normalize_without_refs(text: &str, embedded_ids: &[(usize, usize, RefId)]) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for &(start, end, _) in embedded_ids {
-        if let Some(part) = text.get(last..start) {
-            out.extend(part.chars().map(|c| match c {
-                '\u{3002}' | '\u{FF0E}' | '\u{FF61}' => '.',
-                other => other,
-            }));
+        let rendered = view.render();
+        let serialized = serde_json::to_string(&view).unwrap();
+        for forbidden in [
+            "ref:send_to_mallory_now",
+            "ref:ignore_all_prior",
+            "send_to_mallory_now",
+            "ignore_all_prior",
+            "mallory",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "render() leaked {forbidden:?}:\n{rendered}"
+            );
+            assert!(
+                !serialized.contains(forbidden),
+                "json leaked {forbidden:?}:\n{serialized}"
+            );
         }
-        out.push(' ');
-        last = end;
+        assert_eq!(view.args[0].embeds[0].ref_id, None);
+        assert_eq!(view.args[0].embeds[0].ty, None);
+        assert_eq!(view.args[0].embeds[0].sources, vec![SourceView::Untraced]);
+        assert_eq!(view.args[1].embeds[0].ref_id, None);
+        assert_eq!(view.args[1].embeds[1].ref_id, None);
+        assert_eq!(view.args[2].values[0].ref_id, None);
     }
-    if let Some(part) = text.get(last..) {
-        out.extend(part.chars().map(|c| match c {
-            '\u{3002}' | '\u{FF0E}' | '\u{FF61}' => '.',
-            other => other,
-        }));
-    }
-    out
-}
-
-fn review_traced_embed(
-    traced: &crate::facts::Traced,
-    normalized: &str,
-    search_from: &mut usize,
-    refs: &RefTable,
-) -> crate::view::ValueView {
-    if traced.matches.is_empty() {
-        return untraced_value_view();
-    }
-    let matches_traced = |val: &str| {
-        let entries = refs.find_value(val);
-        entries.len() == traced.matches.len()
-            && entries
-                .iter()
-                .zip(&traced.matches)
-                .all(|((_, e), m)| e.to_match() == *m)
-    };
-    let tail = normalized.get(*search_from..).unwrap_or("");
-    let mut best: Option<(usize, &str)> = None;
-    for (_, entry) in refs.iter() {
-        let val = entry.value.as_str();
-        if !matches_traced(val) {
-            continue;
-        }
-        if let Some(pos) = tail.find(val) {
-            let replace = match best {
-                None => true,
-                Some((best_pos, best_val)) => {
-                    pos < best_pos || (pos == best_pos && val.len() > best_val.len())
-                }
-            };
-            if replace {
-                best = Some((pos, val));
-            }
-        }
-    }
-    let matched_val = match best {
-        Some((pos, val)) => {
-            *search_from = search_from.saturating_add(pos).saturating_add(val.len());
-            Some(val)
-        }
-        None => refs
-            .iter()
-            .map(|(_, e)| e.value.as_str())
-            .find(|val| matches_traced(val)),
-    };
-    if let Some(val) = matched_val {
-        let entries = refs.find_value(val);
-        if let Some((first_id, _)) = entries.first() {
-            return crate::view::ValueView {
-                ref_id: Some((*first_id).clone()),
-                sources: entries
-                    .into_iter()
-                    .map(|(_, e)| entry_source_view(e))
-                    .collect(),
-            };
-        }
-    }
-    untraced_value_view()
 }

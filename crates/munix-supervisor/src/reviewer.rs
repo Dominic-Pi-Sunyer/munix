@@ -339,6 +339,7 @@ mod tests {
                     role: ArgRole::Destination,
                     values: vec![ValueView {
                         ref_id: Some("ref:e2".parse().unwrap()),
+                        ty: Some("email".to_owned()),
                         sources: vec![SourceView::Store {
                             name: "contacts".to_owned(),
                             key: "boss".to_owned(),

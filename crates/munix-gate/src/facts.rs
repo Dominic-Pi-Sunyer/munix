@@ -1,6 +1,7 @@
 //! What the Gate knows about where a value came from. The tracer produces these facts and the policy engine
 //! rules on them, so the two never depend on each other.
 
+use munix_core::ids::RefId;
 use munix_core::label::{Confidential, Trust};
 use munix_core::plan::SourcePath;
 
@@ -50,6 +51,8 @@ impl Origin {
 /// One place a value was found, with the label that place carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
+    /// The ref the match came from (`None` when a test builds a `Match` without a ref).
+    pub id: Option<RefId>,
     pub origin: Origin,
     pub trust: Trust,
     pub confidential: Confidential,
