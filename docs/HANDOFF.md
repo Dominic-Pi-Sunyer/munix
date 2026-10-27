@@ -8,19 +8,13 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
-- **Full banking run under Munix, both modes (owner approved, $15 cap): $12.21 spent.**
-  - **Results:**
-
-    | | Bare | Munix, no human | Munix, simulated user |
-    | :-- | --: | --: | --: |
-    | Utility, no attack | 15/16 | 7/16 | 8/16 |
-    | Utility under attack | 118/144 | 63/144 | 83/135 |
-    | ASR | 0/144 | 0/144 | 0/135 |
-
-  - **Left to do:** the simulated user's last 9 cases (`user_task_15`). They crashed when the planner wrote an invalid
-    plan, and need a credit balance set first. Then write the results up in `docs/redteam/agentdojo.md`.
-  - **Utility loss is the live planner.** Its plans let the agent read third-party transaction text (`reads`), so
-    trust drops to Lockdown. It also leaves steps out, so a needed `read_file` is off-plan.
+- **Full banking run under Munix, both modes: done, $13.06.** Write-up: `docs/redteam/agentdojo.md`.
+  - **ASR:** 0/144 for bare, 0/144 with no human, 0/144 with the simulated user.
+  - **Utility under attack:** bare 81.9%, no human 43.8%, simulated user 57.6%.
+  - **Where the losses come from (no human):** 33 need a person (Lockdown after reading third-party text), 21 are
+    the agent's own choices, and 9 are off-plan halts.
+  - **Next, the owner's call:** the utility levers. Typed Readers for low-trust text; off-plan tier-0 reads denied
+    without halting the task; planner least-reads.
 - **Credit floor, `scripts/credit.py`:** a hard stop for every paid runner (`run.py`, `adaptive.py`, `smoke.py`,
   `redteam_bare.py`). It keeps $25 for the demo.
   - It is checked before every case and charged as the run spends. Parallel runs share it under a lock.
