@@ -228,9 +228,12 @@ class MunixSession:
         self.tasks = 0
         self.client: BridgeClient | None = None
         self._record: dict | None = None
+        # True when Munix could not start the current task (see MunixStart): no tool may run.
+        self.refused = False
 
     def start_task(self, prompt: str) -> None:
         self.end_task()
+        self.refused = False
         self.tasks += 1
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         ledger = self.ledger_dir / f"{self.tag}-{self.tasks:04d}-{digest}.jsonl"
@@ -298,7 +301,12 @@ class MunixStart(BasePipelineElement):
         messages: Sequence[ChatMessage] = [],
         extra_args: dict = {},
     ) -> tuple[str, FunctionsRuntime, Env, Sequence[ChatMessage], dict]:
-        self.session.start_task(query)
+        try:
+            self.session.start_task(query)
+        except BridgeError:
+            # Munix could not start the task: the planner wrote no valid plan, or the bridge failed. The error is in
+            # SUMMARIES, and the task runs with every tool call refused, as `munix run` would refuse it.
+            self.session.refused = True
         return query, runtime, env, messages, extra_args
 
 
@@ -364,6 +372,9 @@ class MunixToolsExecutor(ToolsExecutor):
                 if isinstance(arg_v, str) and is_string_list(arg_v):
                     tool_call.args[arg_k] = literal_eval(arg_v)
 
+            if getattr(self.session, "refused", False):  # oracle.py passes a bare namespace
+                tool_call_results.append(failure(tool_call, "denied: task refused"))
+                continue
             client = self.session.client
             if client is None:
                 raise BridgeError("no bridge is running: MunixStart must come before MunixToolsExecutor")

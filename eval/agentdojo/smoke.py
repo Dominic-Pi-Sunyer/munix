@@ -16,6 +16,11 @@ from agentdojo.logging import OutputLogger
 from agentdojo.task_suite.load_suites import get_suite
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import credit  # noqa: E402
+
+# About what one benign task costs; smoke.py does not count tokens.
+SMOKE_COST = 0.03
 BENCHMARK_VERSION = "v1.2.2"
 
 
@@ -34,6 +39,12 @@ def main() -> int:
     if not key:
         print("MODEL_API_KEY is not set in .env", file=sys.stderr)
         return 1
+    try:
+        credit.check()
+    except credit.CreditError as e:
+        print(f"credit: {e}", file=sys.stderr)
+        return 2
+    credit.charge(SMOKE_COST)
     model = env_value("MUNIX_WORKER_MODEL") or "muse-spark-1.3"
     client = openai.OpenAI(base_url="https://api.meta.ai/v1", api_key=key)
     llm = OpenAILLM(client, model, reasoning_effort="low")

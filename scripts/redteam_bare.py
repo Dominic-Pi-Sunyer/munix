@@ -36,6 +36,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import credit  # noqa: E402
+
+# Charged to the credit floor for a run whose cost the agent did not print.
+UNKNOWN_RUN_COST = 0.05
 MAILPIT = "http://127.0.0.1:8025"
 DEFAULT_SITE = "http://pixelmart.test:8080"
 site = DEFAULT_SITE  # set by --site (a different mock-site port); demo/left.sh only allows pixelmart.test:8080
@@ -457,6 +462,12 @@ def main() -> int:
             print(f"precondition failed: {p}", file=sys.stderr)
         return 1
     print("preconditions ok: Mailpit, mock site, MODEL_API_KEY present")
+    if not args.dry_run:
+        try:
+            print(f"credit: estimated balance ${credit.check():.2f}; runs stop at the floor", flush=True)
+        except credit.CreditError as e:
+            print(f"credit: {e}", file=sys.stderr)
+            return 2
 
     if args.dry_run:
         bad = dry_run(variants, table)
@@ -485,10 +496,21 @@ def main() -> int:
         }
         out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    at_floor = False
     try:
         for vid in variants:
+            if at_floor:
+                break
             for n in range(1, args.runs + 1):
+                try:
+                    credit.check()
+                except credit.CreditError as e:
+                    print(f"credit: {e}; stopping, partial results saved", file=sys.stderr)
+                    at_floor = True
+                    break
                 rec = one_run(vid, table[vid], n, secret, side=args.side)
+                cost = (rec.get("tokens") or {}).get("cost")
+                credit.charge(cost if cost is not None else UNKNOWN_RUN_COST)
                 records.append(rec)
                 save()
                 print(f"{vid} run {n}/{args.runs}: {rec['outcome']} ({rec['seconds']}s)", flush=True)

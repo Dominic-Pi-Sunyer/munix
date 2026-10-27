@@ -22,6 +22,19 @@ from agentdojo.task_suite.load_suites import get_suite  # noqa: E402
 from agentdojo.types import text_content_block_from_string  # noqa: E402
 
 import adaptive  # noqa: E402
+import credit  # noqa: E402
+
+_CREDIT = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    # Paid code paths charge the shared credit floor; point them at a scratch file with plenty of room.
+    credit.FILE = Path(_CREDIT.name) / ".credit.json"
+    credit.set_balance(1000.0, 25.0)
+
+
+def tearDownModule():
+    _CREDIT.cleanup()
 from run import Usage  # noqa: E402
 
 SUITE = get_suite("v1.2.2", "banking")
@@ -249,6 +262,18 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(saved["totals"]["attacker_usage"]["prompt_tokens"], 200)
         self.assertEqual(saved["totals"]["target_usage"]["prompt_tokens"], 2000)
         self.assertGreater(saved["pairs"][0]["rounds"][0]["cost_usd"], 0)
+
+    def test_credit_floor_stops_the_search_and_charges_what_it_spent(self):
+        saved = credit.FILE
+        credit.FILE = Path(tempfile.mkdtemp()) / ".credit.json"
+        self.addCleanup(setattr, credit, "FILE", saved)
+        credit.set_balance(25.0015, 25.0)
+        doc, *_ = run_search([reply("a"), reply("b"), reply("c")], rounds=3, budget=100.0, prices=(1.0, 1.0))
+        self.assertEqual(doc["stopped"], "credit_floor")
+        self.assertEqual(doc["pairs"][0]["status"], "credit_stopped")
+        self.assertLess(len(doc["pairs"][0]["rounds"]), 3)
+        state = credit._read(credit.FILE)
+        self.assertAlmostEqual(state["spent_since_usd"], doc["totals"]["estimated_cost_usd"], places=4)
 
     def test_budget_stop_marks_remaining_pairs_not_run(self):
         client = FakeAttackerClient([reply("a")] * 5)

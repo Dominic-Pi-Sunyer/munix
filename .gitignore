@@ -8,3 +8,5 @@ __pycache__/
 .env.*
 !.env.example
 *.ledger.jsonl
+# The Meta credit floor's local state (scripts/credit.py)
+.credit.json*

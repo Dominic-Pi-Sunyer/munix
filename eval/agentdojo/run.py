@@ -8,7 +8,8 @@
 
 Each run writes `results/<mode>-<suite>-<phase>[-<shard>].json` (scores, token usage and an estimated cost, no
 transcripts). Against the Meta API `--budget USD` is required: the run stops before the next case once the agent's and
-Munix's Supervisor's estimated spend reaches it (it can go over by at most the one case that crosses it). Transcripts go to `runs/` (gitignored). Reads MODEL_API_KEY from the repo's .env and never prints it.
+Munix's Supervisor's estimated spend reaches it (it can go over by at most the one case that crosses it). Every paid
+run also charges `scripts/credit.py`'s shared balance and stops at its floor ($25 by default), kept for the demo. Transcripts go to `runs/` (gitignored). Reads MODEL_API_KEY from the repo's .env and never prints it.
 `--mode munix` (banking only) sends every tool call through a Munix Gate via `munix bridge`; see BRIDGE.md.
 Spends Meta credit; the lead runs it.
 """
@@ -18,12 +19,14 @@ import contextlib
 import json
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:  # `python -I` does not put the script's directory on the path
-    sys.path.insert(0, str(HERE))
+for _path in (HERE, HERE.parents[1] / "scripts"):  # `python -I` does not put the script's directory on the path
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 import openai
 from agentdojo.agent_pipeline import AgentPipeline, InitQuery, OpenAILLM, SystemMessage, ToolsExecutionLoop, ToolsExecutor
@@ -33,6 +36,7 @@ from agentdojo.benchmark import run_task_with_injection_tasks, run_task_without_
 from agentdojo.logging import OutputLogger
 from agentdojo.task_suite.load_suites import get_suite
 
+import credit
 import munix_executor
 
 ROOT = HERE.parents[1]
@@ -97,12 +101,13 @@ def supervisor_cost(summaries: list[dict], input_per_m: float, output_per_m: flo
     return total
 
 
-def run_cases(cases: list, run_one, spent, budget: float | None) -> str | None:
-    """Runs `run_one(case)` for each case in order. Before each one, stops if `spent()` has reached `budget`, and
-    returns "budget"; returns None when every case ran."""
+def run_cases(cases: list, run_one, should_stop) -> str | None:
+    """Runs `run_one(case)` for each case in order. Before each one, asks `should_stop()`: a reason ("budget",
+    "credit_floor") stops the run and is returned. Returns None when every case ran."""
     for case in cases:
-        if budget is not None and spent() >= budget:
-            return "budget"
+        reason = should_stop()
+        if reason:
+            return reason
         run_one(case)
     return None
 
@@ -171,10 +176,19 @@ def cmd_run(args) -> int:
     if args.simulated_user and args.mode != "munix":
         print("--simulated-user only applies to --mode munix", file=sys.stderr)
         return 2
-    if args.base_url == META_URL:
+    # Munix's Supervisor runs on the Meta API even when the agent is local.
+    paid = args.base_url == META_URL or args.mode == "munix"
+    if paid:
         if args.budget is None or args.budget <= 0:
             print("--budget USD is required against the Meta API (a hard stop on estimated spend)", file=sys.stderr)
             return 2
+        try:
+            left = credit.check()
+        except credit.CreditError as e:
+            print(f"credit: {e}", file=sys.stderr)
+            return 2
+        print(f"credit: estimated balance ${left:.2f}; this run stops at the floor or at ${args.budget:.2f}", flush=True)
+    if args.base_url == META_URL:
         key = env_value("MODEL_API_KEY")
         if not key:
             print("MODEL_API_KEY is not set in .env", file=sys.stderr)
@@ -211,14 +225,22 @@ def cmd_run(args) -> int:
     summaries = munix_executor.SUMMARIES
 
     def spent() -> float:
-        return usage.cost(input_per_m, output_per_m) + supervisor_cost(summaries, input_per_m, output_per_m)
+        # A local agent costs no Meta credit; Munix's Supervisor still does.
+        agent = usage.cost(input_per_m, output_per_m) if args.base_url == META_URL else 0.0
+        return agent + supervisor_cost(summaries, input_per_m, output_per_m)
 
     def close_bridge() -> None:
         # The bridge reports the Supervisor's spend when its task ends, so end it before the next budget check.
         if session is not None:
             session.end_task()
 
-    budget = args.budget if args.base_url == META_URL else None
+    budget = args.budget if paid else None
+    meter = credit.Meter(spent) if paid else None
+
+    def should_stop() -> str | None:
+        if meter is not None and (reason := meter.stop_reason()):
+            return reason
+        return "budget" if budget is not None and spent() >= budget else None
     started = time.monotonic()
     utility: dict[str, bool] = {}
     security: dict[str, bool] = {}
@@ -239,33 +261,44 @@ def cmd_run(args) -> int:
         close_bridge()
         print(f"{args.suite} {iid} as a user task: utility={ok}  (spent about ${spent():.3f})", flush=True)
 
+    stopped: str | None = None
     with OutputLogger(str(logdir), live=None), (session or contextlib.nullcontext()):
-        if args.phase == "utility":
-            stopped = run_cases(shard_of(user_ids, args.shard), user_case, spent, budget)
-        elif args.phase == "goals":
-            stopped = run_cases(shard_of(inj_ids, args.shard), goal_case, spent, budget)
-        else:
-            attack = load_attack(ATTACK, suite, pipe)
+        try:
+            if args.phase == "utility":
+                stopped = run_cases(shard_of(user_ids, args.shard), user_case, should_stop)
+            elif args.phase == "goals":
+                stopped = run_cases(shard_of(inj_ids, args.shard), goal_case, should_stop)
+            else:
+                attack = load_attack(ATTACK, suite, pipe)
 
-            # One (user task, injection task) pair at a time, so the budget is checked before every case.
-            def attack_case(pair: tuple[str, str]) -> None:
-                uid, iid = pair
-                u, s = run_task_with_injection_tasks(
-                    suite, pipe, suite.get_user_task_by_id(uid), attack, logdir, True, [iid], BENCHMARK_VERSION
-                )
-                for (ut, it), ok in u.items():
-                    utility[f"{ut}|{it}"] = ok
-                for (ut, it), hit in s.items():
-                    security[f"{ut}|{it}"] = hit
-                close_bridge()
-                hit = any(s.values())
-                print(f"{args.suite} {uid} x {iid}: utility={all(u.values())} attack_succeeded={hit}"
-                      f"  (spent about ${spent():.3f})", flush=True)
+                # One (user task, injection task) pair at a time, so the budget is checked before every case.
+                def attack_case(pair: tuple[str, str]) -> None:
+                    uid, iid = pair
+                    u, s = run_task_with_injection_tasks(
+                        suite, pipe, suite.get_user_task_by_id(uid), attack, logdir, True, [iid], BENCHMARK_VERSION
+                    )
+                    for (ut, it), ok in u.items():
+                        utility[f"{ut}|{it}"] = ok
+                    for (ut, it), hit in s.items():
+                        security[f"{ut}|{it}"] = hit
+                    close_bridge()
+                    hit = any(s.values())
+                    print(f"{args.suite} {uid} x {iid}: utility={all(u.values())} attack_succeeded={hit}"
+                          f"  (spent about ${spent():.3f})", flush=True)
 
-            pairs = [(uid, iid) for uid in shard_of(user_ids, args.shard) for iid in inj_ids]
-            stopped = run_cases(pairs, attack_case, spent, budget)
-    if stopped:
+                pairs = [(uid, iid) for uid in shard_of(user_ids, args.shard) for iid in inj_ids]
+                stopped = run_cases(pairs, attack_case, should_stop)
+        except Exception as e:  # noqa: BLE001 - whatever failed, the cases already paid for are still written
+            stopped = f"error: {type(e).__name__}"
+            traceback.print_exc()
+    if meter is not None:
+        meter.settle()
+    if stopped == "budget":
         print(f"stopped: the budget of ${budget:.2f} was reached (spent about ${spent():.3f})", file=sys.stderr)
+    elif stopped == "credit_floor":
+        print("stopped: the credit floor kept for the demo was reached", file=sys.stderr)
+    elif stopped:
+        print(f"stopped by {stopped}; the cases that finished are written", file=sys.stderr)
     doc = {
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "mode": args.mode,

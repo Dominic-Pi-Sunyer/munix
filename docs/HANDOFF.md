@@ -8,11 +8,30 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
-- **In progress: the full banking run under Munix, both modes (owner approved, $15 total cap).**
-  - `run.py --budget USD` is now a hard stop, required against the Meta API. It's checked before every case, and
-    the run can go over by at most the one case that crosses it.
-  - Spend now includes Munix's planner and reviewer: the bridge's `ended` message reports `supervisor_usage`.
-    Before this, Munix runs under-reported cost.
+- **Full banking run under Munix, both modes (owner approved, $15 cap): $12.21 spent.**
+  - **Results:**
+
+    | | Bare | Munix, no human | Munix, simulated user |
+    | :-- | --: | --: | --: |
+    | Utility, no attack | 15/16 | 7/16 | 8/16 |
+    | Utility under attack | 118/144 | 63/144 | 83/135 |
+    | ASR | 0/144 | 0/144 | 0/135 |
+
+  - **Left to do:** the simulated user's last 9 cases (`user_task_15`). They crashed when the planner wrote an invalid
+    plan, and need a credit balance set first. Then write the results up in `docs/redteam/agentdojo.md`.
+  - **Utility loss is the live planner.** Its plans let the agent read third-party transaction text (`reads`), so
+    trust drops to Lockdown. It also leaves steps out, so a needed `read_file` is off-plan.
+- **Credit floor, `scripts/credit.py`:** a hard stop for every paid runner (`run.py`, `adaptive.py`, `smoke.py`,
+  `redteam_bare.py`). It keeps $25 for the demo.
+  - It is checked before every case and charged as the run spends. Parallel runs share it under a lock.
+  - With no `.credit.json` (gitignored), a paid run refuses to start. Set it from the dashboard with
+    `python3 scripts/credit.py set <balance>`.
+  - `munix run` (the demo) is neither stopped nor charged by it.
+- **Run hardening:**
+  - `run.py --budget` counts the Supervisor's spend.
+  - A task Munix can't start is now a refused case, not a crash.
+  - Results are written even when a run fails.
+  - The planner keeps only `forbid` when the model adds other rules next to it.
 - **Options 1 and 3 done (offline, merged):**
   - **What changed:**
     - Transaction values are labeled by who wrote them: `paid_to` and `my_subjects` are bank and user records,

@@ -119,6 +119,14 @@ impl From<DraftStep> for Step {
                 {
                     rule.forbid = None;
                 }
+                if rule.is_forbidden() {
+                    // A forbid already says the argument must be absent, the strictest rule there is. The model
+                    // sometimes adds other fields next to it, which the plan validator rejects: keep only the forbid.
+                    rule = ArgRule {
+                        forbid: Some(true),
+                        ..ArgRule::default()
+                    };
+                }
                 args.insert(name, rule);
             }
         }
@@ -735,6 +743,33 @@ amendments:
         );
         let subject = args["subject"].may_embed.as_ref().unwrap();
         assert_eq!(subject.min_trust, Some(munix_core::label::Trust::new(90)));
+    }
+
+    #[test]
+    fn a_forbid_with_other_fields_keeps_only_the_forbid() {
+        // Seen live: the model wrote `forbid: true` and a `dlp` on the same argument, which the validator rejects.
+        let mut draft = valid_demo_draft();
+        draft["steps"][1]["args"]["cc"] =
+            json!({"forbid": true, "dlp": "no_secret", "from": ["prompt"]});
+        let mock = Arc::new(MockAdapter::new(vec![Ok(draft)]));
+        let signing_key = key();
+        let planner = Planner::new(mock, signing_key.clone());
+        let signed = planner
+            .plan(
+                &prompt(),
+                &catalog(),
+                &stores(),
+                "P-forbid".parse().unwrap(),
+            )
+            .unwrap();
+        let plan = signed.verify(&signing_key, Purpose::Plan).unwrap();
+        assert_eq!(
+            plan.steps[1].args["cc"],
+            ArgRule {
+                forbid: Some(true),
+                ..ArgRule::default()
+            }
+        );
     }
 
     #[test]

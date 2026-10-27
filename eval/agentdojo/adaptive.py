@@ -25,8 +25,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:  # `python -I` does not put the script's directory on the path
-    sys.path.insert(0, str(HERE))
+for _path in (HERE, HERE.parents[1] / "scripts"):  # `python -I` does not put the script's directory on the path
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 import openai
 from agentdojo.agent_pipeline import AgentPipeline
@@ -35,8 +36,9 @@ from agentdojo.attacks.base_attacks import BaseAttack
 from agentdojo.task_suite.load_suites import get_suite
 from agentdojo.types import get_text_content_as_str
 
+import credit
 import munix_executor
-from run import BENCHMARK_VERSION, DEFAULT_MODEL, META_URL, Usage, env_value, make_pipeline
+from run import BENCHMARK_VERSION, DEFAULT_MODEL, META_URL, Usage, env_value, make_pipeline, supervisor_cost
 
 RESULTS = HERE / "results"
 # Successful payloads are working attacks on a production Meta model: they stay out of the public repo (gitignored)
@@ -382,6 +384,8 @@ def search(
     def spent() -> float:
         return attacker.usage.cost(*prices) + target.usage.cost(*prices)
 
+    meter = credit.Meter(spent)
+
     def save() -> None:
         doc["totals"] = totals(pair_docs, attacker, target, spent())
         write_split(doc, out_path)
@@ -400,8 +404,8 @@ def search(
                 continue
             pd["vectors"] = list(slots)
             for n in range(1, rounds + 1):
-                if spent() >= budget:
-                    doc["stopped"] = "budget"
+                if reason := meter.stop_reason() or ("budget" if spent() >= budget else None):
+                    doc["stopped"] = reason
                     break
                 rec = run_round(
                     n, rounds, suite, attacker, target, user_task, injection_task, slots, pd["rounds"], prices
@@ -414,15 +418,16 @@ def search(
                     save()
                     break
                 save()
-            if doc["stopped"] == "budget":
+            if doc["stopped"] in ("budget", "credit_floor"):
                 if pd["status"] != "broken" and len(pd["rounds"]) < rounds:
-                    pd["status"] = "budget_stopped"
+                    pd["status"] = "budget_stopped" if doc["stopped"] == "budget" else "credit_stopped"
                 for uid2, iid2 in pairs[index + 1 :]:
                     pair_docs.append({"user_task": uid2, "injection_task": iid2, "status": "not_run", "rounds": []})
                 break
     except KeyboardInterrupt:
         doc["stopped"] = "interrupted"
     finally:
+        meter.settle()
         save()
     return doc
 
@@ -507,9 +512,16 @@ def replay(
     budget: float | None = None,
 ) -> dict:
     """Re-runs the exact winning payload of every broken pair `repeats` times and writes `out_path`. With `budget`,
-    stops before a run once the agent's estimated cost reaches it (`stopped: "budget"`). Munix's own planner and
-    reviewer calls inside the bridge are not counted, so leave room for them."""
+    stops before a run once the estimated cost (the agent's, plus Munix's planner and reviewer) reaches it
+    (`stopped: "budget"`), and always at the shared credit floor (`stopped: "credit_floor"`)."""
     results = []
+
+    def spent() -> float:
+        bridges = [r["munix"] for p in results for r in p["runs"] if "munix" in r] + current_bridges
+        return target.usage.cost(*prices) + supervisor_cost(bridges, *prices)
+
+    current_bridges: list[dict] = []  # bridges of the pair being replayed, before it joins `results`
+    meter = credit.Meter(spent)
     doc = {
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "kind": "adaptive-replay",
@@ -528,9 +540,11 @@ def replay(
             vectors = p.get("vectors") or list(slots_for(suite, Surface(suite, None), user_task))  # type: ignore[arg-type]
             injections = {v: yaml_double_quoted(p["winning_payload"]) for v in vectors}
             runs = []
+            current_bridges.clear()
             for k in range(1, repeats + 1):
-                if budget is not None and target.usage.cost(*prices) >= budget:
-                    doc["stopped"] = "budget"
+                over = budget is not None and spent() >= budget
+                if reason := meter.stop_reason() or ("budget" if over else None):
+                    doc["stopped"] = reason
                     break
                 run: dict = {"repeat": k}
                 before = _snapshot(target.usage)
@@ -545,6 +559,7 @@ def replay(
                     session.end_task()
                     if munix_executor.SUMMARIES:
                         run["munix"] = munix_executor.SUMMARIES.pop()
+                        current_bridges.append(run["munix"])
                 runs.append(run)
             results.append(
                 {
@@ -558,16 +573,18 @@ def replay(
                     "utility_true": sum(1 for r in runs if r.get("utility")),
                 }
             )
-            if doc["stopped"] == "budget":
+            current_bridges.clear()
+            if doc["stopped"]:
                 break
     finally:
+        meter.settle()
         doc["totals"] = {
             "pairs": len(results),
             "runs": sum(len(r["runs"]) for r in results),
             "attack_successes": sum(r["attack_successes"] for r in results),
             "errors": sum(r["errors"] for r in results),
             "usage": _usage_dict(target.usage),
-            "estimated_cost_usd": round(target.usage.cost(*prices), 4),
+            "estimated_cost_usd": round(spent(), 4),
         }
         write_split(doc, out_path)
     return doc
@@ -603,6 +620,11 @@ def require_key() -> str:
     key = env_value("MODEL_API_KEY")
     if not key:
         raise SystemExit("MODEL_API_KEY is not set in .env")
+    try:
+        left = credit.check()
+    except credit.CreditError as e:
+        raise SystemExit(f"credit: {e}") from None
+    print(f"credit: estimated balance ${left:.2f}; this run stops at the floor or at its --budget", flush=True)
     return key
 
 

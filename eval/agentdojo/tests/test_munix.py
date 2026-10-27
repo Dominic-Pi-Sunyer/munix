@@ -385,14 +385,15 @@ class BudgetTest(unittest.TestCase):
             ran.append(case)
             spend[0] += 0.4
 
-        self.assertEqual(run.run_cases([1, 2, 3, 4], one, lambda: spend[0], 1.0), "budget")
+        stop = lambda: "budget" if spend[0] >= 1.0 else None  # noqa: E731
+        self.assertEqual(run.run_cases([1, 2, 3, 4], one, stop), "budget")
         self.assertEqual(ran, [1, 2, 3])  # 0.0, 0.4, 0.8 are under $1; 1.2 is not
 
-    def test_without_a_budget_every_case_runs(self):
+    def test_without_a_stop_every_case_runs(self):
         import run
 
         ran = []
-        self.assertIsNone(run.run_cases([1, 2], ran.append, lambda: 99.0, None))
+        self.assertIsNone(run.run_cases([1, 2], ran.append, lambda: None))
         self.assertEqual(ran, [1, 2])
 
     def test_meta_runs_need_a_budget(self):
@@ -487,6 +488,21 @@ class BridgeFailureTest(unittest.TestCase):
             s.start_task("p")
         (summary,) = mx.SUMMARIES
         self.assertIn("exited", summary["error"])
+
+    def test_a_task_munix_cannot_start_is_refused_not_a_crash(self):
+        s = mx.MunixSession(ledger_dir=self.tmp.name, binary=FAKE, env={"MUNIX_FAKE_MODE": "die"}, read_timeout=20)
+        self.addCleanup(s.close)
+        rt, env = runtime(), new_env()
+        before = env.bank_account.balance
+        mx.MunixStart(s).query("p", rt, env, [], {})  # does not raise
+        self.assertTrue(s.refused)
+        _, _, env, msgs, _ = mx.MunixToolsExecutor(s).query(
+            "p", rt, env, assistant_with(("send_money", {"recipient": "X", "amount": 1.0, "subject": "s", "date": "2022-01-01"})), {}
+        )
+        self.assertEqual(msgs[-1]["error"], "denied: task refused")
+        self.assertEqual(env.bank_account.balance, before)
+        (summary,) = mx.SUMMARIES
+        self.assertIn("error", summary)
 
 
 if __name__ == "__main__":
