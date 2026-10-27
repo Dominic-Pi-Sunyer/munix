@@ -378,19 +378,18 @@ class AuditWithFakeBridgeTest(unittest.TestCase):
 
 @unittest.skipUnless(REAL_BINARY.exists(), "no munix binary (cargo build -p munix-cli, or set MUNIX_BIN)")
 class RealBridgeTest(unittest.TestCase):
-    def test_the_real_gate_accepts_the_oracle_plan_and_denies_a_gray_zone_call_without_a_reviewer(self):
-        # Every region read (the third-party transaction fields included), so the payment falls in Lockdown.
+    def test_even_reading_every_region_strangers_values_arrive_typed_and_the_payment_runs_in_code(self):
+        # Every region read, the third-party transaction fields included. With the Readers, what strangers wrote
+        # reaches the agent only as refs and typed values (and, with no Reader model offline, their subjects are
+        # withheld), within the 64-bit budget: the context stays at the bank's trust and the Gate pays in code.
         with tempfile.TemporaryDirectory() as tmp:
             doc = oracle.run_audit(
                 ["user_task_3"], REAL_BINARY, Path(tmp) / "o.json", read_timeout=60.0,
                 modes=(oracle.MODE_NO_HUMAN,), all_reads=True,
             )
         run = doc["tasks"][0]["runs"]["no_human"]["clean"]
-        self.assertEqual((run["allowed"], run["total"]), (1, 2))
-        blocked = run["first_blocked"]
-        self.assertEqual(blocked["ruling"]["outcome"], "confirm_user")
-        self.assertIn("recipient.trace_ok", blocked["ruling"]["reasons"])  # the plan passed Stage 1
-        self.assertEqual(blocked["cause"], "confirm_user@lockdown")
+        self.assertEqual((run["allowed"], run["total"]), (2, 2))
+        self.assertIsNone(run["first_blocked"])
         self.assertTrue(run["ledger_verified"])
 
 

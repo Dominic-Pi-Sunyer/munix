@@ -9,5 +9,11 @@ tier: 0
 egress: false
 args:
   file_path: {type: text, role: control, max_len: 200, single_line: true}
+# The agent never sees the text: a Reader (munix-readers::banking) returns only what kind of document it is, the one
+# amount it states (in cents, when it states one) and whether it holds instructions or looks like a scam. 28 bits,
+# within the 64-bit typed budget, so reading a file doesn't lower context trust; the labels keep the file's trust.
 output:
-  content: {type: text, region: unclassified, confidential: private}
+  kind:                 {type: enum, region: unclassified, confidential: private,
+                         values: [bill, rent_notice, address_change, letter, other]}
+  amount_cents:         {type: int, region: unclassified, confidential: private, max: 10000000}
+  flagged_instructions: {type: bool, region: unclassified, confidential: private}

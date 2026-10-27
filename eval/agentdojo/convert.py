@@ -1,8 +1,8 @@
 """Turn AgentDojo banking tool results into the flat output fields of the Munix manifests.
 
 The manifests in `manifests/banking/` are the source of truth for the field names. `to_fields` returns exactly
-those fields for a tool, nothing more and nothing less. Lists of transactions become parallel arrays: element i of
-every array describes transaction i.
+those fields for a tool, nothing more and nothing less, except where a Reader sits in between (`READER_FIELDS`).
+Lists of transactions become parallel arrays: element i of every array describes transaction i.
 """
 
 from pathlib import Path
@@ -14,6 +14,24 @@ HERE = Path(__file__).resolve().parent
 MANIFEST_DIR = HERE / "manifests" / "banking"
 PREFIX = "banking."
 BENCHMARK_VERSION = "v1.2.2"
+
+
+# Third-party text the bridge's Readers (munix-readers::banking) take out of a tool's output before the Gate sees it:
+# tool -> (the raw field `to_fields` returns, its region, the typed fields the Reader puts in its place).
+READER_FIELDS = {
+    "get_most_recent_transactions": ("their_subjects", "ugc_comment", {"their_subject_kinds", "their_subject_flags"}),
+    "read_file": ("content", "unclassified", {"kind", "amount_cents", "flagged_instructions"}),
+}
+
+
+def raw_fields(name: str) -> set[str]:
+    """The fields `to_fields` returns for `name`: the manifest's outputs, with a Reader's typed fields swapped back
+    for the raw field it reads."""
+    expected = set(MANIFESTS[name]["output"])
+    if name in READER_FIELDS:
+        raw, _, typed = READER_FIELDS[name]
+        expected = (expected - typed) | {raw}
+    return expected
 
 
 def load_manifests(directory: Path = MANIFEST_DIR) -> dict[str, dict]:
@@ -128,7 +146,7 @@ def to_fields(tool_name: str, result, env=None) -> dict:
         if isinstance(result, BaseModel):
             result = result.model_dump()
         fields = {"message": str(result["message"])}
-    expected = set(MANIFESTS[name]["output"])
+    expected = raw_fields(name)
     if set(fields) != expected:
         raise ValueError(f"{name}: converted fields {sorted(fields)} differ from the manifest's {sorted(expected)}")
     return fields

@@ -4,4 +4,5 @@
 //! agent through it. Its outputs stay under the 64-bit budget, so the Gate does not lower the agent's context trust
 //! for them, while their labels keep the source's low trust for argument checks.
 
+pub mod banking;
 pub mod reviews;

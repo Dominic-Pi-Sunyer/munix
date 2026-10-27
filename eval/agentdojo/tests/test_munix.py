@@ -25,7 +25,7 @@ FAKE = [sys.executable, str(HERE / "fake_bridge.py")]
 SUITE = get_suite("v1.2.2", "banking")
 IBAN = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}$")
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-TYPES = {"text", "iban", "number", "int", "bool", "date"}
+TYPES = {"text", "iban", "number", "int", "bool", "date", "enum"}
 TYPES |= {t + "[]" for t in TYPES}
 ROLES = {"destination", "content", "selector", "control"}
 REGIONS = {"user_content", "operator_content", "ugc_comment", "unclassified"}
@@ -79,7 +79,7 @@ class ConvertTest(unittest.TestCase):
                 result, error = rt.run_function(env, name, args)
                 self.assertIsNone(error)
                 fields = convert.to_fields(name, result, env)
-                self.assertEqual(set(fields), set(convert.MANIFESTS[name]["output"]))
+                self.assertEqual(set(fields), convert.raw_fields(name))
                 self.assertEqual(fields, convert.to_fields("banking." + name, result, env))
                 json.dumps(fields)  # plain JSON values only
                 # Every per-row array has one element per transaction.
@@ -207,14 +207,26 @@ class ManifestTest(unittest.TestCase):
 
     def test_untrusted_regions(self):
         recent = convert.MANIFESTS["get_most_recent_transactions"]["output"]
-        self.assertEqual(convert.MANIFESTS["read_file"]["output"]["content"]["region"], "unclassified")
+        # Files and strangers' subjects reach the agent only through Readers: small typed values, labeled with the
+        # raw text's region.
+        self.assertEqual(
+            {spec["region"] for spec in convert.MANIFESTS["read_file"]["output"].values()}, {"unclassified"}
+        )
+        for tool, (raw, region, typed) in convert.READER_FIELDS.items():
+            out = convert.MANIFESTS[tool]["output"]
+            self.assertNotIn(raw, out)
+            self.assertTrue(typed <= set(out), tool)
+            for field in typed:
+                self.assertEqual(out[field]["region"], region, field)
+                self.assertTrue(out[field]["type"].startswith(("enum", "bool", "int")), field)
         # Labels follow who wrote each value: anyone can send the user money, so the sender and the subject of an
         # incoming payment are third-party; where the user's own money went and what the user wrote are not.
         expected = {
             "paid_to": ("operator_content", "iban[]", "public"),
             "paid_by": ("ugc_comment", "iban[]", "public"),
             "my_subjects": ("user_content", "text[]", "private"),
-            "their_subjects": ("ugc_comment", "text[]", "private"),
+            "their_subject_kinds": ("ugc_comment", "enum[]", "private"),
+            "their_subject_flags": ("ugc_comment", "bool[]", "private"),
         }
         for field, (region, ty, confidential) in expected.items():
             self.assertEqual(

@@ -309,9 +309,11 @@ struct Setup {
     plan: PlanSource,
     /// The gray-zone reviewer's model; `None` sends gray-zone requests to the Console, which says no.
     reviewer: Option<Arc<dyn ModelAdapter>>,
+    /// The Readers' model (`munix_readers::banking`); `None` withholds the third-party text they would read.
+    reader: Option<Arc<dyn ModelAdapter>>,
     /// `--simulated-user`: the Console is `SimulatedUser`, not a flat no.
     simulated_user: bool,
-    /// The planner's and reviewer's adapters, metered, so `ended` can report what the Supervisor spent.
+    /// The planner's, reviewer's and Readers' adapters, metered, so `ended` can report what the Supervisor spent.
     meters: Vec<Metered>,
     key: SigningKey,
     task: TaskId,
@@ -371,14 +373,17 @@ fn build_gate(setup: &Setup, io: &Arc<Mutex<Io>>) -> Result<Gate, Failure> {
             .as_str()
             .split_once('.')
             .map_or(name.as_str(), |(_, rest)| rest);
-        let tool = RemoteTool {
+        let remote = RemoteTool {
             io: Arc::clone(io),
             name: function.to_owned(),
         };
+        // Third-party text goes through a Reader, so the agent gets typed values instead.
+        let tool =
+            munix_readers::banking::wrap(name.as_str(), Box::new(remote), setup.reader.clone());
         let pinned = manifest
             .digest()
             .map_err(|e| Failure::config(e.to_string()))?;
-        gate.register(name.clone(), pinned, Box::new(tool))
+        gate.register(name.clone(), pinned, tool)
             .map_err(|e| Failure::config(format!("registering {name}: {e}")))?;
     }
     Ok(gate)
@@ -568,7 +573,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         meters.push(meter.clone());
         Arc::new(meter)
     };
-    let (plan, reviewer) = match &opts.plan {
+    let (plan, reviewer, reader) = match &opts.plan {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|_| Failure::config(format!("cannot read {}", path.display())))?;
@@ -577,21 +582,24 @@ fn run(args: &[String]) -> Result<(), Failure> {
                     .map_err(|e| Failure::config(format!("{}: {e}", path.display())))?,
             );
             if opts.no_reviewer {
-                // No model anywhere: no key needed.
-                (given, None)
+                // No model anywhere: no key needed, and the Readers withhold what they would read.
+                (given, None, None)
             } else {
                 let (env, api_key, model) = model_config()?;
                 let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
-                (given, Some(metered(reviewer)))
+                let reader = supervisor_adapter(&env, &model, Role::Reader, &api_key)?;
+                (given, Some(metered(reviewer)), Some(metered(reader)))
             }
         }
         None => {
             let (env, api_key, model) = model_config()?;
             let planner = supervisor_adapter(&env, &model, Role::Planner, &api_key)?;
             let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
+            let reader = supervisor_adapter(&env, &model, Role::Reader, &api_key)?;
             (
                 PlanSource::Planner(metered(planner)),
                 Some(metered(reviewer)),
+                Some(metered(reader)),
             )
         }
     };
@@ -600,6 +608,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         ledger_path: opts.ledger,
         plan,
         reviewer,
+        reader,
         simulated_user: opts.simulated_user,
         meters,
         key: SigningKey::from_bytes(&random_bytes(32)?)
@@ -742,6 +751,7 @@ amendments:
             ledger_path: dir.join("sub").join("ledger.jsonl"),
             plan: PlanSource::Given(Plan::from_yaml(plan).unwrap()),
             reviewer,
+            reader: None,
             simulated_user,
             meters,
             key: SigningKey::from_bytes(&[9u8; 32]).unwrap(),

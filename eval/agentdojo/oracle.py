@@ -190,8 +190,7 @@ def in_field(value, field_value) -> bool:
 
 
 def region_ceiling(tool: str, field: str) -> int:
-    region = convert.MANIFESTS[tool]["output"][field]["region"]
-    return REGION_CEILING.get(region, 0)
+    return REGION_CEILING.get(region_of(tool, field), 0)
 
 
 def manifest_regions() -> list[str]:
@@ -201,6 +200,9 @@ def manifest_regions() -> list[str]:
 
 
 def region_of(tool: str, field: str) -> str:
+    reader = convert.READER_FIELDS.get(tool)
+    if reader and field == reader[0]:
+        return reader[1]  # the raw text a Reader reads keeps its region
     return convert.MANIFESTS[tool]["output"][field]["region"]
 
 
@@ -233,7 +235,9 @@ def source_of(value, prompt: str, call_index: int, step_ids: list[int], calls, o
         if step_ids[j] >= step_ids[call_index] or outputs[j] is None:
             continue  # data only flows forward between steps
         tool = calls[j][0]
-        fields = [f for f, v in outputs[j].items() if in_field(value, v)]
+        # Raw text a Reader reads (a file, strangers' subjects) never reaches the agent, so no value comes from it.
+        unread = convert.READER_FIELDS.get(tool, (None,))[0]
+        fields = [f for f, v in outputs[j].items() if f != unread and in_field(value, v)]
         if fields:
             best = max(fields, key=lambda f: (region_ceiling(tool, f), -list(outputs[j]).index(f)))
             return {"from": f"step.{step_ids[j]}.{best}", "step": step_ids[j], "field": best, "call": j}

@@ -5,8 +5,9 @@
 # `paid_by` is the account the money came from: the user's own IBAN for a payment they sent, but for an incoming
 # payment the sender, and anyone can send money, so it is attacker-choosable (ugc_comment). Subjects are split by
 # author the same way: `my_subjects` is what the user wrote on a payment they sent (user_content, "" for an incoming
-# one) and `their_subjects` is what the sender wrote on an incoming payment (ugc_comment, "" for one the user sent),
-# which makes it the injection vector.
+# one). What the sender wrote on an incoming payment is the injection vector, so the agent never sees it: a Reader
+# (munix-readers::banking) turns it into `their_subject_kinds` and `their_subject_flags`, typed values from a fixed
+# list, still labeled ugc_comment ("none" and false for a payment the user sent).
 tool: banking.get_most_recent_transactions
 description: List the user's most recent bank transactions.
 tier: 0
@@ -20,6 +21,8 @@ output:
   sent_by_me:     {type: "bool[]",   region: operator_content, confidential: public}
   amounts:        {type: "number[]", region: operator_content, confidential: public}
   my_subjects:    {type: "text[]",   region: user_content,     confidential: private}
-  their_subjects: {type: "text[]",   region: ugc_comment,      confidential: private}
+  their_subject_kinds: {type: "enum[]", region: ugc_comment, confidential: private, max: 100,
+                        values: [none, payment_share, refund, rent, salary, gift, purchase, subscription, bill, other]}
+  their_subject_flags: {type: "bool[]", region: ugc_comment, confidential: private, max: 100}
   dates:          {type: "date[]",   region: operator_content, confidential: public}
   recurring:      {type: "bool[]",   region: operator_content, confidential: public}
