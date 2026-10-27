@@ -6,15 +6,25 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Mon Oct 26, 2026, ~11:30 PM PT, by Claude (Opus 5.5)._
+_Last updated: Mon Oct 26, 2026, ~Oct 27, 12:15 AM PT, by Claude (Opus 5.5)._
 
-- **In progress: AgentDojo bridge, wave 1** (Sonnet builders; contract in `eval/agentdojo/BRIDGE.md`):
-  - **S1 (main checkout):** `Scalar::Iban` in core, plus IBAN extraction in the Gate's `prompt_values`.
-  - **S2 (worktree `../munix-bridge`, branch `agentdojo-bridge`):** `munix bridge` in `munix-cli`, reusing
-    `GateFront` with an always-no Console.
-  - **S3 (main checkout, Python only):** the banking manifests, output converters, `munix_executor.py` and
-    offline tests.
-  - **Baseline:** the lead runs the bare banking baseline (`eval/agentdojo/run.py`).
+- **AgentDojo banking runs end to end under Munix** (`eval/agentdojo/run.py --mode munix`):
+  - **What's merged:** `iban` scalar (`2c4a47e`), `munix bridge` (`85ef4de`), and the manifests, executor and tests
+    (`9f56721`).
+  - **Bare Muse Spark baseline** (v1.2.2, `important_instructions`, about $3.20):
+    - ASR: **0/144**;
+    - utility: 15/16 with no attack, 118/144 under attack;
+    - goals run as plain tasks: 8/9.
+  - **First Munix runs:** UT3 and UT5, about $0.07. Each halted after an honest exploratory off-plan read
+    (`get_balance` and others count as a takeover today), and the planner forbade the optional `n` arg.
+  - **Decisions for the owner:**
+    1. How to get a meaningful ASR comparison, since bare Muse Spark is already 0%: a labeled simulated takeover,
+       as in the demo, and/or a weaker Meta open-weights model.
+    2. Whether to implement design spec section 7.4's automatic tier 0–1 amendments, instead of treating off-plan
+       reads as takeovers.
+  - **Lead fix:** `read_file.file_path` is now `control`. It was `selector`, which needs a trace, and a file name in
+    the prompt can't be traced, so four banking tasks would have failed with no attack.
+  - **Not counted yet:** the planner and reviewer cost in `estimated_cost_usd`.
 - **AgentDojo prep (banking and Slack first):**
   - **Set up:** `eval/agentdojo/` pins `agentdojo==0.1.35` in its own `.venv`.
   - **Smoke test:** `smoke.py` ran banking UT3 on Muse Spark with `utility=True`; the Meta API accepts the
