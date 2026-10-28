@@ -224,3 +224,20 @@ fn a_word_not_in_the_prompt_is_untrusted_end_to_end() {
         Reply::Takeover(DenyCode::UntrustedDestination)
     );
 }
+
+#[test]
+fn a_scheme_in_front_of_a_typed_host_still_traces_but_nothing_after_it() {
+    let refs = table("Read the content on webpage www.informations.com.");
+    let site = |v: &str| {
+        trace(&refs, json!({"channel": "x", "site": v, "body": "hi"}))["site"].values[0]
+            .matches
+            .len()
+    };
+    assert_eq!(site("https://www.informations.com"), 1);
+    assert_eq!(site("HTTP://www.informations.com/"), 1);
+    assert_eq!(site("https://www.informations.com//"), 0);
+    assert_eq!(site("https://www.informations.com/x"), 0);
+    assert_eq!(site("https://www.informations.com?q=1"), 0);
+    assert_eq!(site("ftp://www.informations.com"), 0);
+    assert_eq!(site("https://"), 0);
+}

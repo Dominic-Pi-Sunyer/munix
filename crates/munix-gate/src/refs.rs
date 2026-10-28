@@ -152,11 +152,24 @@ impl RefTable {
         self.prompt_label = Some(label);
     }
 
-    /// A match with origin `Origin::Prompt` when `raw` is exactly (case-sensitive) a whole prompt token. The match
-    /// has no ref id. `None` for anything else, including before any token was recorded.
+    /// A match with origin `Origin::Prompt` when `raw` is exactly (case-sensitive) a whole prompt token, or is
+    /// `http://` or `https://` (any case) followed by exactly a prompt token, with at most one trailing `/`: an agent
+    /// writing the user's bare `www.example.com` as `https://www.example.com/` names the same place, and nothing
+    /// may be added after it. The match has no ref id. `None` for anything else, including before any token was
+    /// recorded.
     pub fn find_prompt_token(&self, raw: &str) -> Option<Match> {
         let label = self.prompt_label.as_ref()?;
-        self.prompt_tokens.contains(raw).then_some(Match {
+        let bare = ["https://", "http://"].iter().find_map(|scheme| {
+            raw.get(..scheme.len())
+                .filter(|p| p.eq_ignore_ascii_case(scheme))
+                .map(|_| &raw[scheme.len()..])
+        });
+        let found = self.prompt_tokens.contains(raw)
+            || bare.is_some_and(|rest| {
+                let rest = rest.strip_suffix('/').unwrap_or(rest);
+                !rest.is_empty() && self.prompt_tokens.contains(rest)
+            });
+        found.then_some(Match {
             id: None,
             origin: Origin::Prompt,
             trust: label.trust,
