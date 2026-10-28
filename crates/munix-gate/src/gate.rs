@@ -1167,7 +1167,7 @@ impl Gate {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     },
-                    sources: describe_sources(raw, &t.refs),
+                    sources: describe_sources(raw, prompt_words(manifest, name), &t.refs),
                     destination: manifest
                         .args
                         .get(name)
@@ -1212,7 +1212,7 @@ impl Gate {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     },
-                    sources: describe_sources(raw, &t.refs),
+                    sources: describe_sources(raw, prompt_words(manifest, name), &t.refs),
                     destination: manifest
                         .args
                         .get(name)
@@ -1802,8 +1802,17 @@ fn named_store_values(plan: &Plan, store: &Store) -> BTreeSet<(String, String)> 
 /// Swaps refs for their values in the arguments the tracer examined. Destinations and selectors take whole-value
 /// refs only (that is all the tracer checks); content text also takes refs embedded in it. Control arguments are
 /// never examined, so they are passed through untouched. `None` means a ref could not be resolved.
+/// True when the tracer matches whole prompt words for this argument (`RefTable::find_prompt_token`): an `id` or
+/// `text` destination or selector. The Console then describes such a value as from the prompt, and only then.
+fn prompt_words(manifest: &ToolManifest, name: &str) -> bool {
+    manifest.args.get(name).is_some_and(|spec| {
+        matches!(spec.role, ArgRole::Destination | ArgRole::Selector)
+            && matches!(spec.ty.scalar, Scalar::Id | Scalar::Text)
+    })
+}
+
 /// Where the values of one argument came from, for the Console.
-fn describe_sources(value: &Value, refs: &RefTable) -> Vec<String> {
+fn describe_sources(value: &Value, prompt_words: bool, refs: &RefTable) -> Vec<String> {
     let mut out = Vec::new();
     let mut strings = Vec::new();
     match value {
@@ -1826,7 +1835,7 @@ fn describe_sources(value: &Value, refs: &RefTable) -> Vec<String> {
         if !found && s.parse::<RefId>().is_err() {
             let matches = refs.find_value(s);
             if matches.is_empty() {
-                if let Some(m) = refs.find_prompt_token(s) {
+                if let Some(m) = refs.find_prompt_token(s).filter(|_| prompt_words) {
                     out.push(format!("the prompt (trust {})", m.trust.value()));
                 } else if find_embedded(s).is_empty()
                     && !s.is_empty()

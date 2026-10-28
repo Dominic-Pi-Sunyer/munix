@@ -8,6 +8,14 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
 
+- **Security review of the Oct 28 changes (Oct 28, late): no break found.** `docs/redteam/security-review-oct28.md`.
+  - Four low findings documented. The Console now says "the prompt" only for `id`/`text` destinations (fixed).
+  - **Trusted-content tests** (`crates/munix-gate/tests/trusted_content.rs`, 16, by Sonnet): a typed value
+    (contact email) on a hacked high-trust page passes the trace when the plan allows that step at trust 60 or more:
+    the `gap_` tests. Prompt Guard closes it only when the attacker also plants blunt instructions.
+  - **Owner's call:** require the user for tier 2–3 destinations that come from web content (step-source floor above
+    the web ceilings), or keep and document.
+
 - **Prompt Guard 2, Slack, and 7 new adaptive attacks: done and measured (Oct 28), about $40 today.** Write-up:
   `docs/redteam/adaptive-and-prompt-guard.md`. Video script: `demo/VIDEO_SCRIPT.md` (owner's outline, rent case).
   - **Headline:** 9 attacks Muse Spark wrote took over bare Muse Spark in 24/27 runs. Under Munix 0/27, and 0/27
