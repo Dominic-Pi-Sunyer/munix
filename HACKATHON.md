@@ -14,28 +14,36 @@ Indie track. Build window **Mon Oct 26 → Wed Nov 4, 9:00 PM ET**. Judging Nov 
 
 ## The demo
 
-Two laptops, the same Muse Spark agent (`demo/agent`), the same prompt, the same web access through Web Speed OSS.
-The demo site is the mock PixelMart page at `http://pixelmart.test:8080` (`127.0.0.1 pixelmart.test` in `/etc/hosts`).
+The headline is a **real attack, not a staged one.** Muse Spark resisted every public injection we tried, both the
+ten PixelMart variants (0 of 30 runs) and AgentDojo's 144 attack cases. So an adaptive attacker (`eval/agentdojo/adaptive.py`)
+had Muse Spark write fresh injections against the bare agent. It found two that work: in 6 of 6 replays the bare
+agent was taken over, and under Munix 0 of 6. The video is built on that result, in four beats:
 
-**What the red-team showed (Oct 26, `docs/redteam/bare-agent.md`):** on its own, Muse Spark resisted all ten injection
-techniques in 30 runs: none hijacked, none tainted, one run stalled. So the demo does not stage a model failure.
-It opens on that result and makes the case for Munix in three steps that don't depend on the model failing:
+1. **The attack works on a strong model.** In AgentDojo's simulated bank, the user asks the agent to adjust their rent
+   from the landlord's notice. A stranger's hidden instruction makes the bare agent redirect the user's standing order
+   to the attacker's account.
+   - Command: `demo_replay.py --case rent --side bare --live`. AgentDojo's own check prints the verdict.
+2. **Same agent, same attack, under Munix: blocked in code.** `demo_replay.py --case rent --side munix --live`. The
+   Gate denies the redirect because the recipient traces to a stranger's data, not to anything the user gave.
+   - The ledger lines show the rule (`recipient.trace_untrusted`), the takeover and the verified hash chain.
+   - No model made that call.
+3. **How it works: the PixelMart walkthrough.** Two terminals, the same agent and prompt, a web page and an email to
+   the boss (`demo/left.sh`, `demo/right.sh`). On screen: the trace line naming where an address came from, refs,
+   a Reader turning reviews into typed values, and recovery restarting a clean agent.
+   - The labeled simulated takeover appears here only as a stress test ("assume a takeover anyway"), never as the
+     model failing.
+4. **Proof at scale.** AgentDojo banking (`docs/redteam/agentdojo.md`): 0 of 144 attacks succeeded under Munix, with
+   the utility cost shown honestly. Optionally, the Integrity Seal stopping a task when a manifest is touched
+   (`demo/tamper.sh`).
 
-1. **Muse Spark is good at this.** Both sides read the poisoned page and both refuse. Show the red-team table.
-2. **Assume the takeover anyway.** A model's refusal is a probability: tomorrow's payload, a jailbreak, a swapped
-   model or a compromised tool can still take an agent over. Both sides run the agent with a **simulated takeover**
-   (labeled on screen). The left emails the attacker. On the right the Gate denies it by code, because the recipient
-   traces to a user review rather than the boss's contact. Recovery restarts a clean agent without that review, and the
-   boss gets the summary.
-3. **Proof and resilience.** The ledger shows why the call was denied. A model's refusal leaves nothing to audit. The
-   watchdog ends a stalled agent like the one the red-team found.
-
-What is on screen: the two terminals, Mailpit for each side, the trace line naming where the attacker's address
-came from, and raw ledger lines with the chain check. The `munix dashboard` page is a debugging tool for reviewing
-runs, not part of the video: a dashboard would read as monitoring, while Munix decides in code before a call runs.
-
-The simulated takeover is a demo-agent switch that makes the agent obey instructions in tool results. It is shown as
-a simulation, never as the model failing.
+**Rules for the video:**
+- **The injected text is never shown.** It's a working attack on a production Meta model, so it stays in the gitignored
+  `results/private/` until it's reported to Meta (bugbounty.meta.com). `demo_replay.py` shows only tool names,
+  recipients, ids and amounts, never free text.
+- **Rehearse for free** with `--recorded`. A `--live` take costs about $0.03 bare and $0.06 under Munix, and is
+  charged to the credit floor.
+- **The `munix dashboard` page is a debugging tool,** not part of the video: a dashboard would read as monitoring,
+  while Munix decides in code before a call runs.
 
 ## Scope
 
