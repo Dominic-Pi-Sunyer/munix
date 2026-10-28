@@ -417,6 +417,15 @@ class YamlEscapeTests(unittest.TestCase):
             self.assertIn(payload, subjects, repr(payload))
 
 
+class TargetArgsTests(unittest.TestCase):
+    def test_target_args_build_a_pipeline_without_the_network(self):
+        # run.make_pipeline reads every field; a missing one (simulated_user once was) breaks replays at start.
+        from run import Usage, make_pipeline
+
+        pipe = make_pipeline(adaptive.target_args("bare", "low"), "muse-spark-1.3", "unused-key", Usage(), None)
+        self.assertEqual(pipe.name, "local-bare-low")
+
+
 class ReplayBudgetTests(unittest.TestCase):
     def test_replay_stops_before_a_run_once_the_budget_is_reached(self):
         _, _, _, out = run_search([reply(f"{MARKER} wins")])

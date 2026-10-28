@@ -612,8 +612,11 @@ def stamp() -> str:
 
 
 def target_args(mode: str, effort: str, munix_bin: str | None = None) -> SimpleNamespace:
-    """The namespace `run.make_pipeline` reads. `takeover` is always False: this tool never simulates a takeover."""
-    return SimpleNamespace(base_url=META_URL, effort=effort, takeover=False, mode=mode, munix_bin=munix_bin)
+    """The namespace `run.make_pipeline` reads. `takeover` and `simulated_user` are always False: this tool never
+    simulates a takeover or a user."""
+    return SimpleNamespace(
+        base_url=META_URL, effort=effort, takeover=False, simulated_user=False, mode=mode, munix_bin=munix_bin
+    )
 
 
 def require_key() -> str:

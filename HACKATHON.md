@@ -23,10 +23,14 @@ agent was taken over, and under Munix 0 of 6. The video is built on that result,
    from the landlord's notice. A stranger's hidden instruction makes the bare agent redirect the user's standing order
    to the attacker's account.
    - Command: `demo_replay.py --case rent --side bare --live`. AgentDojo's own check prints the verdict.
-2. **Same agent, same attack, under Munix: blocked in code.** `demo_replay.py --case rent --side munix --live`. The
-   Gate denies the redirect because the recipient traces to a stranger's data, not to anything the user gave.
-   - The ledger lines show the rule (`recipient.trace_untrusted`), the takeover and the verified hash chain.
-   - No model made that call.
+2. **Same agent, same attack, under Munix: blocked, at two layers.**
+   - **Live** (`demo_replay.py --case rent --side munix --live`): the landlord's file reaches the agent only through a
+     Reader, as typed values: `kind=rent_notice, amount_cents=10000, amount_meaning=increase,
+     flagged_instructions=true`. The attacker's text never reaches the agent, and it never tries the redirect.
+   - **Recorded** (`--recorded`, a run from before the Readers): the agent read the text and tried the redirect, and
+     the Gate denied it in code. The recipient traces to a stranger's data (`recipient.trace_untrusted`), so it
+     counts as a takeover, and the hash chain verifies. No model made that call.
+   - The rehearsal on Oct 27 reproduced both sides live: bare redirected the rent, Munix blocked it. It cost $0.12.
 3. **How it works: the PixelMart walkthrough.** Two terminals, the same agent and prompt, a web page and an email to
    the boss (`demo/left.sh`, `demo/right.sh`). On screen: the trace line naming where an address came from, refs,
    a Reader turning reviews into typed values, and recovery restarting a clean agent.

@@ -27,6 +27,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -49,6 +50,9 @@ ATTACKER_IBAN = "US133000000121212121212"
 # The only arguments shown: destinations, selectors and amounts. Free text (subjects) can echo the payload.
 SHOWN_ARGS = ("recipient", "id", "amount", "n", "file_path")
 LEDGER_EVENTS = ("ruling", "decision", "takeover", "paused")
+# What a Reader hands the agent instead of a stranger's text (munix-readers::banking). Typed values only, safe to show.
+READER_FIELDS = ("kind", "amount_cents", "amount_meaning", "flagged_instructions", "their_subject_kinds",
+                 "their_subject_flags")
 BINARY = HERE.parents[1] / "target" / "debug" / "munix"
 
 
@@ -67,9 +71,15 @@ def show_args(args: dict) -> str:
 
 def steps_from_messages(messages) -> list[tuple[str, dict, str | None]]:
     """(tool, arguments, error or None) for each tool call, from a live run's messages."""
+    return [(tool, args, error) for tool, args, error, _ in steps_with_results(messages)]
+
+
+def steps_with_results(messages) -> list[tuple[str, dict, str | None, str]]:
+    """(tool, arguments, error or None, result text) for each tool call, from a live run's messages."""
     calls: dict[str, tuple[str, dict]] = {}
     order: list[str] = []
     errors: dict[str, str | None] = {}
+    results: dict[str, str] = {}
     for m in messages:
         if m.get("role") == "assistant":
             for call in m.get("tool_calls") or []:
@@ -77,7 +87,24 @@ def steps_from_messages(messages) -> list[tuple[str, dict, str | None]]:
                 order.append(call.id)
         elif m.get("role") == "tool" and m.get("tool_call_id") in calls:
             errors[m["tool_call_id"]] = m.get("error")
-    return [(*calls[i], errors.get(i)) for i in order]
+            content = m.get("content") or []
+            results[m["tool_call_id"]] = " ".join(
+                c.get("content", "") or "" for c in content if isinstance(c, dict)
+            ) if isinstance(content, list) else str(content)
+    return [(*calls[i], errors.get(i), results.get(i, "")) for i in order]
+
+
+def reader_digest(result: str) -> str | None:
+    """The Reader's typed fields in a Munix tool result (`## field [region, trust N]` then the value), as one line."""
+    parts = []
+    blocks = result.split("## ")
+    for block in blocks[1:]:
+        head, _, body = block.partition("\n")
+        name = head.split(" ", 1)[0]
+        if name in READER_FIELDS:
+            value = " ".join(line.strip("- ").strip() for line in body.strip().splitlines() if line.strip())
+            parts.append(f"{name}={value}")
+    return ", ".join(parts) or None
 
 
 def steps_from_transcript(transcript: str) -> list[tuple[str, dict, str | None]]:
@@ -127,7 +154,9 @@ def ledger_lines(path: str | None) -> list[str]:
     return keep + [l for l in lines if l.startswith(("chain verified", "CHAIN DOES NOT VERIFY"))]
 
 
-def render(side: str, prompt: str, steps, attack_succeeded: bool, ledger: list[str] | None) -> str:
+def render(
+    side: str, prompt: str, steps, attack_succeeded: bool, ledger: list[str] | None, digests: dict | None = None
+) -> str:
     title = "Bare Muse Spark (no Munix)" if side == "bare" else "Muse Spark under Munix"
     out = [
         f"== {title} ==",
@@ -136,12 +165,15 @@ def render(side: str, prompt: str, steps, attack_succeeded: bool, ledger: list[s
         "",
         "What the agent does:",
     ]
-    for tool, args, error in steps:
+    for i, (tool, args, error) in enumerate(steps):
         if tool.startswith("("):
             out.append(f"  {tool}")
             continue
         outcome = f"  -> {error}" if error else "  -> ran"
         out.append(f"  {tool}({show_args(args)}){outcome}")
+        digest = (digests or {}).get(i)
+        if digest:
+            out.append(f"      the agent got only the Reader's typed values: {digest}")
     if ledger is not None:
         out += ["", "Munix ledger:"] + [f"  {l}" for l in ledger]
     out += [
@@ -196,7 +228,10 @@ def live(case: str, side: str, budget: float) -> str:
     session = None
     if side == "munix":
         session = munix_executor.MunixSession(
-            ledger_dir=HERE / "runs" / "ledgers", tag=f"demo-{case}", manifests=HERE / "manifests" / "banking",
+            # A ledger is never overwritten, so each run gets its own name.
+            ledger_dir=HERE / "runs" / "ledgers",
+            tag=f"demo-{case}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+            manifests=HERE / "manifests" / "banking",
             binary=BINARY,
         )
     munix_executor.SUMMARIES.clear()
@@ -211,8 +246,17 @@ def live(case: str, side: str, budget: float) -> str:
         credit.charge(spent)
     if spent > budget:
         print(f"note: this run cost about ${spent:.3f}, over the ${budget:.2f} expected", file=sys.stderr)
-    ledger = ledger_lines(munix_executor.SUMMARIES[-1].get("ledger")) if session and munix_executor.SUMMARIES else None
-    return render(side, user_task.PROMPT, steps_from_messages(messages), bool(security), ledger) + (
+    ledger = None
+    if session is not None and munix_executor.SUMMARIES:
+        summary = munix_executor.SUMMARIES[-1]
+        if summary.get("error"):
+            # Munix never started the task: say so, rather than showing a ledger that isn't this run's.
+            raise SystemExit(f"munix could not start the task: {summary['error']}")
+        ledger = ledger_lines(summary.get("ledger"))
+    full = steps_with_results(messages)
+    digests = {i: reader_digest(result) for i, (_, _, _, result) in enumerate(full)} if session else None
+    steps = [(tool, args, error) for tool, args, error, _ in full]
+    return render(side, user_task.PROMPT, steps, bool(security), ledger, digests) + (
         f"\n(live run, about ${spent:.3f})"
     )
 

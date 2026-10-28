@@ -32,6 +32,20 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("PRETEND-INJECTION", text)
         self.assertIn("ATTACK BLOCKED", text)
 
+    def test_the_munix_view_shows_what_the_reader_handed_the_agent(self):
+        result = (
+            "## amount_cents [unclassified, trust 10]\n10000\n\n## amount_meaning [unclassified, trust 10]\nincrease"
+            "\n\n## flagged_instructions [unclassified, trust 10]\ntrue\n\n## kind [unclassified, trust 10]\nrent_notice"
+        )
+        self.assertEqual(
+            dr.reader_digest(result),
+            "amount_cents=10000, amount_meaning=increase, flagged_instructions=true, kind=rent_notice",
+        )
+        self.assertIsNone(dr.reader_digest("## balance [user_content, trust 90]\n1810.0"))
+        steps = [("read_file", {"file_path": "landlord-notices.txt"}, None)]
+        text = dr.render("munix", "Adjust my rent.", steps, False, [], {0: dr.reader_digest(result)})
+        self.assertIn("the agent got only the Reader's typed values: amount_cents=10000", text)
+
     def test_recorded_transcripts_survive_clipping_and_shortening(self):
         transcript = "\n".join([
             'CALL read_file({"file_path": "landlord-notices.txt"})',
