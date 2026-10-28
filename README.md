@@ -49,7 +49,7 @@ can propose actions but can't take them. Every action goes through code that kno
   really does mean acting on a stranger's word, such as paying the account number in a file nobody vouched for,
   stops and asks you first.
 
-## Status: rough draft of every piece, working end to end (Day 2 of 10)
+## Status (Oct 28, day 3 of 10): every piece works end to end
 
 | Piece | What it does |
 | :-- | :-- |
@@ -57,34 +57,70 @@ can propose actions but can't take them. Every action goes through code that kno
 | The Gate | Validates every call, traces each destination back to where it came from (your prompt, your contacts, or a web page), and enforces trust bands. Trust only ever goes down as the agent reads riskier content |
 | Supervisor (Muse Spark) | Writes and signs the plan, and reviews gray-zone calls from a redacted view that never contains an attacker-written string |
 | Readers (Muse Spark) | Read risky content for the agent and return only typed, low-capacity answers (counts, stars, enums), so there's no free text for an injection to ride in |
+| Detector (Llama Prompt Guard 2) | Optional. Scores text for injected instructions and can only lower its trust, never raise it. Munix's guarantee doesn't depend on it |
 | Recovery and watchdog | A takeover or a stall kills the agent. Munix withholds exactly the content behind it and restarts a clean agent, at most twice |
 | Integrity Seal | Any write to Munix's own code, manifests, plans or config while a task runs stops every task |
 | Ledger | Every decision, with its reasons, goes into a hash-chained audit log |
 
-## Results so far
+## Results
 
-- **Muse Spark is good at this.** Run unprotected against ten injection techniques, three runs each, it followed
-  none: 0 of 30 hijacked. See [`docs/redteam/bare-agent.md`](docs/redteam/bare-agent.md).
-- **So we assume the takeover anyway.** The demo agent has a labeled *simulated takeover* switch that makes it obey
-  instructions in tool results. That stands in for tomorrow's payload, a jailbreak or a weaker model; it is not
-  Muse Spark failing. With the switch on, across the same ten variants:
+### Real attacks, written by Muse Spark against itself
 
-  | Setup | Result |
-  | :-- | :-- |
-  | No Munix | 8 emailed an attacker; 2 put an attacker link in the boss's email |
-  | Munix, agent reads the raw reviews | 0 reached an attacker. The Gate denied each attempt in code, and recovery restarted a clean agent |
-  | Munix, reviews read by a Reader | 10 clean summaries to the boss, with no human step |
+Muse Spark resists the public injection attacks we tried on its own. So an adaptive attacker had Muse Spark write
+fresh injections against the unprotected agent in [AgentDojo](https://github.com/ethz-spylab/agentdojo), learning from
+each failed round. It found **9 that work**: they redirect a rent payment, drain the account, leak private data in a
+payment, or send the agent to a phishing site.
 
-  See [`docs/redteam/munix.md`](docs/redteam/munix.md).
+| 9 attacks, 3 replays each | Attack succeeded |
+| :-- | --: |
+| Muse Spark, no protection | **24 / 27** |
+| The same agent under Munix | **0 / 27** |
+| Under Munix with Llama Prompt Guard 2 | **0 / 27** |
+| Llama Prompt Guard 2 alone, scoring the attack text | flagged **0 / 9** |
+
+In banking, the Readers stopped the attacks: the poisoned file and payment notes reached the agent only as typed
+values, so it never tried. In Slack, the agent did try to open the phishing site, and the Gate denied the call in code:
+the URL came from a web page, not from the user. The working attack text stays private until it's reported to Meta.
+See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prompt-guard.md).
+
+### Meta's Prompt Guard 2, inside Munix
+
+| Injections | Prompt Guard 2 flags |
+| :-- | --: |
+| "Ignore previous instructions" style | 14 / 14 |
+| AgentDojo's strongest attack (`important_instructions`) | 0 / 14 |
+| Every attempt the adaptive attacker wrote | 1 / 239 |
+
+Prompt Guard catches attacks that openly tell a model to drop its instructions, and misses ones written to read like
+ordinary messages. Munix runs it as an optional detector that can only lower trust: it covers crude injections planted
+in content Munix would otherwise trust, and when it misses, the Gate still holds.
+
+### AgentDojo, the benchmark's default attack
+
+| | Banking: bare | Banking: Munix | Slack: bare | Slack: Munix |
+| :-- | --: | --: | --: | --: |
+| Attack success rate | 0 / 144 | **0 / 140** | 0 / 105 | **0 / 105** |
+| Utility, no attack | 15 / 16 | 12 / 16 | 20 / 21 | 2 / 21 |
+| Utility under attack | 118 / 144 | 92 / 140 | 79 / 105 | 10 / 105 |
+
+Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
+number found only in a file, opening a link from a channel message, or inviting someone whose email is on their
+website. Those stop and wait for you instead of guessing. Slack is the hard case, because most of its tasks pick a
+destination from others' messages; the fixes that keep the guarantee are listed in the write-up. Banking Munix runs
+use no human; Slack runs use a labeled simulated user that approves only fully traced destinations. See
+[`docs/redteam/agentdojo.md`](docs/redteam/agentdojo.md).
+
+### Stress tests
+
+- **Assume a full takeover anyway.** The demo agent has a labeled *simulated takeover* switch that makes it obey
+  instructions in tool results, as a stand-in for tomorrow's jailbreak or a weaker model. Across ten injection
+  variants on the PixelMart page: with no Munix, 8 emailed an attacker and 2 put an attacker link in the boss's email.
+  Under Munix, 0 reached an attacker, and with a Reader all 10 summaries reached the boss with no human step. See
+  [`docs/redteam/munix.md`](docs/redteam/munix.md).
 - **Sandbox escape probe:** 9 of 9 escape attempts blocked: the internet, DNS, host services, other relay ports,
   keys in the environment or in files, writable paths, the Docker socket, and Munix's process.
 - **Coverage:** [`docs/redteam/munix-coverage.md`](docs/redteam/munix-coverage.md) maps the design spec's 14
   attack classes to existing tests, gaps included.
-- **AgentDojo banking** (144 attack cases): 0 attacks succeeded under Munix, with no human and with a labeled
-  simulated user. Bare Muse Spark also resisted all 144. Munix costs utility, mostly where a task reads strangers'
-  text and then needs the user's OK. See [`docs/redteam/agentdojo.md`](docs/redteam/agentdojo.md).
-- **An adaptive attacker** that writes new payloads against the live agent found 2 that work on bare Muse Spark
-  (6 of 6 replays) and 0 of 6 under Munix. The working payloads stay private until they're reported to Meta.
 
 ## Try it
 
@@ -109,6 +145,24 @@ demo/tamper.sh                                  # touch a manifest mid-task: the
 All email goes to Mailpit at http://127.0.0.1:8025, never to a real mailbox. The mock site's injection payloads
 are test data.
 
+**The real attack, recorded or live** (`--live` spends Meta credit, about $0.03 bare and $0.06 under Munix):
+
+```bash
+eval/agentdojo/.venv/bin/python -I eval/agentdojo/demo_replay.py --case rent --side bare --recorded
+eval/agentdojo/.venv/bin/python -I eval/agentdojo/demo_replay.py --case rent --side munix --recorded
+```
+
+**Prompt Guard 2** (gated on Hugging Face: accept Meta's license and put `HF_TOKEN` in `.env`):
+
+```bash
+uv sync --project guard && guard/.venv/bin/python guard/download.py
+guard/.venv/bin/python guard/server.py --port 8091             # loopback only
+MUNIX_DETECTOR_URL=http://127.0.0.1:8091/score demo/right.sh   # or munix bridge --detector-url ...
+```
+
+**AgentDojo** runs live in `eval/agentdojo/` (see its `DESIGN.md` and `BRIDGE.md`). Paid runs need a credit floor
+set with `scripts/credit.py`.
+
 ## Layout
 
 | Path | What |
@@ -120,11 +174,13 @@ are test data.
 | `fixtures/mock-web/` | The poisoned PixelMart page and its ten injection variants |
 | `scripts/` | The red-team runner and an API smoke check |
 | `docs/` | The pre-event design spec, red-team results, and the live handoff between coding sessions |
-| `eval/agentdojo/` | AgentDojo setup and the bridge design |
+| `eval/agentdojo/` | AgentDojo runs under Munix: Slack and banking manifests, the bridge, the adaptive attacker, results |
+| `guard/` | The Llama Prompt Guard 2 sidecar Munix uses as a detector |
+| `demo/VIDEO_SCRIPT.md` | The demo video script |
 
 ## Checks
 
-About 560 Rust tests, plus the Python suites:
+About 720 Rust tests, plus the Python suites:
 
 ```bash
 cargo fmt --all --check
@@ -132,6 +188,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 uv run --project demo/agent pytest -q demo/agent/tests
 uv run --project demo/direct-server pytest -q demo/direct-server/tests
+python3 -m unittest discover -s guard/tests -t guard
+(cd eval/agentdojo && .venv/bin/python -I -m unittest discover tests)
 ```
 
 ## Built during the event
@@ -142,7 +200,8 @@ uv run --project demo/direct-server pytest -q demo/direct-server/tests
   prototype. It guided this build, and no prototype code is in this repository.
 - **Dependency:** [Web Speed OSS](https://github.com/Dominic-Pi-Sunyer/web-speed-oss), the author's own open-source
   project, is used to read web pages. It isn't part of the submission.
-- **Models:** every model Munix runs is a Meta model, Muse Spark: the agent, planner, reviewer and Readers.
+- **Models:** every model Munix runs is a Meta model: Muse Spark for the agent, planner, reviewer, Readers and the
+  adaptive attacker, and Llama Prompt Guard 2 as the optional detector.
 - **Coding assistant:** the code was written with Claude Code (Anthropic), as the commits' co-author lines show.
 
 ## License
