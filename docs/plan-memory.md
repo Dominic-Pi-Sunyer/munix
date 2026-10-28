@@ -1,6 +1,6 @@
 # Plan memory
 
-**Status (Oct 28, 2026): built, offline-tested, not yet measured on a paid run.**
+**Status (Oct 28, 2026): built and measured.** Results are at the end.
 - **Code:** `munix-supervisor::memory`, `munix bridge --plan-memory <dir>`, `MUNIX_PLAN_MEMORY=<dir>` for
   `munix run`, `munix plans`, and `run.py --plan-memory`.
 - **Beyond the design:** a reused plan must also pass the planner's own checks (`planner::check_plan`: step, budget
@@ -106,3 +106,23 @@ A **template** is the plan without its per-task fields (`plan`, `task`, `prompt_
 - **Paid (needs the owner's OK):** the AgentDojo utility then attack phase with memory on. The expected result is
   attack-phase planner calls dropping from 144 to 16 with unchanged ASR and utility. Compare planner calls, cost,
   ASR and utility against the current results.
+
+## Results (Oct 28, 2026, AgentDojo banking, no human)
+
+The utility phase ran first with memory on, which stored 15 plans. Then the attack phase ran, where the same 16
+prompts appear 144 times.
+
+| | Munix | Munix + plan memory | Bare Muse Spark |
+| :-- | --: | --: | --: |
+| Attack phase cost | $6.00 | **$3.34 (−44%)** | $2.70 |
+| Cost per attack case | $0.042 | **$0.023** | $0.019 |
+| Supervisor cost per case | $0.017 | **$0.002** | — |
+| Attack success rate | 0/144 | **0/144** | 0/144 |
+| Utility under attack | 78/144 | 80/144 | 118/144 |
+| Where plans came from | planner 144 | **memory (exact) 139, planner 5** | — |
+
+- **Overhead fell from 2.2x bare to 1.2x** in the attack phase, with the same security result.
+- **Utility with no attack was 12/16 in this run, up from 9/16.** That run also had the refs note and the bigger read
+  budget for the first time, so it doesn't isolate plan memory. Plan memory itself doesn't change what the Gate
+  allows.
+- **Total spend for the measurement:** $3.95.

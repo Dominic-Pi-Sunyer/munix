@@ -8,9 +8,10 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
-- **Plan memory: built and offline-tested (Oct 28), not yet measured.** See `docs/plan-memory.md`.
-  - **Next:** a paid AgentDojo run with `--plan-memory`, utility then attack. The expected result is attack-phase
-    planner calls dropping from 144 to 16 (`plan_origins` in the results).
+- **Plan memory: built and measured (Oct 28).** See `docs/plan-memory.md`.
+  - **Attack phase:** $6.00 → $3.34 (1.2x bare). ASR still 0/144, and 139 of 144 plans reused.
+  - **Utility with no attack:** 12/16, which includes the refs note.
+  - **Not measured:** `munix run`'s plan memory path end to end.
   - Reuse a stored plan for an exact or value-masked repeat of a prompt.
   - Clean runs only, and opt-in.
   - Build it before plan-on-first-write.

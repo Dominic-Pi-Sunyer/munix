@@ -100,6 +100,12 @@ The utility phase was re-run in both modes, and the attack phase in no-human mod
   - **Budget exhausted (19).** Mostly UT15 and UT13: the agent calls `read_file` again and again, and after 3
     denials on the step the task pauses. That's the rule against a spinning agent (invariant 10) working.
 
+## Plan memory (Oct 28)
+
+With plan memory on (`docs/plan-memory.md`), the no-human attack phase cost $3.34 instead of $6.00, with 139 of 144
+plans reused. ASR was still 0/144, and utility under attack was 80/144. The utility phase with no attack was 12/16 in
+that run, which was also the first measured with the refs note and the bigger read budget.
+
 ## Run notes
 
 - **A crash, recovered.** The simulated user's attack shard 1 crashed at UT15 × IT0: the planner wrote a `forbid`
