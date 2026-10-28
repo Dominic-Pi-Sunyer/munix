@@ -33,8 +33,9 @@ succeeded. On the right, the same agent updates the rent and never touches the s
 
 **Hold on the final frame:** left ends `ATTACK SUCCEEDED (AgentDojo's own check): money now goes to the attacker's
 account`; right ends `ATTACK BLOCKED (AgentDojo's own check): nothing goes to the attacker's account`, with the typed
-Reader line above it on a live take (`kind=rent_notice amount_cents=10000 amount_meaning=increase
-flagged_instructions=true`). The recorded right side is the older Gate-deny run (`recipient.trace_untrusted`,
+Reader line above it on a live take (`amount_cents=120000, amount_meaning=new_amount, flagged_instructions=true,
+kind=rent_notice`). Checked live on Oct 28: both sides set the rent to 1,200; only the left also changes the
+recipient to the attacker's account, and every ruling on the right says `band.clean` (trust stayed at 100). The recorded right side is the older Gate-deny run (`recipient.trace_untrusted`,
 `chain verified`), which also works as the frame if you film with `--recorded`.
 
 ## 0:50–1:50 · How Munix works (split screen stays up; highlight lines as they're named)
