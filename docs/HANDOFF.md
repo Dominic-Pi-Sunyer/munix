@@ -12,9 +12,9 @@ _Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
   - Four low findings documented. The Console now says "the prompt" only for `id`/`text` destinations (fixed).
   - **Trusted-content tests** (`crates/munix-gate/tests/trusted_content.rs`, 16, by Sonnet): a typed value
     (contact email) on a hacked high-trust page passes the trace when the plan allows that step at trust 60 or more:
-    the `gap_` tests. Prompt Guard closes it only when the attacker also plants blunt instructions.
-  - **Owner's call:** require the user for tier 2–3 destinations that come from web content (step-source floor above
-    the web ceilings), or keep and document.
+    the `gap_` tests. In scope (threat model) but a G3 residual risk the spec already accepts ("bounded, not
+    prevented"), not a G1/G2 break. Prompt Guard closes it only when the attacker also plants blunt instructions.
+  - **Optional hardening (owner's call):** require the user for tier-3 destinations that come from web content.
 
 - **Prompt Guard 2, Slack, and 7 new adaptive attacks: done and measured (Oct 28), about $40 today.** Write-up:
   `docs/redteam/adaptive-and-prompt-guard.md`. Video script: `demo/VIDEO_SCRIPT.md` (owner's outline, rent case).

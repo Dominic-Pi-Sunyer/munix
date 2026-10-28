@@ -31,17 +31,17 @@ page is hacked: a store page labeled `operator_content` (85) or `product_listing
 | The same, with a detector that misses the injection | **Allowed and sent** | Nothing |
 | Injection text in a typed enum or number field | **The tool output is refused**; it can't carry text | Ingest |
 
-**The gap.** Munix's guarantee covers content an attacker can write *according to its labels*. If a site Munix rates
-high trust is compromised and a typed value on it (a contact email, a link) is replaced, and the plan allows that step
-as the source, the Gate can't tell the attacker's value from the real one. The spec anticipates this: web content is
-capped at 95 because legitimate sites get compromised. This is the one place where Prompt Guard adds protection Munix
-doesn't have on its own, but only when the attacker also plants blunt instruction text that Prompt Guard catches.
+**A known residual risk, not a broken claim.** If a site Munix rates high trust is compromised and a typed value on it
+(a contact email, a link) is replaced, and the plan allows that step as the source, the Gate can't tell the attacker's
+value from the real one. Compromised sites are in the threat model (section 2: the attacker controls any content the
+agent reads; 5.3: "Legitimate sites get compromised"). But the action is the one the user asked for ("email the
+store's support address"), the plan is sound, and the trace is correct; the attacker changed a value that traces to a
+trustworthy source. The spec rates exactly this as **G3, bounded, not prevented**, and lists it as adaptive red-team
+item 2 ("steering A to a wrong choice whose value traces to a trustworthy source"). G1 and G2 are not broken.
 
-**Options (owner's call):**
-1. **Destinations for egress tools that come from web content always need the user,** whatever the region's trust:
-   raise the step-source floor for tier 2–3 destinations above every web ceiling (for example 96). Closes the gap in
-   code. Costs utility on tasks like "email the store's support address", which would stop and ask.
-2. **Keep it, and say so.** Document the gap, and rely on Prompt Guard for crude cases.
+This is the one place where Prompt Guard adds protection Munix doesn't have on its own, and only when the attacker
+also plants blunt instruction text it catches.
 
-Recommendation: option 1 for tier 3 (money, mail out of the organization), since a confirmation there is cheap and
-the gap is exactly what an attacker who compromises a popular site would use.
+**Optional hardening (owner's call, beyond the v1 claims):** destinations for tier-3 egress tools that come from web
+content could always need the user, whatever the region's trust (a step-source floor above every web ceiling).
+It would cost utility on tasks like "email the store's support address", which would stop and ask.
