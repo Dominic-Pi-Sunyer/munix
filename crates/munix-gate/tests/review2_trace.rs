@@ -33,7 +33,16 @@ fn deliver(refs: &mut RefTable, fields: &[(&str, Value)]) {
     let source = Source::Tool {
         tool: "bank.list".parse().unwrap(),
     };
-    ingest(&manifest, 1, &source, &reads, output, refs).unwrap();
+    ingest(
+        &manifest,
+        1,
+        &source,
+        &reads,
+        output,
+        &BTreeSet::new(),
+        refs,
+    )
+    .unwrap();
 }
 
 fn rule_update(refs: &RefTable, args: &[(&str, Value)]) -> Ruling {

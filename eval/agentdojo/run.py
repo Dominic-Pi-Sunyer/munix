@@ -10,7 +10,8 @@ Each run writes `results/<mode>-<suite>-<phase>[-<shard>].json` (scores, token u
 transcripts). Against the Meta API `--budget USD` is required: the run stops before the next case once the agent's and
 Munix's Supervisor's estimated spend reaches it (it can go over by at most the one case that crosses it). Every paid
 run also charges `scripts/credit.py`'s shared balance and stops at its floor ($25 by default), kept for the demo. Transcripts go to `runs/` (gitignored). Reads MODEL_API_KEY from the repo's .env and never prints it.
-`--mode munix` (banking only) sends every tool call through a Munix Gate via `munix bridge`; see BRIDGE.md.
+`--mode munix` (banking and slack) sends every tool call through a Munix Gate via `munix bridge`; see BRIDGE.md.
+`--detector-url` points the bridge at a prompt-injection detector's sidecar; such runs are named `munix+guard`.
 Spends Meta credit; the lead runs it.
 """
 
@@ -132,10 +133,12 @@ def use_system_role() -> None:
     openai_llm._message_to_openai = patched
 
 
-def setup_tag(mode: str, takeover: bool, model: str, simulated_user: bool = False, plan_memory: bool = False) -> str:
+def setup_tag(
+    mode: str, takeover: bool, model: str, simulated_user: bool = False, plan_memory: bool = False, detector: bool = False
+) -> str:
     """Names a setup in result files and pipeline names: `bare`, `munix-takeover`, `munix-simuser`, `munix-memory`,
-    `bare-takeover-llama-3.2-3b`."""
-    tag = mode + ("-takeover" if takeover else "") + ("-simuser" if simulated_user else "")
+    `munix+guard` (a detector is on), `bare-takeover-llama-3.2-3b`."""
+    tag = mode + ("+guard" if detector else "") + ("-takeover" if takeover else "") + ("-simuser" if simulated_user else "")
     tag += "-memory" if plan_memory else ""
     if model != DEFAULT_MODEL:
         tag += "-" + "".join(c if c.isalnum() or c in ".-" else "-" for c in model.split("/")[-1].lower())
@@ -157,7 +160,10 @@ def make_pipeline(args, model: str, key: str, usage: Usage, session) -> AgentPip
         pipe = AgentPipeline([*head, munix_executor.MunixStart(session), llm, loop])
     # AgentDojo requires a registered model key in the name ("local"); the attack text then calls the model
     # "Local model", the same for every setup we compare.
-    pipe.name = f"local-{setup_tag(args.mode, args.takeover, model, args.simulated_user, bool(getattr(args, 'plan_memory', None)))}-{args.effort}"
+    pipe.name = (
+        f"local-{setup_tag(args.mode, args.takeover, model, args.simulated_user, bool(getattr(args, 'plan_memory', None)), bool(getattr(args, 'detector_url', None)))}"
+        f"-{args.effort}"
+    )
     return pipe
 
 
@@ -171,8 +177,14 @@ def shard_of(items: list[str], shard: str | None) -> list[str]:
 
 
 def cmd_run(args) -> int:
-    if args.mode == "munix" and args.suite != "banking":
-        print(f"--mode munix has manifests for the banking suite only, not {args.suite}", file=sys.stderr)
+    if args.mode == "munix" and not (HERE / "manifests" / args.suite).is_dir():
+        print(f"--mode munix has no manifests for the {args.suite} suite", file=sys.stderr)
+        return 2
+    if (args.detector_url or args.detector_threshold is not None) and args.mode != "munix":
+        print("--detector-url and --detector-threshold only apply to --mode munix", file=sys.stderr)
+        return 2
+    if args.detector_threshold is not None and not args.detector_url:
+        print("--detector-threshold needs --detector-url", file=sys.stderr)
         return 2
     if args.simulated_user and args.mode != "munix":
         print("--simulated-user only applies to --mode munix", file=sys.stderr)
@@ -202,7 +214,7 @@ def cmd_run(args) -> int:
     if args.system_role == "system":
         use_system_role()
     model = args.model or env_value("MUNIX_WORKER_MODEL") or DEFAULT_MODEL
-    tag = setup_tag(args.mode, args.takeover, model, args.simulated_user, bool(args.plan_memory))
+    tag = setup_tag(args.mode, args.takeover, model, args.simulated_user, bool(args.plan_memory), bool(args.detector_url))
     usage = Usage()
     session = None
     if args.mode == "munix":
@@ -219,6 +231,9 @@ def cmd_run(args) -> int:
             binary=binary,
             simulated_user=args.simulated_user,
             plan_memory=Path(args.plan_memory).resolve() if args.plan_memory else None,
+            detector_url=args.detector_url,
+            detector_threshold=args.detector_threshold,
+            suite=args.suite,
         )
     munix_executor.SUMMARIES.clear()
     pipe = make_pipeline(args, model, key, usage, session)
@@ -315,6 +330,8 @@ def cmd_run(args) -> int:
         "attack": ATTACK if args.phase == "attack" else None,
         "setup": tag,
         "simulated_user": args.simulated_user,
+        "detector_url": args.detector_url,
+        "detector_threshold": args.detector_threshold,
         "takeover": args.takeover,
         "model": model,
         "base_url": args.base_url,
@@ -356,30 +373,57 @@ def result_name(setup: str, suite: str, phase: str, shard: str | None) -> str:
     return f"{setup}--{suite}-{phase}{tail}.json"
 
 
+def rate(values: dict) -> str:
+    return f"{sum(values.values())}/{len(values)} ({100 * sum(values.values()) / len(values):.1f}%)" if values else "-"
+
+
+def summarize(files: list[Path]) -> dict:
+    """One setup's merged results over every file it has (shards and phases)."""
+    merged = {p: {"utility": {}, "security": {}} for p in PHASES}
+    cost = 0.0
+    for f in files:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        merged[d["phase"]]["utility"].update(d["utility"])
+        merged[d["phase"]]["security"].update(d["security"])
+        cost += d["estimated_cost_usd"]
+    return {
+        "utility, no attack": rate(merged["utility"]["utility"]),
+        "utility under attack": rate(merged["attack"]["utility"]),
+        "attack success rate (ASR)": rate(merged["attack"]["security"]),
+        "injection goals as tasks": rate(merged["goals"]["utility"]),
+        "estimated cost": f"${cost:.2f}",
+    }
+
+
+def render_table(rows_by_setup: dict[str, dict]) -> list[str]:
+    """The setups side by side, one column each."""
+    labels = list(next(iter(rows_by_setup.values())))
+    width = max(len(label) for label in labels)
+    cols = {setup: max(len(setup), *(len(rows[label]) for label in labels)) for setup, rows in rows_by_setup.items()}
+    header = " " * width + "  " + "  ".join(f"{setup:>{cols[setup]}}" for setup in rows_by_setup)
+    lines = [header]
+    for label in labels:
+        cells = "  ".join(f"{rows[label]:>{cols[setup]}}" for setup, rows in rows_by_setup.items())
+        lines.append(f"{label:<{width}}  {cells}")
+    return lines
+
+
 def cmd_report(args) -> int:
     by_setup: dict[str, list[Path]] = {}
     for f in sorted((HERE / "results").glob(f"*--{args.suite}-*.json")):
         if f.name.startswith("adaptive--"):  # adaptive.py's files have their own format
             continue
         by_setup.setdefault(f.name.split("--", 1)[0], []).append(f)
-    for mode, files in by_setup.items():
-        merged = {p: {"utility": {}, "security": {}} for p in PHASES}
-        cost = 0.0
-        for f in files:
-            d = json.loads(f.read_text(encoding="utf-8"))
-            merged[d["phase"]]["utility"].update(d["utility"])
-            merged[d["phase"]]["security"].update(d["security"])
-            cost += d["estimated_cost_usd"]
-
-        def rate(values: dict) -> str:
-            return f"{sum(values.values())}/{len(values)} ({100 * sum(values.values()) / len(values):.1f}%)" if values else "-"
-
+    summaries = {mode: summarize(files) for mode, files in by_setup.items()}
+    for mode, rows in summaries.items():
         print(f"{mode} · {args.suite} · {BENCHMARK_VERSION} · {ATTACK}")
-        print(f"  utility, no attack:        {rate(merged['utility']['utility'])}")
-        print(f"  utility under attack:      {rate(merged['attack']['utility'])}")
-        print(f"  attack success rate (ASR): {rate(merged['attack']['security'])}")
-        print(f"  injection goals as tasks:  {rate(merged['goals']['utility'])}")
-        print(f"  estimated cost:            ${cost:.2f}")
+        for label in ("utility, no attack", "utility under attack", "attack success rate (ASR)", "injection goals as tasks"):
+            print(f"  {label + ':':<28}{rows[label]}")
+        print(f"  {'estimated cost:':<28}{rows['estimated cost']}")
+    if len(summaries) > 1:
+        # Setups that differ only by a detector (`munix` and `munix+guard`) sit next to each other.
+        print(f"\nside by side · {args.suite} · {BENCHMARK_VERSION} · {ATTACK}")
+        print("\n".join(render_table(summaries)))
     return 0
 
 
@@ -396,6 +440,10 @@ def main() -> int:
                    help="--mode munix: the bridge's Console approves like a careful human would (default: always no)")
     r.add_argument("--plan-memory", metavar="DIR",
                    help="--mode munix: reuse stored plans from DIR and keep clean runs' plans there (docs/plan-memory.md)")
+    r.add_argument("--detector-url", metavar="URL",
+                   help="--mode munix: the prompt-injection detector's sidecar (loopback); runs are named munix+guard")
+    r.add_argument("--detector-threshold", type=float, metavar="F",
+                   help="--mode munix: score at or above which the detector flags a field (default: the bridge's)")
     r.add_argument("--effort", default="low", choices=("minimal", "low", "medium", "high"))
     r.add_argument("--takeover", action="store_true", help="add the labeled simulated takeover to the system prompt")
     r.add_argument("--base-url", default=META_URL, help="OpenAI-compatible endpoint (default: the Meta Model API)")

@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use munix_core::context::Band;
+use munix_core::detect::DETECTOR_FLAGGED;
 use munix_core::ids::RefId;
 use munix_core::label::{Author, Capacity, Label, RegionType, Source, Trust};
 use munix_core::manifest::{ArgRole, ArgSpec, OutputSpec, TYPED_BUDGET_BITS, ToolManifest};
@@ -67,6 +68,9 @@ pub struct Delivered {
 ///   `Capacity::Typed { bits }`, `None` gives `Capacity::FreeText`).
 /// - `typed_only` is true when at least one field was delivered and every delivered field is `Capacity::Typed` with
 ///   the sum of bits at most [`TYPED_BUDGET_BITS`] (design spec section 8, "Readers").
+/// - A field named in `flagged` (an injection detector flagged its text, invariant 7) has its label trust lowered to
+///   `min(trust, DETECTOR_FLAGGED)`, so its refs, `min_trust`, `context_floor` and argument tracing all see the lower
+///   trust. The set can only lower trust; an empty set changes nothing.
 /// - Each url, email and phone value (single or list element) is issued a ref with origin
 ///   `Origin::Step { step, field }` and the field's label, and the ref id replaces the value.
 /// - In delivered text, every `ref:` is rewritten to `ref-`, so page text can't name a Gate ref.
@@ -76,6 +80,7 @@ pub fn ingest(
     source: &Source,
     reads: &BTreeSet<RegionType>,
     output: BTreeMap<String, Value>,
+    flagged: &BTreeSet<String>,
     refs: &mut RefTable,
 ) -> Result<Delivered, IngestError> {
     // Pass 1: validate everything before touching the ref table, so a refused output leaves no refs behind.
@@ -126,7 +131,10 @@ pub fn ingest(
             delivered.withheld.push(name);
             continue;
         }
-        let label = label_for(spec, source);
+        let mut label = label_for(spec, source);
+        if flagged.contains(&name) {
+            label.trust = label.trust.min(DETECTOR_FLAGGED);
+        }
         carried.push((name.clone(), label.trust, spec.delivered_bits(&value)));
         total_bits = match (total_bits, label.capacity) {
             (Some(sum), Capacity::Typed { bits }) => sum.checked_add(bits),
@@ -338,7 +346,15 @@ mod tests {
         reads: &BTreeSet<RegionType>,
         output: BTreeMap<String, Value>,
     ) -> Result<Delivered, IngestError> {
-        ingest(m, 1, source, reads, output, &mut RefTable::new())
+        ingest(
+            m,
+            1,
+            source,
+            reads,
+            output,
+            &BTreeSet::new(),
+            &mut RefTable::new(),
+        )
     }
 
     // ---- tests that do not touch refs ----
@@ -532,6 +548,7 @@ mod tests {
                 ("a_link", json!("https://a.example/x")),
                 ("z_text", json!(7)),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         );
         assert_eq!(r, Err(IngestError::BadValue));
@@ -927,6 +944,7 @@ mod tests {
                 ("page", json!("secret page text")),
                 ("links", json!(["https://a.example/x"])),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();
@@ -1078,6 +1096,7 @@ mod tests {
                 ("hidden_n", json!(77)),
                 ("note", json!("12")),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();
@@ -1119,6 +1138,7 @@ mod tests {
                     json!(["https://a.example/x", "https://b.example/y"]),
                 ),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();
@@ -1152,6 +1172,7 @@ mod tests {
             &web(5),
             &reads(&[RegionType::Unclassified]),
             out(&[("links", json!(["https://evil.example/steal"]))]),
+            &BTreeSet::new(),
             &mut RefTable::new(),
         )
         .unwrap();
@@ -1178,6 +1199,7 @@ mod tests {
                     json!(["SE3550000000054910000003", "gb29nwbk60161331926819"]),
                 ),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         );
         assert_eq!(d, Err(IngestError::BadValue));
@@ -1191,6 +1213,7 @@ mod tests {
                 ("payee", json!("GB29NWBK60161331926819")),
                 ("payees", json!(["SE3550000000054910000003"])),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();
@@ -1220,6 +1243,7 @@ mod tests {
                 ("phone", json!("+14155550123")),
                 ("contact", json!("help@shop.example")),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();
@@ -1252,6 +1276,7 @@ mod tests {
                 ),
                 ("b_more", json!(["https://a.example/x"])),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();
@@ -1278,6 +1303,7 @@ mod tests {
                 ("a_open", json!("https://shop.example/")),
                 ("b_ad", json!("https://ads.example/click")),
             ]),
+            &BTreeSet::new(),
             &mut refs,
         )
         .unwrap();

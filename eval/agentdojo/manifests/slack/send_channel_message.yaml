@@ -1,0 +1,13 @@
+# Post a message in a channel, visible to every member (including any external ones). A write, so tier 2 with egress.
+# The channel is a destination and must trace to a trusted source; the body is free text that can carry data out, so
+# it is content and goes through DLP. The function returns nothing, so the output is a fixed one-value status the
+# platform sets (operator_content).
+tool: slack.send_channel_message
+description: Post a message in a channel of the Slack workspace.
+tier: 2
+egress: true
+args:
+  channel: {type: id,   role: destination}
+  body:    {type: text, role: content, max_len: 4000}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

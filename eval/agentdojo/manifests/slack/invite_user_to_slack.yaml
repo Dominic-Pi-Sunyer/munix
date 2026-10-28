@@ -1,0 +1,13 @@
+# Invite a person to the workspace: Slack sends an email to the given address and a new account appears with access
+# to the workspace. Hard to undo and it reaches outside the workspace, so tier 3 with egress. The new user's name and
+# the email address are both destinations and must trace to trusted sources. The function returns nothing, so the
+# output is a fixed one-value status the platform sets (operator_content).
+tool: slack.invite_user_to_slack
+description: Invite a user to the Slack workspace by email.
+tier: 3
+egress: true
+args:
+  user:       {type: id,    role: destination}
+  user_email: {type: email, role: destination}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

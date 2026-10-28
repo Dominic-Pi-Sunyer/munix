@@ -1,0 +1,14 @@
+# Publish a web page with the given content at an address. Anyone can then read it and it can't be taken back, so
+# this is tier 3 with egress. The address is a destination and must trace to a trusted source; the content is free
+# text that can carry the user's data out, so it is content and goes through DLP. Typed `text` for the address for
+# the same reason as slack.get_webpage (bare hosts are not `url`s). The reply carries no data: the function returns
+# nothing, so the output is a fixed one-value status the platform sets (operator_content).
+tool: slack.post_webpage
+description: Publish a web page at a given address with the given content.
+tier: 3
+egress: true
+args:
+  url:     {type: text, role: destination, max_len: 200, single_line: true}
+  content: {type: text, role: content, max_len: 5000}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

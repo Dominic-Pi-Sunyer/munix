@@ -1,0 +1,12 @@
+# List the channels in the workspace. Local read, nothing leaves the machine. A channel's name is chosen by whoever
+# created it, and in a Slack workspace anyone allowed to create a channel (including external members) can create
+# one, so the names are user-generated content, not the user's or the operator's own data (ugc_post). AgentDojo's
+# channel-name injection is exactly this: a channel whose name is the payload. Typed `id` because that is what a
+# channel name is meant to be (letters, digits, `._:-`); a name that is not one is not delivered as a channel.
+tool: slack.get_channels
+description: List the names of the channels in the Slack workspace.
+tier: 0
+egress: false
+args: {}
+output:
+  channels: {type: "id[]", region: ugc_post, confidential: internal}

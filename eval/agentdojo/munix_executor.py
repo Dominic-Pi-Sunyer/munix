@@ -52,6 +52,8 @@ class BridgeClient:
         env: dict[str, str] | None = None,
         simulated_user: bool = False,
         plan_memory: Path | str | None = None,
+        detector_url: str | None = None,
+        detector_threshold: float | None = None,
     ) -> None:
         self.manifests = Path(manifests)
         self.ledger = Path(ledger)
@@ -64,6 +66,9 @@ class BridgeClient:
         self.simulated_user = simulated_user
         # Plan memory's directory (docs/plan-memory.md): a stored plan may replace the bridge's planner call.
         self.plan_memory = plan_memory
+        # A prompt-injection detector's sidecar (invariant 7: it can only lower trust) and its flag threshold.
+        self.detector_url = detector_url
+        self.detector_threshold = detector_threshold
         self.calls = 0
         self.denials = 0
         self.tools_run = 0
@@ -81,6 +86,10 @@ class BridgeClient:
             cmd.append("--simulated-user")
         if self.plan_memory is not None:
             cmd += ["--plan-memory", str(self.plan_memory)]
+        if self.detector_url is not None:
+            cmd += ["--detector-url", self.detector_url]
+        if self.detector_threshold is not None:
+            cmd += ["--detector-threshold", str(self.detector_threshold)]
         env = {**os.environ, **(self.env or {})}
         self._stderr_file = open(self._stderr_path, "wb")
         try:
@@ -223,6 +232,9 @@ class MunixSession:
         env: dict[str, str] | None = None,
         simulated_user: bool = False,
         plan_memory: Path | str | None = None,
+        detector_url: str | None = None,
+        detector_threshold: float | None = None,
+        suite: str | None = None,
     ) -> None:
         self.ledger_dir = Path(ledger_dir)
         self.tag = tag
@@ -232,6 +244,10 @@ class MunixSession:
         self.env = env
         self.simulated_user = simulated_user
         self.plan_memory = plan_memory
+        self.detector_url = detector_url
+        self.detector_threshold = detector_threshold
+        # Which suite's converters to use: given, else the manifests directory's name (manifests/<suite>).
+        self.suite = suite or (Path(manifests).name if Path(manifests).name in convert.SUITES else None)
         self.tasks = 0
         self.client: BridgeClient | None = None
         self._record: dict | None = None
@@ -246,7 +262,8 @@ class MunixSession:
         ledger = self.ledger_dir / f"{self.tag}-{self.tasks:04d}-{digest}.jsonl"
         self._record = {"index": self.tasks, "prompt_sha256": digest, "ledger": str(ledger)}
         client = BridgeClient(
-            self.manifests, ledger, self.binary, self.read_timeout, self.env, self.simulated_user, self.plan_memory
+            self.manifests, ledger, self.binary, self.read_timeout, self.env, self.simulated_user, self.plan_memory,
+            self.detector_url, self.detector_threshold,
         )
         self.client = client
         try:
@@ -335,7 +352,7 @@ class MunixToolsExecutor(ToolsExecutor):
             if error is not None:
                 return {"ok": False, "error": _short(error)}
             try:
-                return {"ok": True, "output": convert.to_fields(name, result, env)}
+                return {"ok": True, "output": convert.to_fields(name, result, env, getattr(self.session, "suite", None))}
             except (KeyError, ValueError, TypeError) as e:
                 return {"ok": False, "error": _short(f"{type(e).__name__}: {e}")}
 

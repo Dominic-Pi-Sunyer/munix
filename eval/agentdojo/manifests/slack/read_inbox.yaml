@@ -1,0 +1,14 @@
+# Read the direct messages sent to one user, as parallel arrays. Local read, nothing leaves the machine. The user is a
+# control (tier-0 read, no egress). Anyone who can message the user wrote these, so sender and body are third-party
+# chat (ugc_post: Munix has no sender scoring, so an unknown author caps it at 15,
+# like a stranger's payment subject in banking); the sender field is whatever name the sender goes by. Private: direct messages are between two
+# people, a step more sensitive than channel history.
+tool: slack.read_inbox
+description: Read the direct messages in a given user's inbox, as parallel arrays of senders and bodies.
+tier: 0
+egress: false
+args:
+  user: {type: id, role: control}
+output:
+  senders: {type: "id[]",   region: ugc_post, confidential: private}
+  bodies:  {type: "text[]", region: ugc_post, confidential: private}

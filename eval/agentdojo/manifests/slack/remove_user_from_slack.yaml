@@ -1,0 +1,13 @@
+# Remove a user from the workspace. It deletes their inbox and channel memberships and can't be undone, so tier 3.
+# Nothing is sent anywhere, so no egress. The user is a selector: it picks which existing account to act on rather
+# than where something goes, so it must be a reference to a user the agent already knows, and it is checked against
+# the plan. The function returns nothing, so the output is a fixed one-value status the platform sets
+# (operator_content).
+tool: slack.remove_user_from_slack
+description: Remove a user from the Slack workspace.
+tier: 3
+egress: false
+args:
+  user: {type: id, role: selector}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

@@ -5,6 +5,7 @@
 //! code never trusts what comes back: callers validate the value against their own types.
 
 mod effort;
+mod guard;
 mod meta;
 mod mock;
 mod schema;
@@ -16,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 pub use effort::{ReasoningEffort, Role, effort_for};
+pub use guard::GuardDetector;
 pub use meta::MetaAdapter;
 pub use mock::MockAdapter;
 pub use schema::sanitize_schema;

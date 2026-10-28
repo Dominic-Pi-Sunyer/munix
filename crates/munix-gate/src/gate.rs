@@ -8,6 +8,7 @@ use std::sync::Arc;
 use munix_core::context::{Band, ContextState};
 use munix_core::crypto::{self, Digest, Purpose, Signed, SigningKey};
 use munix_core::decision::{Decision, Stage, Verdict};
+use munix_core::detect::DetectorConfig;
 use munix_core::ids::{RefId, TaskId, ToolName, find_embedded};
 use munix_core::label::{Author, Capacity, Confidential, Label, RegionType, Source, Trust};
 use munix_core::manifest::{ArgRole, Catalog, ToolManifest};
@@ -162,6 +163,7 @@ pub struct Gate {
     domains: BTreeMap<String, u32>,
     seal: Option<Arc<dyn SealCheck>>,
     tampered: Option<Tamper>,
+    detector: Option<DetectorConfig>,
 }
 
 enum Status {
@@ -317,7 +319,15 @@ impl Gate {
             domains: BTreeMap::new(),
             seal: None,
             tampered: None,
+            detector: None,
         }
+    }
+
+    /// Installs an injection detector (invariant 7). Before ingest, every free-text field the plan reads is scored;
+    /// a flagged field's label trust drops to `DETECTOR_FLAGGED`, and a `detector_scored` ledger entry names the
+    /// tool, step, scored and flagged fields, highest score and detector. With no detector, nothing changes.
+    pub fn set_detector(&mut self, detector: DetectorConfig) {
+        self.detector = Some(detector);
     }
 
     /// Installs the Integrity Seal checked before every tool execution (invariant 11).
@@ -1518,6 +1528,11 @@ impl Gate {
                 tool: request.tool.clone(),
             }
         };
+        let flagged = match self.detect_flagged(request, case.hash, &manifest, &raw_output) {
+            Ok(flagged) => flagged,
+            // The ledger could not record the scoring: nothing reaches the agent.
+            Err(()) => return Reply::Failed(ToolFailure::Internal),
+        };
         let ingested = match self.tasks.get_mut(&request.task) {
             Some(task) => ingest(
                 &manifest,
@@ -1525,6 +1540,7 @@ impl Gate {
                 &source,
                 &task.plan.reads,
                 raw_output.clone(),
+                &flagged,
                 &mut task.refs,
             ),
             None => return Reply::Halted,
@@ -1604,6 +1620,75 @@ impl Gate {
             return Reply::Failed(ToolFailure::Internal);
         }
         Reply::Delivered(delivered)
+    }
+
+    /// Scores the free-text fields of one tool output with the detector (invariant 7) and returns the names of the
+    /// flagged fields. A candidate is a field in `manifest.output` that is not `hidden`, whose region the plan reads,
+    /// and that is free text (`capacity_bits()` is `None`); typed fields are never scored. All strings go in one
+    /// call, and a field is flagged when any of its strings is. A failing detector flags every candidate. Writes one
+    /// `detector_scored` entry with names and numbers only (never text). `Err` means the ledger write failed.
+    /// With no detector, or no candidates, returns an empty set and writes nothing.
+    fn detect_flagged(
+        &mut self,
+        request: &Request,
+        hash: &Digest,
+        manifest: &ToolManifest,
+        output: &BTreeMap<String, Value>,
+    ) -> Result<BTreeSet<String>, ()> {
+        let (Some(config), Some(task)) = (self.detector.clone(), self.tasks.get(&request.task))
+        else {
+            return Ok(BTreeSet::new());
+        };
+        // (field, text) pairs, in field-name order.
+        let mut texts: Vec<(&str, &str)> = Vec::new();
+        for (name, value) in output {
+            let Some(spec) = manifest.output.get(name) else {
+                continue;
+            };
+            if spec.region == RegionType::Hidden
+                || !task.plan.reads.contains(&spec.region)
+                || spec.capacity_bits().is_some()
+            {
+                continue;
+            }
+            match value {
+                Value::String(text) if !text.is_empty() => texts.push((name, text)),
+                Value::Array(items) => {
+                    for item in items {
+                        if let Some(text) = item.as_str().filter(|t| !t.is_empty()) {
+                            texts.push((name, text));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if texts.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let inputs: Vec<&str> = texts.iter().map(|(_, text)| *text).collect();
+        let (flags, max) = config.flags(&inputs);
+        let scored: BTreeSet<&str> = texts.iter().map(|(name, _)| *name).collect();
+        let flagged: BTreeSet<String> = texts
+            .iter()
+            .zip(&flags)
+            .filter(|(_, flag)| **flag)
+            .map(|((name, _), _)| (*name).to_owned())
+            .collect();
+        let logged = self.log(request_event(
+            "detector_scored",
+            request,
+            hash,
+            json!({
+                "detector": config.detector.name(),
+                "threshold": config.threshold,
+                "fields": scored,
+                "flagged": flagged,
+                "max_score": max,
+                "failed": max.is_none(),
+            }),
+        ));
+        if logged { Ok(flagged) } else { Err(()) }
     }
 
     /// The call never happened: record it and fail.

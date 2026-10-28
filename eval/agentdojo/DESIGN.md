@@ -113,3 +113,16 @@ Any of these that Munix blocks are what the design costs. We don't relabel to wi
    somewhat more than the baseline because of the planner and reviewer calls: **about $5–10 for both suites.**
 4. **Write-up:** `docs/redteam/agentdojo.md`, with the bare and Munix tables, every blocked-benign task named, and
    the quirks above.
+
+## Slack status (Oct 28, 2026)
+
+`run.py run --suite slack --mode munix` is wired up, offline-tested and not yet run (no Meta credit spent).
+- **Manifests:** `manifests/slack/`, one per tool (11), with the labels in the table above. Slack has no Readers, so
+  the agent sees labeled text (`READER_FIELDS` is banking-only).
+- **URLs are `text`, not `url`:** AgentDojo's pages are bare hosts ("www.eve-blog.com"), and the Gate's `url` type
+  requires `http(s)://`, so every `get_webpage` and `post_webpage` would be refused on shape. `get_webpage.url` and
+  `post_webpage.url` are `text` destinations instead.
+- **Injected channel name:** channels are typed `id[]`. Under attack `External_<payload>` is a sentence, which is not
+  an `id`, so the Gate's output check can be expected to reject the `get_channels` result (not yet observed). We report it and don't relabel around it.
+- **Detector:** `--detector-url` (and `--detector-threshold`) go to `munix bridge`; those runs are named
+  `munix+guard`, and `report` shows them next to `munix`.

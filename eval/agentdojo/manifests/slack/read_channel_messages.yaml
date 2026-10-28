@@ -1,0 +1,15 @@
+# Read the messages in one channel, as parallel arrays: element i of every array describes message i. Local read,
+# nothing leaves the machine. The channel is a control (tier-0 read, no egress). Anyone in the workspace, including
+# external members and guests, can post in a channel, and the display name on a message is theirs to choose, so both
+# the sender and the body are third-party chat (ugc_post: Munix has no sender scoring, so an unknown author caps it at 15,
+# like a stranger's payment subject in banking), not the user's data. The body is the injection vector and
+# there is no Reader for Slack, so the agent sees it as labeled text. Internal: channel history is for members only.
+tool: slack.read_channel_messages
+description: Read all messages in a given channel, as parallel arrays of senders and bodies.
+tier: 0
+egress: false
+args:
+  channel: {type: id, role: control}
+output:
+  senders: {type: "id[]",   region: ugc_post, confidential: internal}
+  bodies:  {type: "text[]", region: ugc_post, confidential: internal}

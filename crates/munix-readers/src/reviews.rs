@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use munix_adapters::{AdapterError, ModelAdapter, ModelRequest, complete_typed, sanitize_schema};
+use munix_core::detect::DetectorConfig;
 use munix_gate::tool::{Tool, ToolFailure};
 use munix_gate::vault::Credential;
 use serde::Deserialize;
@@ -112,12 +113,25 @@ fn reader_schema() -> Value {
 pub struct ReviewReader {
     web: Arc<dyn Tool>,
     adapter: Arc<dyn ModelAdapter>,
+    detector: Option<DetectorConfig>,
 }
 
 impl ReviewReader {
     /// `web` is the `web.open` tool (with the site templates); `adapter` is built for `munix_adapters::Role::Reader`.
     pub fn new(web: Arc<dyn Tool>, adapter: Arc<dyn ModelAdapter>) -> Self {
-        ReviewReader { web, adapter }
+        ReviewReader {
+            web,
+            adapter,
+            detector: None,
+        }
+    }
+
+    /// Also scores the review texts with an injection detector: `flagged_instructions` is the model's flag OR the
+    /// detector's flag on any review (invariant 7: a detector only adds flags; a failing detector flags).
+    #[must_use]
+    pub fn with_detector(mut self, detector: Option<DetectorConfig>) -> Self {
+        self.detector = detector;
+        self
     }
 }
 
@@ -194,6 +208,10 @@ impl Tool for ReviewReader {
         let stars = validate_and_round_stars(answer.average_stars)?;
         let praises = validate_topics(&answer.praises)?;
         let complaints = validate_topics(&answer.complaints)?;
+        let detector_flag = self.detector.as_ref().is_some_and(|config| {
+            let texts: Vec<&str> = reviews.iter().map(String::as_str).collect();
+            config.flags(&texts).0.contains(&true)
+        });
 
         Ok(BTreeMap::from([
             ("review_count".to_owned(), json!(reviews.len())),
@@ -206,7 +224,7 @@ impl Tool for ReviewReader {
             ("complaints".to_owned(), Value::Array(complaints)),
             (
                 "flagged_instructions".to_owned(),
-                Value::Bool(answer.flagged_instructions),
+                Value::Bool(answer.flagged_instructions || detector_flag),
             ),
         ]))
     }
@@ -585,6 +603,45 @@ mod tests {
             let err = reader.call(&url_args(), None).unwrap_err();
             assert_eq!(err, ToolFailure::Unavailable, "case {i}");
         }
+    }
+
+    struct FakeDetector(Result<f32, munix_core::detect::DetectError>);
+
+    impl munix_core::detect::Detector for FakeDetector {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn score(&self, texts: &[&str]) -> Result<Vec<f32>, munix_core::detect::DetectError> {
+            self.0.clone().map(|s| vec![s; texts.len()])
+        }
+    }
+
+    fn flag_with(
+        model_flag: bool,
+        detector: Result<f32, munix_core::detect::DetectError>,
+    ) -> Value {
+        let mock = Arc::new(MockAdapter::new(vec![Ok(json!({
+            "average_stars": 4.0,
+            "overall": "positive",
+            "praises": [],
+            "complaints": [],
+            "flagged_instructions": model_flag
+        }))]));
+        let config = DetectorConfig::new(Arc::new(FakeDetector(detector)), 0.5);
+        let reader =
+            ReviewReader::new(fake_web(MOCK_SITE_REVIEWS.to_vec()), mock).with_detector(config);
+        reader.call(&url_args(), None).unwrap()["flagged_instructions"].clone()
+    }
+
+    #[test]
+    fn a_detector_flag_or_failure_flags_and_a_low_score_never_clears() {
+        assert_eq!(flag_with(false, Ok(0.9)), json!(true));
+        assert_eq!(
+            flag_with(false, Err(munix_core::detect::DetectError::BadReply)),
+            json!(true)
+        );
+        assert_eq!(flag_with(true, Ok(0.0)), json!(true));
+        assert_eq!(flag_with(false, Ok(0.0)), json!(false));
     }
 
     #[test]

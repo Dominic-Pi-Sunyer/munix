@@ -8,6 +8,25 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
 
+- **Prompt Guard 2 detector and the Slack suite: built and reviewed, offline (Oct 28).** Owner-approved: get
+  Llama Prompt Guard 2 (22M, local CPU classifier, an exception to "no local open weights"), run Slack under Munix
+  with and without it, then the adaptive payloads.
+  - **Detector (invariant 7):** `munix_core::detect` (trait, `DetectorConfig::flags` fails closed),
+    `munix_adapters::GuardDetector` (loopback-only HTTP client). The Gate scores the free-text fields the plan reads
+    before ingest; a flagged field's label trust drops to 5 (`DETECTOR_FLAGGED`), and one `detector_scored` ledger
+    entry holds names and numbers only. The banking and review Readers OR the detector into their flags. `munix
+    bridge --detector-url/-name/-threshold`; `munix run` reads `MUNIX_DETECTOR_URL/_NAME/_THRESHOLD`.
+  - **Sidecar:** `guard/server.py` (127.0.0.1 only, Host check, size caps, 510-token windows with 64 overlap, max over
+    windows), `guard/download.py`. Tests run in `--fake` mode. **Not yet run with the real model.**
+  - **Slack:** 11 manifests in `eval/agentdojo/manifests/slack/`; `convert.py` and `run.py` take the suite;
+    `run.py --detector-url` saves results as `munix+guard`. Channel messages and DMs are `ugc_post` (lead: no sender
+    scoring, so unknown authors cap at 15). URLs are `text` destinations (AgentDojo's bare hosts fail `url`). Under
+    attack a channel name holds the payload and fails `id`, so `get_channels` is refused: an attacker-imposed
+    utility cost, kept as is.
+  - **Blocked on the owner:** the model is gated on Hugging Face (accept Meta's license, put `HF_TOKEN` in `.env`).
+  - **Next:** install `guard/` (torch, transformers), download, confirm label index 1 is malicious, then the Slack
+    runs (bare baseline, Munix, Munix+guard), then replay the adaptive payloads.
+
 - **Adaptive attacker through agy (Oct 28): built, but Gemini 3.8 Flash refuses.** `adaptive.py search
   --attacker-model agy:<model>` runs the attacker through the owner's `agy` CLI (print mode, empty folder, sandboxed,
   no Meta credit). Tested offline with a fake `agy`. With the real `gemini-3.8-flash-medium` it refused every round

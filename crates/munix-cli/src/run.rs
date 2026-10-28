@@ -17,8 +17,11 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use munix_adapters::{MetaAdapter, ModelAdapter, Pricing, ReasoningEffort, Role, Usage};
+use munix_adapters::{
+    GuardDetector, MetaAdapter, ModelAdapter, Pricing, ReasoningEffort, Role, Usage,
+};
 use munix_core::crypto::{Digest, Purpose, Signed, SigningKey};
+use munix_core::detect::{DEFAULT_THRESHOLD, DetectorConfig};
 use munix_core::ids::{PlanId, SessionId, TaskId};
 use munix_core::label::Confidential;
 use munix_core::manifest::{Catalog, ToolManifest};
@@ -267,6 +270,67 @@ pub(crate) fn load_catalog(dir: &Path) -> Result<Catalog, Failure> {
         .map_err(|e| Failure::config(format!("{}: {e}", dir.display())))
 }
 
+/// The ledger name of the injection detector when none is given.
+pub(crate) const DEFAULT_DETECTOR_NAME: &str = "Llama-Prompt-Guard-2-22M";
+/// How long the Gate and the Readers wait for the detector sidecar before they count it as a flag.
+const DETECTOR_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A detector flag threshold: a finite number in `0.0..=1.0`.
+pub(crate) fn parse_threshold(text: &str) -> Result<f32, Failure> {
+    text.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|t| t.is_finite() && (0.0..=1.0).contains(t))
+        .ok_or_else(|| Failure::config("the detector threshold must be a number from 0 to 1"))
+}
+
+/// The injection detector for `url` (the loopback guard sidecar), recorded in the ledger as `name`. A URL that is
+/// not `http://127.0.0.1:<port>/score` or `http://localhost:<port>/score`, or a bad name or threshold, is a
+/// configuration error, so page text can't be sent off the machine by a typo.
+pub(crate) fn detector_config(
+    url: &str,
+    name: &str,
+    threshold: f32,
+) -> Result<DetectorConfig, Failure> {
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+        return Err(Failure::config(
+            "the detector name must be 1 to 64 printable characters",
+        ));
+    }
+    let guard = GuardDetector::new(name, url, DETECTOR_TIMEOUT).ok_or_else(|| {
+        Failure::config(
+            "the detector URL must be http://127.0.0.1:<port>/score or http://localhost:<port>/score",
+        )
+    })?;
+    DetectorConfig::new(Arc::new(guard), threshold)
+        .ok_or_else(|| Failure::config("the detector threshold must be a number from 0 to 1"))
+}
+
+/// `MUNIX_DETECTOR_URL`, `MUNIX_DETECTOR_NAME` and `MUNIX_DETECTOR_THRESHOLD` from the environment then `.env`.
+/// With no URL there is no detector (and a name or threshold alone is an error, so a typo can't silently turn
+/// the detector off).
+pub(crate) fn detector_from(env: &Env) -> Result<Option<DetectorConfig>, Failure> {
+    let (url, name, threshold) = (
+        env.get("MUNIX_DETECTOR_URL"),
+        env.get("MUNIX_DETECTOR_NAME"),
+        env.get("MUNIX_DETECTOR_THRESHOLD"),
+    );
+    let Some(url) = url else {
+        if name.is_some() || threshold.is_some() {
+            return Err(Failure::config(
+                "MUNIX_DETECTOR_NAME and MUNIX_DETECTOR_THRESHOLD need MUNIX_DETECTOR_URL",
+            ));
+        }
+        return Ok(None);
+    };
+    let threshold = match threshold {
+        Some(text) => parse_threshold(&text)?,
+        None => DEFAULT_THRESHOLD,
+    };
+    let name = name.unwrap_or_else(|| DEFAULT_DETECTOR_NAME.to_owned());
+    detector_config(&url, &name, threshold).map(Some)
+}
+
 /// The Gate with the real tools registered at their manifests' digests.
 fn build_gate(
     key: &SigningKey,
@@ -274,6 +338,7 @@ fn build_gate(
     ledger: Ledger,
     env: &Env,
     reader: Arc<dyn ModelAdapter>,
+    detector: Option<DetectorConfig>,
 ) -> Result<Gate, Failure> {
     let web_config = || -> Result<WebSpeedConfig, Failure> {
         let mut config =
@@ -290,6 +355,9 @@ fn build_gate(
         }
     }
     let mut gate = Gate::new(key.clone(), catalog.clone(), vault, ledger);
+    if let Some(config) = &detector {
+        gate.set_detector(config.clone());
+    }
     for (name, manifest) in catalog.iter() {
         let tool: Box<dyn Tool> = match name.as_str() {
             "web.open" => Box::new(
@@ -299,10 +367,10 @@ fn build_gate(
             "reviews.read" => {
                 let web =
                     WebSpeedOpen::new(web_config()?).map_err(|e| Failure::config(e.to_string()))?;
-                Box::new(munix_readers::reviews::ReviewReader::new(
-                    Arc::new(web),
-                    Arc::clone(&reader),
-                ))
+                Box::new(
+                    munix_readers::reviews::ReviewReader::new(Arc::new(web), Arc::clone(&reader))
+                        .with_detector(detector.clone()),
+                )
             }
             "email.send" => Box::new(smtp_from(env)?),
             _ => continue,
@@ -402,7 +470,10 @@ fn instance_sandbox_name(task: &TaskId, instance: u32) -> String {
 ///    win). Require `MODEL_API_KEY`. Also read `MUNIX_WORKER_MODEL` (default `muse-spark-1.3`), `MUNIX_WORKER_EFFORT`,
 ///    `MUNIX_SUPERVISOR_MODEL` (default `muse-spark-1.3`), `MUNIX_BOSS_EMAIL` (default `boss@corp.example`),
 ///    `MUNIX_HOST_GATEWAY` (default `192.168.5.2`, Colima), `WEBSPEED_OSS_DIR` (default `../web-speed-oss`),
-///    `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`, `MUNIX_LIVENESS_SECS`, `MUNIX_DEADLINE_SECS`.
+///    `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`, `MUNIX_LIVENESS_SECS`, `MUNIX_DEADLINE_SECS`, and the optional injection
+///    detector `MUNIX_DETECTOR_URL` (a loopback `/score` URL; unset means no detector), `MUNIX_DETECTOR_NAME`
+///    (default `Llama-Prompt-Guard-2-22M`) and `MUNIX_DETECTOR_THRESHOLD` (default 0.5). The Gate and the review
+///    Reader use it; it only lowers trust, and a failing detector flags.
 /// 3. A fresh 32-byte signing key from `/dev/urandom`. Random hex ids: task `T-<8>`, session `S-<8>`, plan `P-<8>`,
 ///    nonce 32 hex characters.
 /// 4. The catalog from `manifests/*.yaml`, the site templates from `sites/`, the tools (`web.open` through Web
@@ -618,7 +689,8 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let ledger = Ledger::create(&ledger_path)
         .map_err(|e| Failure::config(format!("cannot create the ledger: {e}")))?;
     let reader_adapter = supervisor_adapter(&env, &supervisor_model, Role::Reader, &api_key)?;
-    let mut gate = build_gate(&key, &catalog, ledger, &env, reader_adapter)?;
+    let detector = detector_from(&env)?;
+    let mut gate = build_gate(&key, &catalog, ledger, &env, reader_adapter, detector)?;
     gate.set_seal(seal.clone());
 
     // The prompt and the plan, both signed here.

@@ -1,0 +1,13 @@
+# Add a user to a channel. A write that gives that person the channel's history and future messages, so tier 2 with
+# egress. Both the user and the channel are destinations (who gets access, and to what) and must trace to trusted
+# sources. The function returns nothing, so the output is a fixed one-value status the platform sets
+# (operator_content).
+tool: slack.add_user_to_channel
+description: Add a user to a channel in the Slack workspace.
+tier: 2
+egress: true
+args:
+  user:    {type: id, role: destination}
+  channel: {type: id, role: destination}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

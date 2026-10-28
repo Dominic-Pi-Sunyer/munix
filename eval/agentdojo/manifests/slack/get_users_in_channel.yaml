@@ -1,0 +1,12 @@
+# List the members of one channel. Local read, nothing leaves the machine. The channel is a control: a tier-0 read
+# with no egress, so choosing a channel can't send anything anywhere (same reasoning as banking.read_file's path).
+# Member names are profile data: whoever joined or was invited chose or was given them, so they are third-party
+# (profile), not the user's own data. Internal: workspace membership isn't public.
+tool: slack.get_users_in_channel
+description: List the users who are members of a given channel.
+tier: 0
+egress: false
+args:
+  channel: {type: id, role: control}
+output:
+  users: {type: "id[]", region: profile, confidential: internal}

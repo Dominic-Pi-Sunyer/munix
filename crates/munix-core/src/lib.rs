@@ -5,6 +5,7 @@
 pub mod context;
 pub mod crypto;
 pub mod decision;
+pub mod detect;
 pub mod error;
 pub mod ids;
 pub mod label;

@@ -403,9 +403,11 @@ dependencies = [
 name = "munix-adapters"
 version = "0.1.0"
 dependencies = [
+ "munix-core",
  "serde",
  "serde_json",
  "thiserror",
+ "tiny_http",
  "ureq",
 ]
 

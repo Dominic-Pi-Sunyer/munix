@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use munix_adapters::{AdapterError, ModelAdapter, ModelRequest, complete_typed, sanitize_schema};
+use munix_core::detect::DetectorConfig;
 use munix_gate::tool::{Tool, ToolFailure};
 use munix_gate::vault::Credential;
 use serde::Deserialize;
@@ -166,11 +167,24 @@ fn ask<T: DeserializeOwned>(
 pub struct TransactionReader {
     inner: Box<dyn Tool>,
     adapter: Option<Arc<dyn ModelAdapter>>,
+    detector: Option<DetectorConfig>,
 }
 
 impl TransactionReader {
     pub fn new(inner: Box<dyn Tool>, adapter: Option<Arc<dyn ModelAdapter>>) -> Self {
-        TransactionReader { inner, adapter }
+        TransactionReader {
+            inner,
+            adapter,
+            detector: None,
+        }
+    }
+
+    /// Also scores each non-empty subject with an injection detector: a subject's flag is the model's flag OR the
+    /// detector's (invariant 7: a detector only adds flags; a failing detector flags).
+    #[must_use]
+    pub fn with_detector(mut self, detector: Option<DetectorConfig>) -> Self {
+        self.detector = detector;
+        self
     }
 }
 
@@ -222,7 +236,21 @@ impl Tool for TransactionReader {
             if answer.kinds.len() != asked.len() || answer.flagged.len() != asked.len() {
                 return Err(ToolFailure::Internal);
             }
-            for (((i, _), kind), flagged) in asked.iter().zip(answer.kinds).zip(answer.flagged) {
+            // One detector call over the raw subjects that were asked about; it can only add flags.
+            let detected = match &self.detector {
+                Some(config) => {
+                    let texts: Vec<&str> = asked.iter().map(|(i, _)| subjects[*i]).collect();
+                    config.flags(&texts).0
+                }
+                None => vec![false; asked.len()],
+            };
+            for ((((i, _), kind), model_flag), detector_flag) in asked
+                .iter()
+                .zip(answer.kinds)
+                .zip(answer.flagged)
+                .zip(detected)
+            {
+                let flagged = model_flag || detector_flag;
                 if !SUBJECT_KINDS.contains(&kind.as_str()) {
                     return Err(ToolFailure::Internal);
                 }
@@ -242,11 +270,24 @@ impl Tool for TransactionReader {
 pub struct DocumentReader {
     inner: Box<dyn Tool>,
     adapter: Option<Arc<dyn ModelAdapter>>,
+    detector: Option<DetectorConfig>,
 }
 
 impl DocumentReader {
     pub fn new(inner: Box<dyn Tool>, adapter: Option<Arc<dyn ModelAdapter>>) -> Self {
-        DocumentReader { inner, adapter }
+        DocumentReader {
+            inner,
+            adapter,
+            detector: None,
+        }
+    }
+
+    /// Also scores the document with an injection detector: `flagged_instructions` is the model's flag OR the
+    /// detector's (invariant 7: a detector only adds flags; a failing detector flags).
+    #[must_use]
+    pub fn with_detector(mut self, detector: Option<DetectorConfig>) -> Self {
+        self.detector = detector;
+        self
     }
 }
 
@@ -283,10 +324,14 @@ impl Tool for DocumentReader {
         if !DOCUMENT_KINDS.contains(&answer.kind.as_str()) {
             return Err(ToolFailure::Internal);
         }
+        let detector_flag = self
+            .detector
+            .as_ref()
+            .is_some_and(|config| config.flags(&[text]).0.first().copied().unwrap_or(true));
         out.insert("kind".to_owned(), Value::String(answer.kind));
         out.insert(
             "flagged_instructions".to_owned(),
-            Value::Bool(answer.flagged_instructions),
+            Value::Bool(answer.flagged_instructions || detector_flag),
         );
         if answer.has_amount {
             if !AMOUNT_MEANINGS.contains(&answer.amount_meaning.as_str()) {
@@ -307,14 +352,18 @@ impl Tool for DocumentReader {
 }
 
 /// Wraps `inner`, the tool registered as `tool`, in its Reader when it has one; returns it unchanged otherwise.
+/// `detector`, when set, adds an injection-detector flag to the Reader's flags (never removes one).
 pub fn wrap(
     tool: &str,
     inner: Box<dyn Tool>,
     adapter: Option<Arc<dyn ModelAdapter>>,
+    detector: Option<DetectorConfig>,
 ) -> Box<dyn Tool> {
     match tool {
-        TRANSACTIONS_TOOL => Box::new(TransactionReader::new(inner, adapter)),
-        FILE_TOOL => Box::new(DocumentReader::new(inner, adapter)),
+        TRANSACTIONS_TOOL => {
+            Box::new(TransactionReader::new(inner, adapter).with_detector(detector))
+        }
+        FILE_TOOL => Box::new(DocumentReader::new(inner, adapter).with_detector(detector)),
         _ => inner,
     }
 }
@@ -496,17 +545,116 @@ mod tests {
         assert!(bits <= TYPED_BUDGET_BITS, "{bits}");
     }
 
+    /// Scores every text `score` (0.9 flags at the default 0.5), or fails.
+    struct FakeDetector(Result<f32, munix_core::detect::DetectError>);
+
+    impl munix_core::detect::Detector for FakeDetector {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn score(&self, texts: &[&str]) -> Result<Vec<f32>, munix_core::detect::DetectError> {
+            self.0.clone().map(|s| vec![s; texts.len()])
+        }
+    }
+
+    fn detector(reply: Result<f32, munix_core::detect::DetectError>) -> Option<DetectorConfig> {
+        DetectorConfig::new(Arc::new(FakeDetector(reply)), 0.5)
+    }
+
+    fn subject_mock(flags: [bool; 2]) -> Arc<MockAdapter> {
+        Arc::new(MockAdapter::new(vec![Ok(json!({
+            "kinds": ["payment_share", "refund"], "flagged": flags
+        }))]))
+    }
+
+    fn doc_mock(flag: bool) -> Arc<MockAdapter> {
+        Arc::new(MockAdapter::new(vec![Ok(json!({
+            "kind": "bill", "has_amount": false, "amount_cents": 0, "amount_meaning": "amount_due",
+            "flagged_instructions": flag
+        }))]))
+    }
+
+    fn doc_flag(model: bool, detector: Option<DetectorConfig>) -> Value {
+        let doc = DocumentReader::new(
+            fixed(BTreeMap::from([("content".to_owned(), json!("a bill"))])),
+            Some(doc_mock(model)),
+        )
+        .with_detector(detector);
+        doc.call(&BTreeMap::new(), None).unwrap()["flagged_instructions"].clone()
+    }
+
+    fn subject_flags(model: [bool; 2], detector: Option<DetectorConfig>) -> Value {
+        let reader = TransactionReader::new(
+            fixed(transactions(json!(["", "pay me back", "refund for you"]))),
+            Some(subject_mock(model)),
+        )
+        .with_detector(detector);
+        reader.call(&BTreeMap::new(), None).unwrap()["their_subject_flags"].clone()
+    }
+
+    #[test]
+    fn a_detector_flag_turns_a_false_model_flag_true() {
+        assert_eq!(doc_flag(false, detector(Ok(0.9))), json!(true));
+        assert_eq!(
+            subject_flags([false, false], detector(Ok(0.9))),
+            json!([false, true, true])
+        );
+    }
+
+    #[test]
+    fn a_detector_failure_flags() {
+        let failing = || detector(Err(munix_core::detect::DetectError::Unavailable));
+        assert_eq!(doc_flag(false, failing()), json!(true));
+        assert_eq!(
+            subject_flags([false, false], failing()),
+            json!([false, true, true])
+        );
+    }
+
+    #[test]
+    fn a_low_score_never_clears_a_model_flag() {
+        assert_eq!(doc_flag(true, detector(Ok(0.0))), json!(true));
+        assert_eq!(doc_flag(false, detector(Ok(0.0))), json!(false));
+        assert_eq!(
+            subject_flags([false, true], detector(Ok(0.0))),
+            json!([false, false, true])
+        );
+    }
+
+    #[test]
+    fn no_model_means_no_detector_call() {
+        struct Panics;
+        impl munix_core::detect::Detector for Panics {
+            fn name(&self) -> &str {
+                "panics"
+            }
+            fn score(&self, _: &[&str]) -> Result<Vec<f32>, munix_core::detect::DetectError> {
+                panic!("the detector must not be called when the text is withheld");
+            }
+        }
+        let config = DetectorConfig::new(Arc::new(Panics), 0.5);
+        let doc = DocumentReader::new(
+            fixed(BTreeMap::from([("content".to_owned(), json!(INJECTED))])),
+            None,
+        )
+        .with_detector(config.clone());
+        assert!(doc.call(&BTreeMap::new(), None).unwrap().is_empty());
+        let t = TransactionReader::new(fixed(transactions(json!([INJECTED]))), None)
+            .with_detector(config);
+        assert!(t.call(&BTreeMap::new(), None).is_ok());
+    }
+
     #[test]
     fn wrap_only_wraps_the_two_tools() {
         let inner = || fixed(BTreeMap::from([("content".to_owned(), json!("x"))]));
         assert!(
-            wrap(FILE_TOOL, inner(), None)
+            wrap(FILE_TOOL, inner(), None, None)
                 .call(&BTreeMap::new(), None)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            wrap("banking.get_balance", inner(), None)
+            wrap("banking.get_balance", inner(), None, None)
                 .call(&BTreeMap::new(), None)
                 .unwrap()["content"],
             json!("x")

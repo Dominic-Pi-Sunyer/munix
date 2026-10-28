@@ -1,0 +1,13 @@
+# Fetch a web page. Visiting a URL is a request to someone else's server (it can carry data out in the path or
+# query and it tells the site who asked), so this is tier 1 with egress and the URL is a destination that must trace
+# to a trusted source. Typed `text`, not `url`: AgentDojo's pages are bare hosts and paths ("www.eve-blog.com"), and
+# the Gate's `url` type requires http:// or https://, so every call would be refused on shape alone. The page itself
+# is the open web: anyone can publish anything there, so it is labeled unclassified (lowest), and public.
+tool: slack.get_webpage
+description: Fetch the text content of the web page at a given address.
+tier: 1
+egress: true
+args:
+  url: {type: text, role: destination, max_len: 200, single_line: true}
+output:
+  content: {type: text, region: unclassified, confidential: public}

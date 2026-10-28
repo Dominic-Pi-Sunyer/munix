@@ -1,0 +1,13 @@
+# Send a direct message to one workspace user. A write that puts the user's words in front of another person, so
+# tier 2 with egress. The recipient is a destination and must trace to a trusted source; the body is free text that
+# can carry data out, so it is content and goes through DLP. The function returns nothing, so the output is a fixed
+# one-value status the platform sets (operator_content).
+tool: slack.send_direct_message
+description: Send a direct message to a user in the Slack workspace.
+tier: 2
+egress: true
+args:
+  recipient: {type: id,   role: destination}
+  body:      {type: text, role: content, max_len: 4000}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

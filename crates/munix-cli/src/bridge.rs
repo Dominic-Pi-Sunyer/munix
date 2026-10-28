@@ -38,16 +38,26 @@ use serde_json::{Value, json};
 use crate::confirm::{Confirmer, SimulatedUser};
 use crate::front::{GateFront, code_text};
 use crate::run::{
-    DEFAULT_MODEL, Env, Failure, PLACEHOLDER_CREDENTIAL, load_catalog, parse_id, random_bytes,
-    random_hex, rewrite_plan, supervisor_adapter,
+    DEFAULT_DETECTOR_NAME, DEFAULT_MODEL, Env, Failure, PLACEHOLDER_CREDENTIAL, detector_config,
+    load_catalog, parse_id, parse_threshold, random_bytes, random_hex, rewrite_plan,
+    supervisor_adapter,
 };
+use munix_core::detect::{DEFAULT_THRESHOLD, DetectorConfig};
 
-const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer] | --plan-memory <dir>] [--simulated-user]";
+const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer] | --plan-memory <dir>] [--simulated-user] [--detector-url <url> [--detector-name <name>] [--detector-threshold <0-1>]]";
 /// What the model-facing diagnostics on stderr are cut to.
 const MAX_DIAGNOSTIC: usize = 200;
 
+/// `--detector-url` and its companions, already checked.
+#[derive(Debug, PartialEq)]
+struct DetectorOpts {
+    url: String,
+    name: String,
+    threshold: f32,
+}
+
 /// What `munix bridge` was asked to do.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct Options {
     manifests: PathBuf,
     ledger: PathBuf,
@@ -60,6 +70,8 @@ struct Options {
     simulated_user: bool,
     /// Plan memory's directory (`docs/plan-memory.md`). Only without `--plan`: a stored plan replaces a planner call.
     plan_memory: Option<PathBuf>,
+    /// The injection detector (a loopback guard sidecar). Without it nothing is scored.
+    detector: Option<DetectorOpts>,
 }
 
 /// Parses `bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]] [--simulated-user]`.
@@ -70,7 +82,24 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
     }
     let (mut manifests, mut ledger, mut plan, mut plan_memory) = (None, None, None, None);
     let (mut no_reviewer, mut simulated_user) = (false, false);
+    let (mut detector_url, mut detector_name, mut detector_threshold) =
+        (None::<String>, None::<String>, None::<String>);
     while let Some(arg) = it.next() {
+        let text_slot = match arg.as_str() {
+            "--detector-url" => Some(&mut detector_url),
+            "--detector-name" => Some(&mut detector_name),
+            "--detector-threshold" => Some(&mut detector_threshold),
+            _ => None,
+        };
+        if let Some(slot) = text_slot {
+            let Some(value) = it.next() else {
+                return Err(Failure::usage(USAGE));
+            };
+            if slot.replace(value.clone()).is_some() {
+                return Err(Failure::usage(USAGE));
+            }
+            continue;
+        }
         if arg == "--no-reviewer" || arg == "--simulated-user" {
             let flag = if arg == "--no-reviewer" {
                 &mut no_reviewer
@@ -96,6 +125,28 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
             return Err(Failure::usage(USAGE));
         }
     }
+    let detector = match detector_url {
+        Some(url) => {
+            let name = detector_name.unwrap_or_else(|| DEFAULT_DETECTOR_NAME.to_owned());
+            let threshold = match detector_threshold {
+                Some(text) => parse_threshold(&text)?,
+                None => DEFAULT_THRESHOLD,
+            };
+            // Checks the URL, name and threshold now, so a typo is a startup error.
+            detector_config(&url, &name, threshold)?;
+            Some(DetectorOpts {
+                url,
+                name,
+                threshold,
+            })
+        }
+        None if detector_name.is_some() || detector_threshold.is_some() => {
+            return Err(Failure::usage(
+                "--detector-name and --detector-threshold need --detector-url",
+            ));
+        }
+        None => None,
+    };
     match (manifests, ledger) {
         // Without a plan the planner needs a model, and the reviewer is part of the same setup.
         // Plan memory stands in for the planner, so it makes no sense with a given plan.
@@ -109,6 +160,7 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
                 no_reviewer,
                 simulated_user,
                 plan_memory,
+                detector,
             })
         }
         _ => Err(Failure::usage(USAGE)),
@@ -325,6 +377,8 @@ struct Setup {
     simulated_user: bool,
     /// Plan memory, for a planner-written plan: a stored plan replaces the planner call when one matches.
     memory: Option<PlanMemory>,
+    /// The injection detector for the Gate and the Readers; `None` scores nothing.
+    detector: Option<DetectorConfig>,
     /// The planner's, reviewer's and Readers' adapters, metered, so `ended` can report what the Supervisor spent.
     meters: Vec<Metered>,
     key: SigningKey,
@@ -380,6 +434,9 @@ fn build_gate(setup: &Setup, io: &Arc<Mutex<Io>>) -> Result<Gate, Failure> {
         }
     }
     let mut gate = Gate::new(setup.key.clone(), setup.catalog.clone(), vault, ledger);
+    if let Some(detector) = &setup.detector {
+        gate.set_detector(detector.clone());
+    }
     for (name, manifest) in setup.catalog.iter() {
         let function = name
             .as_str()
@@ -390,8 +447,12 @@ fn build_gate(setup: &Setup, io: &Arc<Mutex<Io>>) -> Result<Gate, Failure> {
             name: function.to_owned(),
         };
         // Third-party text goes through a Reader, so the agent gets typed values instead.
-        let tool =
-            munix_readers::banking::wrap(name.as_str(), Box::new(remote), setup.reader.clone());
+        let tool = munix_readers::banking::wrap(
+            name.as_str(),
+            Box::new(remote),
+            setup.reader.clone(),
+            setup.detector.clone(),
+        );
         let pinned = manifest
             .digest()
             .map_err(|e| Failure::config(e.to_string()))?;
@@ -717,8 +778,13 @@ fn run(args: &[String]) -> Result<(), Failure> {
             )
         }
     };
+    let detector = match &opts.detector {
+        Some(d) => Some(detector_config(&d.url, &d.name, d.threshold)?),
+        None => None,
+    };
     let setup = Setup {
         catalog,
+        detector,
         ledger_path: opts.ledger,
         plan,
         reviewer,
@@ -867,6 +933,7 @@ amendments:
             plan: PlanSource::Given(Plan::from_yaml(plan).unwrap()),
             reviewer,
             reader: None,
+            detector: None,
             simulated_user,
             memory: None,
             meters,
@@ -1297,6 +1364,7 @@ amendments:
                 no_reviewer: false,
                 simulated_user: false,
                 plan_memory: None,
+                detector: None,
             }
         );
         let memory = parse_args(&args(&[
@@ -1407,6 +1475,71 @@ amendments:
             args(&["run", "--manifests", "m", "--ledger", "l"]),
         ] {
             assert_eq!(parse_args(&bad).unwrap_err().code, 2, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn detector_flags_are_parsed_and_checked() {
+        let base = [
+            "bridge",
+            "--manifests",
+            "m",
+            "--ledger",
+            "l",
+            "--plan",
+            "p.yaml",
+        ];
+        let with = |extra: &[&str]| -> Result<Options, Failure> {
+            let all: Vec<String> = base.iter().chain(extra).map(|p| (*p).to_owned()).collect();
+            parse_args(&all)
+        };
+        let url = "http://127.0.0.1:8787/score";
+        let only_url = with(&["--detector-url", url]).unwrap();
+        assert_eq!(
+            only_url.detector,
+            Some(DetectorOpts {
+                url: url.to_owned(),
+                name: DEFAULT_DETECTOR_NAME.to_owned(),
+                threshold: DEFAULT_THRESHOLD,
+            })
+        );
+        let full = with(&[
+            "--detector-threshold",
+            "0.8",
+            "--detector-url",
+            "http://localhost:9/score",
+            "--detector-name",
+            "guard-x",
+        ])
+        .unwrap();
+        assert_eq!(
+            full.detector,
+            Some(DetectorOpts {
+                url: "http://localhost:9/score".to_owned(),
+                name: "guard-x".to_owned(),
+                threshold: 0.8,
+            })
+        );
+        assert_eq!(with(&[]).unwrap().detector, None);
+        for bad in [
+            // a name or threshold without a URL
+            &["--detector-name", "x"][..],
+            &["--detector-threshold", "0.5"],
+            // a URL that could send text off the machine, or is malformed
+            &["--detector-url", "http://example.com:80/score"],
+            &["--detector-url", "https://127.0.0.1:8787/score"],
+            &["--detector-url", "http://127.0.0.1/score"],
+            // bad thresholds
+            &["--detector-url", url, "--detector-threshold", "1.5"],
+            &["--detector-url", url, "--detector-threshold", "-0.1"],
+            &["--detector-url", url, "--detector-threshold", "nan"],
+            &["--detector-url", url, "--detector-threshold", "high"],
+            // bad name, repeated or incomplete flags
+            &["--detector-url", url, "--detector-name", ""],
+            &["--detector-url", url, "--detector-url", url],
+            &["--detector-url"],
+        ] {
+            assert_eq!(with(bad).unwrap_err().code, 2, "{bad:?}");
         }
     }
 
