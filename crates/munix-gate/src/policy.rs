@@ -83,6 +83,10 @@ pub struct Facts<'a> {
     pub calls_so_far: u32,
     pub band: Band,
     pub args: &'a BTreeMap<String, ArgFacts>,
+    /// The real host behind each opaque web domain number a match can carry (`Match::web_domain`). Used only for
+    /// the domain-binding check on tier 3 egress destinations; these strings never go into a reason, the ledger
+    /// or any model's view.
+    pub hosts: &'a BTreeMap<u32, String>,
 }
 
 /// Rules on one request. Checks run in this order and the first failure decides:
@@ -93,7 +97,17 @@ pub struct Facts<'a> {
 ///    beyond the ones below):
 ///    - forbidden and present: `ForbiddenArg`;
 ///    - any unknown ref: `UnknownRef`;
-///    - `from`: every entry of `values` must satisfy it with `min_trust` (else `UntrustedDestination`);
+///    - `from`: every entry of `values` must satisfy it with `min_trust` (else `UntrustedDestination`). For a
+///      `Destination` argument of a **tier 3 egress** tool there is one more rule, domain binding: trust says how
+///      likely a region is to carry an attack, not who chose a value, so a destination taken from web content
+///      must also name the page's own domain. A value is bound when some match satisfies `from` and `min_trust`
+///      and either comes from no web page (`web_domain` is `None`), or the host the value itself names
+///      (`dest_host`) is bound to that page's host in `hosts` (the same host, or a dot-boundary subdomain or
+///      parent of it, with at least two labels). A missing `dest_host` or host is never bound. If every value is
+///      bound the reason is `{name}.trace_ok`; if not, but every value passes the plain rule, the reason is
+///      `{name}.web_unbound`, the other checks go on, and unless something denies, the outcome is `ConfirmUser`
+///      whatever the band says (never `Allow` or `Gray`, never a takeover). Tiers 0-2 and tools without egress
+///      are not affected;
 ///    - a destination argument of a tier 1+ tool with no `from` rule: `UntrustedDestination`;
 ///    - content of an egress tool with `raw_destinations > 0`: `RawDestination`;
 ///    - `embedded` refs: each must trace to a clean-side origin (prompt, user data or a store), or satisfy
@@ -115,8 +129,12 @@ pub fn evaluate(facts: &Facts<'_>) -> Ruling {
     let mut reasons: Vec<String> = Vec::new();
     match check_request(facts, &mut reasons) {
         Err(code) => ruling(Outcome::Deny(code), reasons),
-        Ok(()) => {
+        Ok(web_unbound) => {
             let outcome = band_outcome(facts, &mut reasons);
+            let outcome = match outcome {
+                Outcome::Allow | Outcome::Gray if web_unbound => Outcome::ConfirmUser,
+                other => other,
+            };
             ruling(outcome, reasons)
         }
     }
@@ -136,8 +154,10 @@ fn band_reason(band: Band) -> &'static str {
     }
 }
 
-/// Steps 1 and 2: the plan and every argument. The first failure decides.
-fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<(), DenyCode> {
+/// Steps 1 and 2: the plan and every argument. The first failure decides. `Ok(true)` means some tier 3 egress
+/// destination came from web content without being bound to the page's domain (the request goes to the user).
+fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<bool, DenyCode> {
+    let mut web_unbound = false;
     // 1. Plan.
     let Some(step) = facts.plan.steps.iter().find(|s| s.id == facts.step) else {
         reasons.push("plan.no_step".to_owned());
@@ -181,7 +201,20 @@ fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<(), Den
                 reasons.push(format!("{name}.trace_untrusted"));
                 return Err(DenyCode::UntrustedDestination);
             }
-            reasons.push(format!("{name}.trace_ok"));
+            let guarded = facts.manifest.tier == 3
+                && facts.manifest.egress
+                && spec.role == ArgRole::Destination;
+            if guarded
+                && !arg
+                    .values
+                    .iter()
+                    .all(|v| v.binds(from, min_trust, facts.hosts))
+            {
+                reasons.push(format!("{name}.web_unbound"));
+                web_unbound = true;
+            } else {
+                reasons.push(format!("{name}.trace_ok"));
+            }
         } else if spec.role == ArgRole::Destination && facts.manifest.tier >= 1 {
             reasons.push(format!("{name}.no_from_rule"));
             return Err(DenyCode::UntrustedDestination);
@@ -231,7 +264,7 @@ fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<(), Den
             reasons.push(format!("{name}.dlp_ok"));
         }
     }
-    Ok(())
+    Ok(web_unbound)
 }
 
 /// Step 3: the band table. Only reached when the plan and argument checks passed.
@@ -354,12 +387,14 @@ args:
             origin,
             trust: Trust::new(trust),
             confidential,
+            web_domain: None,
         }
     }
 
     fn traced(origin: Origin, trust: u8) -> Traced {
         Traced {
             matches: vec![matched(origin, trust, Confidential::Public)],
+            dest_host: None,
         }
     }
 
@@ -429,6 +464,7 @@ args:
             calls_so_far: calls,
             band,
             args,
+            hosts: &BTreeMap::new(),
         })
     }
 
@@ -1088,6 +1124,7 @@ args:
                     ),
                     matched(Origin::UserData, 70, Confidential::Public),
                 ],
+                dest_host: None,
             }]),
         )]);
         let r = run_with(&plan, 1, "web.open", &m, 0, Band::Lockdown, &both);

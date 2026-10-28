@@ -62,6 +62,7 @@ fn rule_update(refs: &RefTable, args: &[(&str, Value)]) -> Ruling {
         calls_so_far: 0,
         band: Band::Clean,
         args: &facts,
+        hosts: &BTreeMap::new(),
     })
 }
 
@@ -338,6 +339,7 @@ fn the_policy_denies_an_oversize_request_with_a_fixed_reason() {
         calls_so_far: 0,
         band: Band::Clean,
         args: &facts,
+        hosts: &BTreeMap::new(),
     });
     assert_eq!(r.outcome, Outcome::Deny(DenyCode::ConfidentialData));
     assert!(r.reasons.iter().any(|x| x == "body.split_unchecked"));

@@ -125,6 +125,9 @@ pub struct PendingView {
     pub needs: Stage,
     pub band: Band,
     pub args: Vec<PendingArg>,
+    /// True when the Gate parked this request because a destination came from web content without naming that
+    /// page's own domain (the ruling carries a `.web_unbound` reason). A careful user would not approve it.
+    pub web_unbound: bool,
 }
 
 /// One argument of a parked request: the value as it will be sent, and where each part of it came from, such as
@@ -161,6 +164,9 @@ pub struct Gate {
     tasks: BTreeMap<TaskId, Task>,
     /// Opaque numbers for web hosts, stable for the life of the Gate. The Supervisor only ever sees numbers.
     domains: BTreeMap<String, u32>,
+    /// The same table the other way round (number to host), kept in step with `domains`. Only the policy's
+    /// domain-binding check reads it; the strings never reach a model or the ledger.
+    hosts: BTreeMap<u32, String>,
     seal: Option<Arc<dyn SealCheck>>,
     tampered: Option<Tamper>,
     detector: Option<DetectorConfig>,
@@ -317,6 +323,7 @@ impl Gate {
             ledger,
             tasks: BTreeMap::new(),
             domains: BTreeMap::new(),
+            hosts: BTreeMap::new(),
             seal: None,
             tampered: None,
             detector: None,
@@ -1181,6 +1188,7 @@ impl Gate {
             needs: parked.needs,
             band: parked.band,
             args,
+            web_unbound: parked.reasons.iter().any(|r| r.ends_with(".web_unbound")),
         })
     }
 
@@ -1266,6 +1274,7 @@ impl Gate {
             calls_so_far: task.calls.get(&request.step).copied().unwrap_or(0),
             band: task.instance.context.band(),
             args: &args,
+            hosts: &self.hosts,
         })
     }
 
@@ -1530,7 +1539,7 @@ impl Gate {
         let source = if has_url_destination(&manifest) {
             let host = url_destination_host(&manifest, &resolved);
             Source::Web {
-                domain: domain_number(&mut self.domains, host),
+                domain: domain_number(&mut self.domains, &mut self.hosts, host),
             }
         } else {
             Source::Tool {
@@ -1971,13 +1980,18 @@ fn url_destination_host(manifest: &ToolManifest, resolved: &BTreeMap<String, Val
 }
 
 /// The opaque number of a host: numbers start at 1 and never change.
-fn domain_number(domains: &mut BTreeMap<String, u32>, host: String) -> u32 {
+fn domain_number(
+    domains: &mut BTreeMap<String, u32>,
+    hosts: &mut BTreeMap<u32, String>,
+    host: String,
+) -> u32 {
     if let Some(n) = domains.get(&host) {
         return *n;
     }
     let n = u32::try_from(domains.len())
         .unwrap_or(u32::MAX)
         .saturating_add(1);
+    hosts.insert(n, host.clone());
     domains.insert(host, n);
     n
 }

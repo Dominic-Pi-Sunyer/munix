@@ -198,6 +198,9 @@ impl Confirmer for BridgeConsole {
     fn confirm(&mut self, view: &munix_gate::gate::PendingView) -> bool {
         match self {
             BridgeConsole::AlwaysNo(c) => c.confirm(view),
+            // A careful user declines an address a web page supplied that is not on that page's own domain
+            // (the Gate marks such a request `web_unbound`); the decision still goes through `console.simulated_user`.
+            BridgeConsole::Simulated(_) if view.web_unbound => false,
             BridgeConsole::Simulated(c) => c.confirm(view),
         }
     }
@@ -1249,6 +1252,38 @@ amendments:
         let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
         let run = drive_raw(&input, setup_with(&dir, None, &plan, false), dir);
         assert_eq!(run.out[3]["text"], "denied: user_denied");
+    }
+
+    #[test]
+    fn the_simulated_user_declines_a_web_unbound_request_even_when_the_destination_looks_clean() {
+        use munix_core::context::Band;
+        use munix_core::decision::Stage;
+        use munix_core::label::Trust;
+        use munix_gate::gate::{DestinationTrace, PendingArg, PendingView};
+
+        let view = |web_unbound: bool| PendingView {
+            tool: "email.send".parse().unwrap(),
+            step: 2,
+            needs: Stage::User,
+            band: Band::Clean,
+            args: vec![PendingArg {
+                name: "to".to_owned(),
+                value: "support@store.test".to_owned(),
+                sources: vec!["step 1 contact (operator_content, trust 85)".to_owned()],
+                destination: Some(DestinationTrace {
+                    best_trust: Some(Trust::new(85)),
+                    clean_side: false,
+                }),
+            }],
+            web_unbound,
+        };
+        let mut console = BridgeConsole::new(true);
+        // Trust 85 is above the simulated user's bar, so the flag alone decides.
+        assert!(console.confirm(&view(false)));
+        assert!(!console.confirm(&view(true)));
+        // The label is unchanged: the decision still goes to the ledger as `console.simulated_user`.
+        assert_eq!(console.label(), "console.simulated_user");
+        assert!(!BridgeConsole::new(false).confirm(&view(false)));
     }
 
     #[test]

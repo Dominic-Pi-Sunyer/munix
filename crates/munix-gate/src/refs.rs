@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use munix_core::ids::RefId;
-use munix_core::label::Label;
+use munix_core::label::{Label, Source};
 use munix_core::validate::Scalar;
 use serde_json::Value;
 
@@ -28,6 +28,10 @@ impl RefEntry {
             origin: self.origin.clone(),
             trust: self.label.trust,
             confidential: self.label.confidential,
+            web_domain: match self.label.source {
+                Source::Web { domain } => Some(domain),
+                _ => None,
+            },
         }
     }
 }
@@ -136,6 +140,7 @@ impl RefTable {
                         origin: s.origin.clone(),
                         trust: s.label.trust,
                         confidential: s.label.confidential,
+                        web_domain: None,
                     })
                     .collect()
             })
@@ -174,6 +179,7 @@ impl RefTable {
             origin: Origin::Prompt,
             trust: label.trust,
             confidential: label.confidential,
+            web_domain: None,
         })
     }
 

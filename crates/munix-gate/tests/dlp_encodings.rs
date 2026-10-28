@@ -90,6 +90,7 @@ fn rule(refs: &RefTable, boss: &str, subject: &str, body: &str, creds: &[&Creden
         calls_so_far: 0,
         band: Band::Clean,
         args: &facts,
+        hosts: &BTreeMap::new(),
     })
 }
 

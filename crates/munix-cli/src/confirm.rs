@@ -176,6 +176,7 @@ mod tests {
             needs: Stage::User,
             band: Band::Lockdown,
             args,
+            web_unbound: false,
         }
     }
 

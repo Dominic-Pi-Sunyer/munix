@@ -57,6 +57,7 @@ pub fn trace_arg(
             for item in scalar_items(value) {
                 facts.values.push(Traced {
                     matches: refs.find_scalar(item),
+                    dest_host: None,
                 });
             }
         }
@@ -122,6 +123,7 @@ fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u3
     {
         return match refs.get(&id) {
             Some(entry) => Traced {
+                dest_host: destination_host(&entry.value, entry.scalar),
                 matches: vec![entry.to_match(id)],
             },
             None => {
@@ -140,7 +142,74 @@ fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u3
     {
         matches.push(m);
     }
-    Traced { matches }
+    Traced {
+        matches,
+        dest_host: destination_host(raw, scalar),
+    }
+}
+
+/// The lowercased host a destination value names, read from the value itself (never from where it came from):
+/// the part after the last `@` of an `email`; the host of a `url`; for `text`, the host of a `http(s)://` URL or of
+/// a bare host (the [`is_bare_host`] test). `None` for any other type (`iban`, `phone`, `id`, ...) and for a value
+/// that does not parse cleanly: userinfo, a backslash, white space, a non-numeric port or a label that is not a
+/// host label all give `None`, so the value can never be bound to a page's domain.
+fn destination_host(value: &str, scalar: Scalar) -> Option<String> {
+    match scalar {
+        Scalar::Email => {
+            let (_, domain) = value.rsplit_once('@')?;
+            clean_host(domain)
+        }
+        Scalar::Url => host_of_url(value),
+        Scalar::Text => host_of_url(value).or_else(|| bare_host_of(value)),
+        _ => None,
+    }
+}
+
+/// A host name made only of valid host labels (lowercased), with a single optional trailing dot not accepted.
+fn clean_host(host: &str) -> Option<String> {
+    let lower = host.to_ascii_lowercase();
+    (!lower.is_empty() && lower.split('.').all(is_host_label)).then_some(lower)
+}
+
+/// Splits `authority` into its host and checks the optional `:port` (digits only). `None` for userinfo,
+/// backslashes, white space or brackets.
+fn authority_host(authority: &str) -> Option<String> {
+    if authority.contains(['@', '\\', '[', ']']) || authority.contains(char::is_whitespace) {
+        return None;
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if port.is_some_and(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    clean_host(host)
+}
+
+/// The authority of `rest` (everything up to the first `/`, `?` or `#`).
+fn authority_of(rest: &str) -> &str {
+    rest.find(['/', '?', '#']).map_or(rest, |i| &rest[..i])
+}
+
+/// The host of an `http://` or `https://` URL (scheme in any case).
+fn host_of_url(value: &str) -> Option<String> {
+    let rest = ["https://", "http://"].iter().find_map(|scheme| {
+        value
+            .get(..scheme.len())
+            .filter(|p| p.eq_ignore_ascii_case(scheme))
+            .map(|_| &value[scheme.len()..])
+    })?;
+    authority_host(authority_of(rest))
+}
+
+/// The host of a bare-host value such as `www.store.test` or `store.test/contact` (the whole value is the host,
+/// optionally followed by a port and a path).
+fn bare_host_of(value: &str) -> Option<String> {
+    let authority = authority_of(value);
+    let host = authority_host(authority)?;
+    let rest = &value[host.len()..];
+    is_bare_host(&host, rest).then_some(host)
 }
 
 /// Records one embedded ref (or ref value): resolved ones raise `confidential`, unknown ones are counted and
@@ -151,6 +220,7 @@ fn note_embedded(id: &RefId, refs: &RefTable, facts: &mut ArgFacts) {
             facts.confidential = facts.confidential.max(entry.label.confidential);
             facts.embedded.push(Traced {
                 matches: vec![entry.to_match(id.clone())],
+                dest_host: None,
             });
         }
         None => {
@@ -173,7 +243,10 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
             match refs.find_prompt_token(&token) {
                 Some(m) => {
                     facts.confidential = facts.confidential.max(m.confidential);
-                    facts.embedded.push(Traced { matches: vec![m] });
+                    facts.embedded.push(Traced {
+                        matches: vec![m],
+                        dest_host: None,
+                    });
                 }
                 None => facts.raw_destinations = facts.raw_destinations.saturating_add(count),
             }
@@ -186,6 +259,7 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
                     .into_iter()
                     .map(|(id, entry)| entry.to_match(id.clone()))
                     .collect(),
+                dest_host: None,
             });
         }
     }
@@ -1352,7 +1426,9 @@ mod tests {
             &refs,
             &[],
         );
-        assert_eq!(facts.values, vec![Traced::untraced()]);
+        // No matches (untraced); the host is still read from the value itself.
+        assert!(facts.values[0].matches.is_empty());
+        assert_eq!(facts.values[0].dest_host.as_deref(), Some("evil.test"));
         assert_eq!(facts.values[0].best_trust(), Trust::ZERO);
     }
 
@@ -2504,5 +2580,62 @@ mod tests {
         let mut extra = args.clone();
         extra.insert("unknown".to_owned(), json!("x"));
         assert_eq!(trace_request(&specs, &extra, &refs, &[]).len(), 3);
+    }
+
+    #[test]
+    fn destination_hosts_come_from_the_value_itself() {
+        let host = |v: &str, s: Scalar| destination_host(v, s);
+        assert_eq!(
+            host("Sales@Shop.Store.TEST", Scalar::Email).as_deref(),
+            Some("shop.store.test")
+        );
+        assert_eq!(
+            host("https://Store.test:8443/contact?x=1", Scalar::Url).as_deref(),
+            Some("store.test")
+        );
+        assert_eq!(
+            host("HTTP://store.test", Scalar::Text).as_deref(),
+            Some("store.test")
+        );
+        assert_eq!(
+            host("www.store.test/contact", Scalar::Text).as_deref(),
+            Some("www.store.test")
+        );
+        // Not a host: an id, an IBAN, a phone, plain words.
+        assert_eq!(host("store.test", Scalar::Id), None);
+        assert_eq!(host("DE89370400440532013000", Scalar::Iban), None);
+        assert_eq!(host("+15550100", Scalar::Phone), None);
+        assert_eq!(host("hello world", Scalar::Text), None);
+        // Tricks that must never name the first host: userinfo, backslash, bad port, spaces.
+        assert_eq!(host("https://store.test@evil.test/", Scalar::Url), None);
+        assert_eq!(host("store.test@evil.test", Scalar::Text), None);
+        assert_eq!(host("store.test:80@evil.test/", Scalar::Text), None);
+        assert_eq!(host("https://store.test\\@evil.test/", Scalar::Url), None);
+        assert_eq!(host("https://store.test:x/", Scalar::Url), None);
+        assert_eq!(host("store.test evil.test", Scalar::Text), None);
+    }
+
+    #[test]
+    fn a_traced_value_carries_the_host_of_the_value_not_of_the_source() {
+        let mut refs = RefTable::new();
+        let id = refs.issue(
+            "attacker@evil.test",
+            Scalar::Email,
+            Origin::Step {
+                step: 1,
+                field: "contact".to_owned(),
+            },
+            Label {
+                source: Source::Web { domain: 3 },
+                ..label(85, Confidential::Public)
+            },
+        );
+        let mut unknown = 0;
+        let by_ref = trace_value(id.as_str(), Scalar::Email, &refs, &mut unknown);
+        assert_eq!(by_ref.dest_host.as_deref(), Some("evil.test"));
+        assert_eq!(by_ref.matches[0].web_domain, Some(3));
+        let raw = trace_value("attacker@evil.test", Scalar::Email, &refs, &mut unknown);
+        assert_eq!(raw.dest_host.as_deref(), Some("evil.test"));
+        assert_eq!(raw.matches[0].web_domain, Some(3));
     }
 }

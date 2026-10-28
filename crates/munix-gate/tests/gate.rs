@@ -1684,7 +1684,8 @@ fn review_view_never_leaks_attacker_strings_or_argument_values_invariant_3() {
             "band 0-19",
             "plan.step2",
             "budget.ok",
-            "to.trace_ok",
+            // `to` holds an address read from a web page that is not on that page's domain.
+            "to.web_unbound",
             "band.lockdown",
         ] {
             assert!(

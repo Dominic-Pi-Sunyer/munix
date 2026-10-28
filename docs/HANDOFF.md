@@ -8,6 +8,12 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
 
+- **In progress (Oct 28, night): closing the hacked-page gap (owner-approved).** Tier-3 egress destinations from web
+  content must be bound to the page's own domain, or pinned by an earlier user approval, or else they wait for the
+  user (`<arg>.web_unbound` → `ConfirmUser`, never a takeover). Builder 1 (Sonnet): domain binding, the policy rule,
+  the simulated user declines `web_unbound`, trusted-content tests updated. Builder 2 (next): pin-on-approval.
+  Uncommitted until reviewed.
+
 - **Security review of the Oct 28 changes (Oct 28, late): no break found.** `docs/redteam/security-review-oct28.md`.
   - Four low findings documented. The Console now says "the prompt" only for `id`/`text` destinations (fixed).
   - **Trusted-content tests** (`crates/munix-gate/tests/trusted_content.rs`, 16, by Sonnet): a typed value
