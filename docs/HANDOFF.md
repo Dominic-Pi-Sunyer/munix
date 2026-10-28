@@ -8,6 +8,10 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
+- **Next build: plan memory** (`docs/plan-memory.md`, planned and approved in design, not built yet).
+  - Reuse a stored plan for an exact or value-masked repeat of a prompt.
+  - Clean runs only, and opt-in.
+  - Build it before plan-on-first-write.
 - **Parked by the owner (Oct 27): cutting Munix's cost**, about 2x bare today.
   - **Where the cost is:** the agent costs the same under Munix ($0.022 per case). The extra is about all the
     planner: one call per task, ~$0.015 (4.6k prompt and 2.3k output tokens at `low`). The reviewer is almost
