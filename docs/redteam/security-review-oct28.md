@@ -42,6 +42,20 @@ item 2 ("steering A to a wrong choice whose value traces to a trustworthy source
 This is the one place where Prompt Guard adds protection Munix doesn't have on its own, and only when the attacker
 also plants blunt instruction text it catches.
 
-**Optional hardening (owner's call, beyond the v1 claims):** destinations for tier-3 egress tools that come from web
-content could always need the user, whatever the region's trust (a step-source floor above every web ceiling).
-It would cost utility on tasks like "email the store's support address", which would stop and ask.
+**Closed (Oct 28, owner-approved, commits `dc42c41` and `855956b`).** For tier-3 egress tools, trust alone no
+longer authorizes a destination taken from content Munix didn't get from you:
+1. **Domain binding.** A destination from a web page binds only when its host is that page's own host or a
+   dot-boundary parent or child of it (`support@store.com` from `www.store.com`; not `attacker@evil.com`, not
+   `evilstore.com`, not `store.com.evil.com`).
+2. **Third-party content from any tool never binds** (`message`, `ugc_*`, `profile`, `unclassified`, …): a stranger's
+   email in an inbox tool can't supply a payment's IBAN. A trusted service's own records still bind.
+3. **Anything that doesn't bind waits for the user** (`<arg>.web_unbound` → `ConfirmUser`). Never sent automatically,
+   never softened from a deny, and the simulated user always declines it.
+4. **Pin on approval.** When the user approves, each unbound `(source, value)` is remembered, so the next task binds
+   it; a page showing a different value asks again. Only a real user's approval pins (never the reviewer model or
+   the simulated user), pins never rescue a value below the plan's `from`/`min_trust`, and the ledger keeps only
+   digests. `munix run` refuses a pins file inside the Integrity Seal's roots.
+
+The trusted-content tests that used to send to the attacker now park for the user. Remaining limits: binding compares
+host names without a public-suffix list (a page on `evil.co.uk` binds `x@co.uk`); pins have no expiry, and a pin from
+a shared host (a marketplace) covers that exact value from any page on it.

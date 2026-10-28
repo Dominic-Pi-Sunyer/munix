@@ -6,14 +6,18 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-- **Builder 2 (Oct 28 night): third-party binding and pins, built, uncommitted, awaiting review.** A match with no web
-  page but third-party content (`RegionType::is_third_party`: a stranger's `message`, reviews, unclassified...) never
-  binds a tier 3 destination; bank records (`operator_content`) still do. Pin on approval: a user `yes` at the Console
-  on a `web_unbound` request pins each unbound `(source, value)` (page host, or tool name); the same value from the
-  same source binds later. Files: `crates/munix-gate/src/pins.rs`, `facts.rs` (`BindEnv`, `binds`), `policy.rs`
-  (`pin_candidates`), `gate.rs` (`enable_pins`, `pin_approved`; ledger `pin_added` digest only, `pin_refused`,
-  `pins_ignored`), `munix bridge --pins <file>`, `munix run` env `MUNIX_PINS` (refused inside a sealed root). Tests:
-  `crates/munix-gate/tests/pins.rs`. Pins stay off unless configured.
+_Last updated: Wed Oct 28, 2026 (night), by Claude (Opus 5.5)._
+
+- **Hacked-page gap closed (Oct 28, night, owner-approved):** `dc42c41` and `855956b`, written up in
+  `docs/redteam/security-review-oct28.md`.
+  - For tier-3 egress tools, a destination from content Munix didn't get from the user must bind: a web value must
+    be on the page's own domain (`host_binds`), third-party content from any tool never binds, and a user-approved
+    `(source, value)` pin binds. Otherwise the request is `ConfirmUser` with `<arg>.web_unbound`.
+  - Pins: only a real user's approval (`Stage::User`, not `console.simulated_user`) adds them, the ledger keeps
+    digests only, and `munix bridge --pins` / `MUNIX_PINS` are refused inside a sealed root.
+  - **Regression check ($1.54):** banking utility 9/16 → 10/16 (variance), Slack 2/21 → 2/21; the rule never fired
+    in either suite.
+  - **Limits:** no public-suffix list; pins never expire.
 
 - **Security review of the Oct 28 changes (Oct 28, late): no break found.** `docs/redteam/security-review-oct28.md`.
   - Four low findings documented. The Console now says "the prompt" only for `id`/`text` destinations (fixed).
