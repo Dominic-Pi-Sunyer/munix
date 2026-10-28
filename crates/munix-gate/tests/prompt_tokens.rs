@@ -115,7 +115,7 @@ fn a_url_destination_still_needs_a_scheme_url_in_the_prompt() {
 
 #[test]
 fn content_text_with_prompt_words_gets_no_new_facts() {
-    let body = "Alice general www.informations.com External please read";
+    let body = "Alice general External please read";
     let with = table("send it to Alice in general via www.informations.com External");
     let without = RefTable::new();
     let a = trace(&with, json!({"channel": "x", "body": body}));
@@ -240,4 +240,24 @@ fn a_scheme_in_front_of_a_typed_host_still_traces_but_nothing_after_it() {
     assert_eq!(site("https://www.informations.com?q=1"), 0);
     assert_eq!(site("ftp://www.informations.com"), 0);
     assert_eq!(site("https://"), 0);
+}
+
+#[test]
+fn a_host_the_user_typed_is_embedded_from_the_prompt_and_any_other_stays_raw() {
+    let refs = table("Post the summary of www.informations.com to 'general'.");
+    let typed = trace(
+        &refs,
+        json!({"channel": "x", "body": "Summary of https://www.informations.com: jobs are up."}),
+    );
+    assert_eq!(typed["body"].raw_destinations, 0);
+    assert_eq!(typed["body"].embedded.len(), 1);
+    assert_eq!(typed["body"].embedded[0].matches[0].origin, Origin::Prompt);
+    let other = trace(
+        &refs,
+        json!({"channel": "x", "body": "See www.informations.com/x and www.evil.com"}),
+    );
+    // The raw tokenizer keys a bare host by the host alone (as it already did for refs), so the typed host with a
+    // path is still the typed host; DLP still checks the text. Only the host nobody typed is raw.
+    assert_eq!(other["body"].raw_destinations, 1);
+    assert_eq!(other["body"].embedded.len(), 1);
 }

@@ -168,7 +168,15 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
     for (token, count) in raw_destination_counts(text) {
         let entries = refs.find_value(&token);
         if entries.is_empty() {
-            facts.raw_destinations = facts.raw_destinations.saturating_add(count);
+            // A link or host the user typed in the prompt is theirs, not a raw destination; it is embedded from the
+            // prompt (`RefTable::find_prompt_token`), so it raises `confidential` like a prompt ref would.
+            match refs.find_prompt_token(&token) {
+                Some(m) => {
+                    facts.confidential = facts.confidential.max(m.confidential);
+                    facts.embedded.push(Traced { matches: vec![m] });
+                }
+                None => facts.raw_destinations = facts.raw_destinations.saturating_add(count),
+            }
         } else {
             for (_, entry) in &entries {
                 facts.confidential = facts.confidential.max(entry.label.confidential);

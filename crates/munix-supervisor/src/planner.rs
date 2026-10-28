@@ -59,6 +59,9 @@ need them.
 output field that tool actually produces, and must include \"min_trust\" (e.g. 60).
 5. Content arguments on egress tools should set \"dlp\": \"no_secret\" (and \"forbid\": true on \
 optional attachment arguments when unneeded).
+6. When the prompt itself names a destination (a channel, a person, a website, an account), put \
+\"prompt\" in that argument's \"from\". Add a step source only if the value may also have to be \
+looked up.
 
 Example plan for an unrelated task (\"Fetch the release notes URL from the prompt and post a \
 summary to the team channel\"):

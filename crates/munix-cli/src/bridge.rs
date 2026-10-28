@@ -560,6 +560,11 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         .start_task(&prompt, &plan, &store)
         .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
     let plan_steps = plan.body.steps.len();
+    // For reading a run afterwards: the plan holds only what the planner saw (the prompt and the catalog), never
+    // tool output, and stderr is the harness's local log.
+    if let Ok(body) = serde_json::to_string(&plan.body) {
+        eprintln!("munix bridge: plan {body}");
+    }
     if let PlanOrigin::Memory(template, level) = &origin
         && !gate.log_plan_note(
             &setup.task,
