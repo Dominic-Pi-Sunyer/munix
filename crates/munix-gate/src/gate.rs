@@ -425,6 +425,11 @@ impl Gate {
     /// `Origin::Prompt`; then every store value the plan names in a `from` or `may_embed` path, with origin
     /// `Origin::Store`. Labels: source `prompt` or `store`, region `user_content`, author `user`, trust 100,
     /// confidential `internal` for the prompt and the value's own for the store, capacity `free_text`.
+    /// Separately, the prompt's whole tokens (same split and trim, non-empty, at most 200 bytes) are recorded in the
+    /// table as prompt tokens, with the same prompt label. They are not refs and not in the brief: the tracer
+    /// matches them only for an `id` or `text` destination or selector whose value equals a token exactly
+    /// (case-sensitive), so a name or bare host the user typed traces to the prompt. Content scanning never sees
+    /// them.
     /// The context starts with `ContextState::fresh()`. Writes `task_started` with the task, plan id, plan digest
     /// and prompt digest.
     pub fn start_task(
@@ -493,6 +498,10 @@ impl Gate {
                 brief_refs.push(BriefRef { id, what });
             }
         }
+        refs.record_prompt_tokens(
+            prompt_tokens(&envelope.text),
+            user_label(Source::Prompt, Confidential::Internal),
+        );
         let mut store_names: BTreeSet<String> = BTreeSet::new();
         for (name, key) in named_store_values(body, store) {
             let Some(entry) = store.get(&name).and_then(|keys| keys.get(&key)) else {
@@ -1729,6 +1738,16 @@ fn user_label(source: Source, confidential: Confidential) -> Label {
     }
 }
 
+/// The whole tokens of the prompt: split on white space, trimmed of surrounding `()[]<>"',.;:!?`, skipping empty
+/// ones and ones over 200 bytes.
+fn prompt_tokens(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|t| t.trim_matches(|c| "()[]<>\"',.;:!?".contains(c)))
+        .filter(|t| !t.is_empty() && t.len() <= 200)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Urls, emails and IBANs in the prompt text, in order of appearance.
 fn prompt_values(text: &str) -> Vec<(String, Scalar)> {
     text.split_whitespace()
@@ -1807,7 +1826,11 @@ fn describe_sources(value: &Value, refs: &RefTable) -> Vec<String> {
         if !found && s.parse::<RefId>().is_err() {
             let matches = refs.find_value(s);
             if matches.is_empty() {
-                if find_embedded(s).is_empty() && !s.is_empty() && !s.contains(char::is_whitespace)
+                if let Some(m) = refs.find_prompt_token(s) {
+                    out.push(format!("the prompt (trust {})", m.trust.value()));
+                } else if find_embedded(s).is_empty()
+                    && !s.is_empty()
+                    && !s.contains(char::is_whitespace)
                 {
                     out.push("untraced".to_owned());
                 }
@@ -1986,6 +2009,10 @@ fn traced_value_view(traced: &crate::facts::Traced, refs: &RefTable) -> crate::v
     let mut first: Option<(RefId, String)> = None;
     for m in &traced.matches {
         let Some(id) = &m.id else {
+            // A word typed in the prompt (`RefTable::find_prompt_token`) has no ref, but its source is the prompt.
+            if m.origin == Origin::Prompt {
+                sources.push(crate::view::SourceView::Prompt { trust: m.trust });
+            }
             continue;
         };
         let Some(entry) = refs.get(id) else {
@@ -2000,6 +2027,11 @@ fn traced_value_view(traced: &crate::facts::Traced, refs: &RefTable) -> crate::v
         Some((ref_id, ty)) => crate::view::ValueView {
             ref_id: Some(ref_id),
             ty: Some(ty),
+            sources,
+        },
+        None if !sources.is_empty() => crate::view::ValueView {
+            ref_id: None,
+            ty: None,
             sources,
         },
         None => untraced_value_view(),

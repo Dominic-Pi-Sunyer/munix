@@ -3,7 +3,7 @@
 //! Destinations travel as refs, so the agent can name a link or an address without the Gate having to trust
 //! the string the agent typed. Each entry keeps the origin and label of the place the value came from.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use munix_core::ids::RefId;
 use munix_core::label::Label;
@@ -41,6 +41,11 @@ pub struct RefTable {
     /// text. They get no ref (the agent types the value itself), so this is how a selector such as a schedule id
     /// is traced back to the step that delivered it.
     scalars: BTreeMap<String, Vec<ScalarSite>>,
+    /// Whole whitespace-separated tokens of the signed prompt, with the label prompt values carry. Consulted only
+    /// by [`RefTable::find_prompt_token`] (for `id` and `text` destinations and selectors). They are not entries:
+    /// no ref is issued, and content scanning, DLP and `find_value` never see them.
+    prompt_tokens: BTreeSet<String>,
+    prompt_label: Option<Label>,
 }
 
 /// Where one non-string scalar value was delivered: the origin (step and field) and the field's label.
@@ -135,6 +140,28 @@ impl RefTable {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Remembers the whole tokens of the prompt (see `Gate::start_task`) and the label a match on one carries.
+    pub fn record_prompt_tokens<I: IntoIterator<Item = String>>(
+        &mut self,
+        tokens: I,
+        label: Label,
+    ) {
+        self.prompt_tokens.extend(tokens);
+        self.prompt_label = Some(label);
+    }
+
+    /// A match with origin `Origin::Prompt` when `raw` is exactly (case-sensitive) a whole prompt token. The match
+    /// has no ref id. `None` for anything else, including before any token was recorded.
+    pub fn find_prompt_token(&self, raw: &str) -> Option<Match> {
+        let label = self.prompt_label.as_ref()?;
+        self.prompt_tokens.contains(raw).then_some(Match {
+            id: None,
+            origin: Origin::Prompt,
+            trust: label.trust,
+            confidential: label.confidential,
+        })
     }
 
     pub fn get(&self, id: &RefId) -> Option<&RefEntry> {

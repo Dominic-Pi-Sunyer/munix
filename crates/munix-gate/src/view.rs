@@ -174,7 +174,13 @@ impl ReviewView {
 }
 
 fn render_value(value: &ValueView, scalar_ty: &str) -> String {
-    let ref_text = value.ref_id.as_ref().map_or("untraced", RefId::as_str);
+    // A word typed in the prompt traces without a ref.
+    let no_ref = if value.sources.is_empty() {
+        "untraced"
+    } else {
+        "no-ref"
+    };
+    let ref_text = value.ref_id.as_ref().map_or(no_ref, RefId::as_str);
     let (source, trust) = render_sources(&value.sources);
     format!("{ref_text}  {scalar_ty}  source={source}  trust={trust}")
 }
@@ -358,5 +364,27 @@ ARG body  text 412 chars · embeds 1 · raw destinations 0 · confidential=publi
 CONTEXT   trust=15 · band 0-19 · lowest=domain#1/ugc_review
 CHECKS    plan.step2 · budget.ok · to.trace_ok · band.lockdown";
         assert_eq!(view.render(), expected);
+    }
+
+    #[test]
+    fn a_prompt_word_renders_as_the_prompt_without_a_ref() {
+        let word = ValueView {
+            ref_id: None,
+            ty: None,
+            sources: vec![SourceView::Prompt { trust: Trust::FULL }],
+        };
+        assert_eq!(
+            render_value(&word, "id"),
+            "no-ref  id  source=prompt  trust=100"
+        );
+        let untraced = ValueView {
+            ref_id: None,
+            ty: None,
+            sources: Vec::new(),
+        };
+        assert_eq!(
+            render_value(&untraced, "id"),
+            "untraced  id  source=untraced  trust=0"
+        );
     }
 }

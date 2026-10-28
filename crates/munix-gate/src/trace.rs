@@ -12,7 +12,7 @@ use munix_core::manifest::{ArgRole, ArgSpec};
 use munix_core::validate::{Scalar, is_hidden_format_char};
 use serde_json::Value;
 
-use crate::facts::{ArgFacts, Traced};
+use crate::facts::{ArgFacts, Match, Traced};
 use crate::refs::RefTable;
 use crate::vault::Credential;
 
@@ -20,7 +20,11 @@ use crate::vault::Credential;
 ///
 /// - Destination and selector arguments with a string-shaped type: each value (each list element) becomes one
 ///   [`crate::facts::Traced`] in `values`. A `ref:` value resolves through the table (unknown refs are counted in
-///   `unknown_refs` and traced as untraced); a raw value matches every table entry with exactly that value.
+///   `unknown_refs` and traced as untraced); a raw value matches every table entry with exactly that value. For
+///   an `id` or `text` argument (a name or bare host the user typed, with no scheme to recognize) a raw value that
+///   is exactly (case-sensitive) a whole token of the prompt also gets one more match, origin `Prompt` with the
+///   prompt label (trust 100) and no ref id. Prompt tokens are never table entries, so they are not found in
+///   content text; `url`, `email`, `iban` and `phone` arguments are unchanged.
 /// - Content text: refs embedded in it (`munix_core::ids::find_embedded`) go to `embedded`; raw links and
 ///   addresses (found by the [`raw_destinations`] tokenizer) whose cleaned token text exactly matches one or more
 ///   table entries also go to `embedded` with those entries' matches and raise `confidential`, while untraced ones
@@ -62,7 +66,7 @@ pub fn trace_arg(
         ArgRole::Destination | ArgRole::Selector => {
             for item in items(value) {
                 let traced = match item {
-                    Some(raw) => trace_value(raw, refs, &mut facts.unknown_refs),
+                    Some(raw) => trace_value(raw, scalar, refs, &mut facts.unknown_refs),
                     None => Traced::untraced(),
                 };
                 facts.values.push(traced);
@@ -111,8 +115,8 @@ fn scalar_items(value: &Value) -> Vec<&Value> {
 }
 
 /// Traces one destination or selector value: a `ref:` token resolves through the table, a raw string matches
-/// every entry holding exactly that string.
-fn trace_value(raw: &str, refs: &RefTable, unknown_refs: &mut u32) -> Traced {
+/// every entry holding exactly that string, plus (for `id` and `text`) the prompt-token match if `raw` is one.
+fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u32) -> Traced {
     if raw.starts_with("ref:")
         && let Ok(id) = raw.parse::<RefId>()
     {
@@ -126,13 +130,17 @@ fn trace_value(raw: &str, refs: &RefTable, unknown_refs: &mut u32) -> Traced {
             }
         };
     }
-    Traced {
-        matches: refs
-            .find_value(raw)
-            .into_iter()
-            .map(|(id, entry)| entry.to_match(id.clone()))
-            .collect(),
+    let mut matches: Vec<Match> = refs
+        .find_value(raw)
+        .into_iter()
+        .map(|(id, entry)| entry.to_match(id.clone()))
+        .collect();
+    if matches!(scalar, Scalar::Id | Scalar::Text)
+        && let Some(m) = refs.find_prompt_token(raw)
+    {
+        matches.push(m);
     }
+    Traced { matches }
 }
 
 /// Records one embedded ref (or ref value): resolved ones raise `confidential`, unknown ones are counted and
