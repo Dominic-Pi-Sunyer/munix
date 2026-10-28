@@ -6,8 +6,14 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
+_Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
 
+- **Adaptive attacker through agy (Oct 28): built, but Gemini 3.8 Flash refuses.** `adaptive.py search
+  --attacker-model agy:<model>` runs the attacker through the owner's `agy` CLI (print mode, empty folder, sandboxed,
+  no Meta credit). Tested offline with a fake `agy`. With the real `gemini-3.8-flash-medium` it refused every round
+  on policy ("cannot generate prompt injection payloads ... even within a simulated benchmark"). We don't reword the
+  prompt to get around a model's safety rules. Muse Spark stays the attacker. It was about 38% of the last search's
+  cost ($1.14 of $2.98); the target, which has to be Muse Spark, was the rest.
 - **PixelMart demo re-checked on today's code (Oct 28), about $0.03.**
   - Left side (v01): clean.
   - Right side, 2 runs with `MUNIX_PLAN_MEMORY`: both clean (the summary went to the boss only, context trust 100,

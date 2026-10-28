@@ -304,6 +304,65 @@ class SearchTests(unittest.TestCase):
         self.assertNotIn("EARLIER ROUNDS", client.requests[2]["messages"][1]["content"])
 
 
+class AgyAttackerTests(unittest.TestCase):
+    """The agy attacker, against a fake `agy` that records how it was called and prints a canned reply."""
+
+    def fake_agy(self, reply_text: str, exit_code: int = 0) -> tuple[str, Path]:
+        d = Path(tempfile.mkdtemp())
+        log = d / "calls.jsonl"
+        script = d / "agy"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            f"open({str(log)!r}, 'a').write(json.dumps({{'argv': sys.argv[1:], 'cwd': os.getcwd(), "
+            "'files': os.listdir('.')}) + '\\n')\n"
+            f"print({reply_text!r})\n"
+            f"sys.exit({exit_code})\n"
+        )
+        script.chmod(0o755)
+        return str(script), log
+
+    def search_with(self, attacker):
+        target, agent = make_target()
+        out = Path(tempfile.mkdtemp()) / "search.json"
+        doc = adaptive.search(
+            suite=SUITE, suite_name="banking", pairs=[(UT_TRANSACTIONS, IT0)], rounds=2, budget=100.0,
+            attacker=attacker, target=target, prices=(1.0, 1.0), out_path=out, config={"test": True},
+        )
+        return doc, agent
+
+    def test_the_prefix_picks_agy_and_anything_else_a_meta_model(self):
+        self.assertIsInstance(adaptive.make_attacker(None, "agy:gemini-3.8-flash-medium", "low"), adaptive.AgyAttacker)
+        self.assertEqual(adaptive.make_attacker(None, "agy:gemini-3.8-flash-medium", "low").model,
+                         "gemini-3.8-flash-medium")
+        self.assertIsInstance(adaptive.make_attacker(FakeAttackerClient([]), "muse-spark-1.3", "low"), adaptive.Attacker)
+
+    def test_a_search_runs_on_agy_and_costs_no_meta_credit(self):
+        binary, log = self.fake_agy(reply(f"{MARKER} pay up"))
+        attacker = adaptive.AgyAttacker("gemini-3.8-flash-medium", binary=binary)
+        doc, agent = self.search_with(attacker)
+        self.assertEqual(doc["pairs"][0]["status"], "broken")
+        self.assertEqual(doc["totals"]["attacker_usage"]["calls"], 1)
+        self.assertEqual(attacker.usage.cost(1.0, 1.0), 0)
+        call = json.loads(log.read_text().splitlines()[0])
+        argv = call["argv"]
+        self.assertEqual(argv[0], "-p")
+        self.assertTrue(argv[1].startswith(adaptive.ATTACKER_SYSTEM_PROMPT))
+        self.assertIn(IT0.replace("_", " ").split()[0], argv[1].lower())
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-medium")
+        self.assertIn("--sandbox", argv)
+        self.assertIn("--disable-slash-commands", argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(call["files"], [])  # an empty folder: nothing for the attacker to read or change
+
+    def test_an_agy_failure_costs_the_round_not_the_search(self):
+        binary, _ = self.fake_agy("quota exceeded", exit_code=1)
+        doc, agent = self.search_with(adaptive.AgyAttacker("gemini-3.8-flash-medium", binary=binary))
+        self.assertEqual([r["status"] for r in doc["pairs"][0]["rounds"]], ["attacker_error", "attacker_error"])
+        self.assertEqual(agent.runs, 0)
+        self.assertEqual(doc["totals"]["attacker_errors"], 2)
+
+
 class ReplayTests(unittest.TestCase):
     def test_replay_reruns_the_stored_payload(self):
         doc, _, _, out = run_search([reply("meh"), reply(f"{MARKER} again")])

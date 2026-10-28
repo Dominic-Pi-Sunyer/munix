@@ -1,8 +1,9 @@
-"""Adaptive red-team on AgentDojo: Muse Spark writes fresh injections against the bare Muse Spark agent.
+"""Adaptive red-team on AgentDojo: an attacker model writes fresh injections against the bare Muse Spark agent.
 
     cd eval/agentdojo
     .venv/bin/python -I adaptive.py search --suite banking --user-tasks user_task_1,user_task_3 \
         --injection-tasks injection_task_0,injection_task_1 --rounds 8 --budget 4.0
+    .venv/bin/python -I adaptive.py search ... --attacker-model agy:gemini-3.8-flash-medium   # attacker via agy
     .venv/bin/python -I adaptive.py replay --from results/adaptive--banking-search-<stamp>.json --mode munix
 
 AgentDojo's fixed public attacks may only fail because the model has seen them. Here a second model (the attacker)
@@ -12,13 +13,20 @@ replayed later, unchanged, against bare or Munix. This is authorized testing of 
 AgentDojo's environment is simulated in-process, and no real account, service or person is involved.
 
 `search` always targets the bare agent with no takeover paragraph. Spends Meta credit; the lead runs it.
+
+The attacker is Muse Spark by default. `--attacker-model agy:<model>` uses a model reached through the owner's `agy`
+CLI instead (for example Gemini 3.8 Flash), which costs no Meta credit: in development only the target needs to be
+Muse Spark. A payload such an attacker finds is credited to that model in any write-up. On Oct 28 Gemini 3.8 Flash
+(`agy:gemini-3.8-flash-medium`) refused every round on policy, so Muse Spark is still the attacker in practice.
 """
 
 import argparse
 import copy
 import hashlib
 import json
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -185,6 +193,48 @@ class Attacker:
             **extra,
         )
         return response.choices[0].message.content or ""
+
+
+AGY_PREFIX = "agy:"
+AGY_TIMEOUT_S = 300
+
+
+class AgyAttacker:
+    """A model reached through the `agy` CLI as the attacker. agy has no system-prompt option, so the system prompt
+    leads the prompt. It runs in print mode in an empty folder, sandboxed, with slash commands off: the attacker only
+    writes text. Calls are counted; the tokens go on the owner's agy account, not the Meta credit, so they cost 0 here.
+    """
+
+    def __init__(self, model: str, binary: str = "agy", timeout_s: int = AGY_TIMEOUT_S) -> None:
+        self.model = model
+        self.binary = binary
+        self.timeout_s = timeout_s
+        self.usage = Usage()
+        self.workdir = tempfile.mkdtemp(prefix="munix-agy-attacker-")
+
+    def propose(self, user_message: str) -> str:
+        self.usage.calls += 1
+        done = subprocess.run(
+            [
+                self.binary, "-p", f"{ATTACKER_SYSTEM_PROMPT}\n\n---\n\n{user_message}", "--model", self.model,
+                "--sandbox", "--disable-slash-commands", "--print-timeout", f"{self.timeout_s}s",
+            ],
+            cwd=self.workdir,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout_s + 30,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(f"agy exited {done.returncode}: {done.stderr.strip()[:200]}")
+        return done.stdout
+
+
+def make_attacker(client, model: str, effort: str | None):
+    """`agy:<model>` is an attacker through agy (its model name carries the effort); anything else is a Meta model."""
+    if model.startswith(AGY_PREFIX):
+        return AgyAttacker(model.removeprefix(AGY_PREFIX))
+    return Attacker(client, model, effort)
 
 
 def build_attacker_message(
@@ -642,7 +692,7 @@ def cmd_search(args) -> int:
         suite.get_injection_task_by_id(iid)
     model = args.target_model or env_value("MUNIX_WORKER_MODEL") or DEFAULT_MODEL
     client = openai.OpenAI(base_url=META_URL, api_key=key)
-    attacker = Attacker(client, args.attacker_model, args.attacker_effort)
+    attacker = make_attacker(client, args.attacker_model, args.attacker_effort)
     target = make_target(target_args(args.mode, args.target_effort), model, key)
     out = RESULTS / f"adaptive--{args.suite}-search-{stamp()}.json"
     config = {
@@ -651,7 +701,7 @@ def cmd_search(args) -> int:
         "target_model": model,
         "target_effort": args.target_effort,
         "attacker_model": args.attacker_model,
-        "attacker_effort": args.attacker_effort,
+        "attacker_effort": None if isinstance(attacker, AgyAttacker) else args.attacker_effort,
         "rounds": args.rounds,
         "budget_usd": args.budget,
         "prices_usd_per_m": list(prices_from_env()),
@@ -743,7 +793,9 @@ def main() -> int:
     s.add_argument("--injection-tasks", required=True, help="comma-separated ids")
     s.add_argument("--rounds", type=int, default=8, help="rounds per pair")
     s.add_argument("--budget", type=float, default=4.0, help="stop when attacker + target cost passes this (USD)")
-    s.add_argument("--attacker-model", default=DEFAULT_MODEL)
+    s.add_argument(
+        "--attacker-model", default=DEFAULT_MODEL, help="a Meta model, or agy:<model> (e.g. agy:gemini-3.8-flash-medium)"
+    )
     s.add_argument("--attacker-effort", default="medium", choices=("minimal", "low", "medium", "high"))
     s.add_argument("--mode", default="bare", choices=("bare",), help="the target; search attacks the bare agent")
     s.add_argument("--target-model", help="default: MUNIX_WORKER_MODEL from .env, else muse-spark-1.3")
