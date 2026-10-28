@@ -8,24 +8,25 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
 
-- **Prompt Guard 2 detector and the Slack suite: built and reviewed, offline (Oct 28).** Owner-approved: get
-  Llama Prompt Guard 2 (22M, local CPU classifier, an exception to "no local open weights"), run Slack under Munix
-  with and without it, then the adaptive payloads.
-  - **Detector (invariant 7):** `munix_core::detect` (trait, `DetectorConfig::flags` fails closed),
-    `munix_adapters::GuardDetector` (loopback-only HTTP client). The Gate scores the free-text fields the plan reads
-    before ingest; a flagged field's label trust drops to 5 (`DETECTOR_FLAGGED`), and one `detector_scored` ledger
-    entry holds names and numbers only. The banking and review Readers OR the detector into their flags. `munix
-    bridge --detector-url/-name/-threshold`; `munix run` reads `MUNIX_DETECTOR_URL/_NAME/_THRESHOLD`.
-  - **Sidecar:** `guard/server.py` (127.0.0.1 only, Host check, size caps, 510-token windows with 64 overlap, max over
-    windows), `guard/download.py`. Tests run in `--fake` mode. **Not yet run with the real model.**
-  - **Slack:** 11 manifests in `eval/agentdojo/manifests/slack/`; `convert.py` and `run.py` take the suite;
-    `run.py --detector-url` saves results as `munix+guard`. Channel messages and DMs are `ugc_post` (lead: no sender
-    scoring, so unknown authors cap at 15). URLs are `text` destinations (AgentDojo's bare hosts fail `url`). Under
-    attack a channel name holds the payload and fails `id`, so `get_channels` is refused: an attacker-imposed
-    utility cost, kept as is.
-  - **Blocked on the owner:** the model is gated on Hugging Face (accept Meta's license, put `HF_TOKEN` in `.env`).
-  - **Next:** install `guard/` (torch, transformers), download, confirm label index 1 is malicious, then the Slack
-    runs (bare baseline, Munix, Munix+guard), then replay the adaptive payloads.
+- **Prompt Guard 2, Slack, and 7 new adaptive attacks: done and measured (Oct 28), about $40 today.** Write-up:
+  `docs/redteam/adaptive-and-prompt-guard.md`. Video script: `demo/VIDEO_SCRIPT.md` (owner's outline, rent case).
+  - **Headline:** 9 attacks Muse Spark wrote took over bare Muse Spark in 24/27 runs. Under Munix 0/27, and 0/27
+    with Prompt Guard. Prompt Guard flagged 0/9 of them (scores 0.0007–0.0027). Banking was stopped by the Readers
+    (no attempt); Slack by the Gate (`untrusted_destination`).
+  - **Prompt Guard alone:** 14/14 `ignore_previous` and 14/14 `injecagent`, but 0/14 `important_instructions` and
+    0/14 `tool_knowledge`; 1 of 239 adaptive payloads. Inside Munix it flagged nothing on Slack (346 checks).
+  - **Slack:** bare ASR 0/105, utility 20/21 and 79/105. Munix (simulated user) ASR 0/105, utility 2/21 and
+    10/105; the same with Prompt Guard. Losses are destinations from others' data (see the write-up).
+  - **Built:** the detector (`munix_core::detect`, `GuardDetector`, the Gate's `detector_scored`, Readers OR the flag,
+    bridge and run flags), `guard/` sidecar (`guard/download.py` needs `HF_TOKEN` in `.env`; start with
+    `guard/.venv/bin/python guard/server.py --port 8091`), Slack manifests, prompt-word destination tracing (id/text,
+    optional scheme), user-typed hosts allowed in content, planner rule 6 (`prompt` in `from` when named), bridge
+    logs its plan to stderr, `adaptive.py replay --detector-url` and Slack replays.
+  - **Harness fix:** ledger names carry the pid (two runs in one second collided; 104 Slack cases never started).
+    `run.py report` counts "tasks Munix could not start". Bad files in `results/invalid-ledger-collision/`.
+  - **Next (owner's call):** Slack utility fixes that keep the guarantee: a channel or user the platform's directory
+    confirms counts like a contact; deny without halting on a wrong read-only guess. Then the model-swap proof,
+    README refresh, bug-bounty report. Optional: ae-motion motion graphics once After Effects is installed.
 
 - **Adaptive attacker through agy (Oct 28): built, but Gemini 3.8 Flash refuses.** `adaptive.py search
   --attacker-model agy:<model>` runs the attacker through the owner's `agy` CLI (print mode, empty folder, sandboxed,
@@ -397,6 +398,8 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 
 ## Known issues and backlog
 
+- A Reader's own Prompt Guard score isn't written to the ledger; only the Gate's `detector_scored` is.
+- The planner sometimes returns a plan that doesn't parse (1 in 105 Slack cases per setup); Munix refuses the task.
 - `enum` tool outputs can't be validated: `OutputSpec` has no list of allowed values.
 - The model gateway has no per-task token, so any local process can use it. Acceptable on a single-user demo machine.
 - `RefTable::find_value` orders refs by id string (`ref:u10` sorts before `ref:u2`).

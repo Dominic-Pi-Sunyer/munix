@@ -381,17 +381,22 @@ def summarize(files: list[Path]) -> dict:
     """One setup's merged results over every file it has (shards and phases)."""
     merged = {p: {"utility": {}, "security": {}} for p in PHASES}
     cost = 0.0
+    # Tasks whose bridge reported an error never ran under Munix: every call was refused, so they must not pass
+    # silently as blocked attacks.
+    bridge_errors = 0
     for f in files:
         d = json.loads(f.read_text(encoding="utf-8"))
         merged[d["phase"]]["utility"].update(d["utility"])
         merged[d["phase"]]["security"].update(d["security"])
         cost += d["estimated_cost_usd"]
+        bridge_errors += sum(1 for t in d.get("munix") or [] if t.get("error"))
     return {
         "utility, no attack": rate(merged["utility"]["utility"]),
         "utility under attack": rate(merged["attack"]["utility"]),
         "attack success rate (ASR)": rate(merged["attack"]["security"]),
         "injection goals as tasks": rate(merged["goals"]["utility"]),
         "estimated cost": f"${cost:.2f}",
+        "tasks Munix could not start": str(bridge_errors),
     }
 
 
@@ -420,6 +425,8 @@ def cmd_report(args) -> int:
         for label in ("utility, no attack", "utility under attack", "attack success rate (ASR)", "injection goals as tasks"):
             print(f"  {label + ':':<28}{rows[label]}")
         print(f"  {'estimated cost:':<28}{rows['estimated cost']}")
+        if rows["tasks Munix could not start"] != "0":
+            print(f"  WARNING: {rows['tasks Munix could not start']} tasks never started under Munix (bridge error)")
     if len(summaries) > 1:
         # Setups that differ only by a detector (`munix` and `munix+guard`) sit next to each other.
         print(f"\nside by side · {args.suite} · {BENCHMARK_VERSION} · {ATTACK}")

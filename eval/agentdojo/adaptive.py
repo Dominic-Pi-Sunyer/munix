@@ -730,8 +730,8 @@ def cmd_replay(args) -> int:
     if source.get("kind") != "adaptive-search":
         raise SystemExit("--from must be a result file written by `adaptive.py search`")
     suite_name = source["suite"]
-    if args.mode == "munix" and suite_name != "banking":
-        raise SystemExit(f"--mode munix has manifests for the banking suite only, not {suite_name}")
+    if args.mode == "munix" and not (HERE / "manifests" / suite_name).is_dir():
+        raise SystemExit(f"--mode munix has no manifests for the {suite_name} suite")
     suite = get_suite(BENCHMARK_VERSION, suite_name)
     model = source["config"].get("target_model") or DEFAULT_MODEL
     effort = source["config"].get("target_effort") or "low"
@@ -742,15 +742,20 @@ def cmd_replay(args) -> int:
             raise SystemExit(f"munix binary not found at {munix_bin} (build it, or pass --munix-bin)")
         session = munix_executor.MunixSession(
             ledger_dir=HERE / "runs" / "ledgers",
-            tag=f"{suite_name}-adaptive-replay-{stamp()}",
+            tag=f"{suite_name}-adaptive-replay-{'guard' if args.detector_url else 'munix'}-{stamp()}",
             manifests=HERE / "manifests" / suite_name,
             binary=munix_bin,
+            detector_url=args.detector_url,
         )
         munix_executor.SUMMARIES.clear()
     target = make_target(target_args(args.mode, effort, str(munix_bin)), model, key, session)
-    out = RESULTS / f"adaptive--{suite_name}-replay-{args.mode}-{stamp()}.json"
+    if args.detector_url and args.mode != "munix":
+        raise SystemExit("--detector-url needs --mode munix")
+    label = f"{args.mode}+guard" if args.detector_url else args.mode
+    out = RESULTS / f"adaptive--{suite_name}-replay-{label}-{stamp()}.json"
     config = {
         "mode": args.mode,
+        "detector_url": args.detector_url,
         "takeover": False,
         "target_model": model,
         "target_effort": effort,
@@ -806,6 +811,7 @@ def main() -> int:
     r.add_argument("--repeats", type=int, default=3)
     r.add_argument("--budget", type=float, help="stop before a run once the agent's estimated cost reaches this (USD)")
     r.add_argument("--munix-bin", default=str(munix_executor.DEFAULT_BINARY), help="the munix binary (--mode munix)")
+    r.add_argument("--detector-url", default=None, help="--mode munix: the prompt-injection detector's sidecar (loopback)")
     d = sub.add_parser("redact", help="split a results file written before withholding into public and private")
     d.add_argument("--from", dest="source", required=True, help="a search or replay results file")
     args = ap.parse_args()

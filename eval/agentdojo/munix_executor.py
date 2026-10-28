@@ -259,7 +259,8 @@ class MunixSession:
         self.refused = False
         self.tasks += 1
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-        ledger = self.ledger_dir / f"{self.tag}-{self.tasks:04d}-{digest}.jsonl"
+        # The process id keeps two runs started in the same second (same tag) from writing one ledger file.
+        ledger = self.ledger_dir / f"{self.tag}-p{os.getpid()}-{self.tasks:04d}-{digest}.jsonl"
         self._record = {"index": self.tasks, "prompt_sha256": digest, "ledger": str(ledger)}
         client = BridgeClient(
             self.manifests, ledger, self.binary, self.read_timeout, self.env, self.simulated_user, self.plan_memory,
