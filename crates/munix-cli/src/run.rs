@@ -25,7 +25,9 @@ use munix_core::manifest::{Catalog, ToolManifest};
 use munix_core::plan::Plan;
 use munix_core::prompt::PromptEnvelope;
 use munix_core::validate::Scalar;
-use munix_gate::gate::{Gate, QuarantineNote, RecoverError, Store, StoreValue, TripReason};
+use munix_gate::gate::{
+    Gate, PlanNote, QuarantineNote, RecoverError, Store, StoreValue, TripReason,
+};
 use munix_gate::policy::DenyCode;
 use munix_gate::quarantine::Cause;
 use munix_gate::seal::{Root, Seal, SealCheck, SealGuard, SealWatch, Tamper};
@@ -36,7 +38,8 @@ use munix_runtime::gateway::{ApiKey, Gateway, GatewayConfig};
 use munix_runtime::mcp::{ServeEnd, serve};
 use munix_runtime::sandbox::{Sandbox, SandboxSpec};
 use munix_runtime::watchdog::{Limits, Snapshot, SystemClock, Trip, Watchdog};
-use munix_supervisor::planner::Planner;
+use munix_supervisor::memory::PlanMemory;
+use munix_supervisor::planner::{self, Planner};
 use munix_supervisor::reviewer::Reviewer;
 use munix_tools::email::SmtpEmail;
 use munix_tools::site::SiteTemplates;
@@ -509,7 +512,7 @@ fn limits_from(env: &Env) -> Result<Limits, Failure> {
 /// plans, `.env` and the `--plan` file); and all of Web Speed OSS, which is spawned as a tool: its source tree and
 /// its `venv` (the interpreter link, site-packages). Bytecode caches are skipped, and Web Speed is started with
 /// `PYTHONPYCACHEPREFIX` pointing elsewhere so Python never reads them.
-fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path) -> Vec<Root> {
+fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path, plan_memory: Option<&Path>) -> Vec<Root> {
     // `crates/` and the workspace files are the source this binary was built from, wherever it is run.
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -530,6 +533,10 @@ fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path) -> Vec<Root> {
     }
     if let Some(plan) = plan {
         roots.push(Root::File(plan.to_path_buf()));
+    }
+    // Stored plans are config like manifests: written only after a task, never while one runs.
+    if let Some(dir) = plan_memory {
+        roots.push(Root::Tree(dir.to_path_buf()));
     }
     // The tree skips `venv` by name (SKIP_DIRS), so the venv is its own root.
     roots.push(Root::Tree(webspeed_dir.to_path_buf()));
@@ -559,10 +566,24 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let pricing = pricing_from(&env)?;
     let limits = limits_from(&env)?;
 
+    // Plan memory (`docs/plan-memory.md`), only when the planner writes the plan.
+    let plan_memory_dir = env
+        .get("MUNIX_PLAN_MEMORY")
+        .filter(|d| !d.is_empty() && opts.plan.is_none())
+        .map(PathBuf::from);
+    if let Some(dir) = &plan_memory_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|_| Failure::config("cannot create the plan memory directory"))?;
+    }
+
     // The Integrity Seal, taken before anything it covers is read.
     let webspeed_dir = PathBuf::from(env.get_or("WEBSPEED_OSS_DIR", DEFAULT_WEBSPEED_DIR));
-    let seal = Seal::take(seal_roots(opts.plan.as_deref(), &webspeed_dir))
-        .map_err(|e| Failure::config(format!("cannot seal Munix's files: {e}")))?;
+    let seal = Seal::take(seal_roots(
+        opts.plan.as_deref(),
+        &webspeed_dir,
+        plan_memory_dir.as_deref(),
+    ))
+    .map_err(|e| Failure::config(format!("cannot seal Munix's files: {e}")))?;
     eprintln!(
         "munix: sealed {} files (digest {})",
         seal.file_count(),
@@ -615,6 +636,12 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
         .digest()
         .map_err(|e| Failure::config(format!("prompt: {e}")))?;
     let sign_failed = |e: munix_core::error::Error| Failure::failed(e.to_string());
+    let stores = BTreeMap::from([("contacts".to_owned(), vec!["boss".to_owned()])]);
+    let memory = plan_memory_dir.as_ref().map(|dir| {
+        let effort = env.get_or(Role::Planner.env_var(), "default");
+        PlanMemory::open(dir, &catalog, &planner::version(&supervisor_model, &effort))
+    });
+    let mut reused = None;
     let plan = match &opts.plan {
         Some(plan_path) => {
             let plan_text = std::fs::read_to_string(plan_path)
@@ -625,17 +652,38 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
             Signed::sign(&key, Purpose::Plan, plan).map_err(sign_failed)?
         }
         None => {
-            let adapter = supervisor_adapter(&env, &supervisor_model, Role::Planner, &api_key)?;
-            let planner = Planner::new(adapter, key.clone());
-            let stores = BTreeMap::from([("contacts".to_owned(), vec!["boss".to_owned()])]);
-            let plan = planner
-                .plan(&envelope, &catalog, &stores, plan_id)
-                .map_err(|e| Failure::config(e.to_string()))?;
-            eprintln!(
-                "munix: plan written by {supervisor_model} ({} steps)",
-                plan.body.steps.len()
-            );
-            plan
+            // A stored plan that matches and passes the planner's own checks replaces the planner call.
+            let stored = memory.as_ref().and_then(|memory| {
+                let (template, level) = memory.lookup(&envelope.text, &stores)?;
+                let plan = PlanMemory::instantiate(
+                    &template,
+                    task.clone(),
+                    plan_id.clone(),
+                    prompt_hash.clone(),
+                );
+                planner::check_plan(&plan, &catalog, &stores).ok()?;
+                Some((plan, template.key, level))
+            });
+            if let Some((plan, template, level)) = stored {
+                eprintln!(
+                    "munix: plan from plan memory ({} match, {} steps)",
+                    level.as_str(),
+                    plan.steps.len()
+                );
+                reused = Some((template, level));
+                Signed::sign(&key, Purpose::Plan, plan).map_err(sign_failed)?
+            } else {
+                let adapter = supervisor_adapter(&env, &supervisor_model, Role::Planner, &api_key)?;
+                let planner = Planner::new(adapter, key.clone());
+                let plan = planner
+                    .plan(&envelope, &catalog, &stores, plan_id)
+                    .map_err(|e| Failure::config(e.to_string()))?;
+                eprintln!(
+                    "munix: plan written by {supervisor_model} ({} steps)",
+                    plan.body.steps.len()
+                );
+                plan
+            }
         }
     };
     let reviewer_adapter = supervisor_adapter(&env, &supervisor_model, Role::Reviewer, &api_key)?;
@@ -654,6 +702,17 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let mut brief = gate
         .start_task(&prompt, &plan, &store)
         .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
+    if let Some((template, level)) = &reused
+        && !gate.log_plan_note(
+            &task,
+            PlanNote::Reused {
+                template,
+                level: level.as_str(),
+            },
+        )
+    {
+        return Err(Failure::failed("cannot write the ledger"));
+    }
 
     // The model gateway: the only holder of the API key.
     let gateway = Arc::new(
@@ -879,6 +938,30 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     };
 
     seal_watch.stop();
+
+    // Plan memory, now that the seal no longer watches: count a reuse, or keep the planner's plan from a clean run
+    // (finished, no takeover, no off-plan denial).
+    if let Some(memory) = &memory {
+        if reused.is_some() {
+            if let Err(e) = memory.record_use(&envelope.text, &stores) {
+                eprintln!("munix: {e}");
+            }
+        } else if matches!(outcome, Outcome::Finished) && !crate::bridge::off_plan_in(&ledger_path)
+        {
+            match memory.remember(&plan.body, &envelope.text, &stores) {
+                Ok(template) => {
+                    let _ = gate.log_plan_note(
+                        &task,
+                        PlanNote::Remembered {
+                            template: &template.key,
+                        },
+                    );
+                    eprintln!("munix: plan kept in plan memory");
+                }
+                Err(e) => eprintln!("munix: {e}"),
+            }
+        }
+    }
 
     // The summary.
     let trust = gate.context_trust(&task);
@@ -1231,6 +1314,7 @@ mod tests {
         let roots = seal_roots(
             Some(Path::new("my-plan.yaml")),
             Path::new("no-such-webspeed-dir"),
+            Some(Path::new("my-plan-memory")),
         );
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let workspace = workspace.components().collect::<PathBuf>();
@@ -1256,7 +1340,7 @@ mod tests {
             )
         );
         let _ = workspace;
-        for dir in ["manifests", "sites", "examples"] {
+        for dir in ["manifests", "sites", "examples", "my-plan-memory"] {
             assert!(has_tree(Path::new(dir)), "{dir}");
         }
         for file in [".env", "my-plan.yaml"] {

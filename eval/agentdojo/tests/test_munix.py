@@ -362,6 +362,21 @@ class SimulatedUserFlagTest(unittest.TestCase):
         s.start_task("a task")
         self.assertIn("--simulated-user", json.loads(self.argv_out.read_text()))
 
+    def test_plan_memory_reaches_every_bridge_and_the_summary_says_where_the_plan_came_from(self):
+        memory = Path(self.tmp.name) / "plan-memory"
+        s = mx.MunixSession(
+            ledger_dir=self.tmp.name, tag="t", binary=self.binary, read_timeout=20,
+            env={"ARGV_OUT": str(self.argv_out)}, plan_memory=memory,
+        )
+        self.addCleanup(s.close)
+        s.start_task("a task")
+        argv = json.loads(self.argv_out.read_text())
+        self.assertEqual(argv[argv.index("--plan-memory") + 1], str(memory))
+        s.close()
+        self.assertEqual(mx.SUMMARIES[-1]["plan"], "memory:exact")  # the fake bridge's answer when memory is on
+        # Without it, no flag and the planner's plan.
+        self.assertNotIn("--plan-memory", self.bridge_argv(False))
+
     def test_run_py_tags_the_setup_and_leaves_existing_names_alone(self):
         import run
 
@@ -369,6 +384,7 @@ class SimulatedUserFlagTest(unittest.TestCase):
         self.assertEqual(run.setup_tag("munix", True, run.DEFAULT_MODEL), "munix-takeover")
         self.assertEqual(run.setup_tag("bare", False, run.DEFAULT_MODEL), "bare")
         self.assertEqual(run.setup_tag("munix", False, run.DEFAULT_MODEL, simulated_user=True), "munix-simuser")
+        self.assertEqual(run.setup_tag("munix", False, run.DEFAULT_MODEL, plan_memory=True), "munix-memory")
         self.assertEqual(run.setup_tag("munix", True, run.DEFAULT_MODEL, True), "munix-takeover-simuser")
         self.assertEqual(
             run.result_name("munix-simuser", "banking", "utility", None), "munix-simuser--banking-utility.json"

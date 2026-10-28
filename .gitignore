@@ -10,3 +10,6 @@ __pycache__/
 *.ledger.jsonl
 # The Meta credit floor's local state (scripts/credit.py)
 .credit.json*
+# Plan memory's stored plans (docs/plan-memory.md)
+plan-memory/
+eval/agentdojo/plan-memory*/

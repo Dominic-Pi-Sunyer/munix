@@ -51,6 +51,7 @@ class BridgeClient:
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         env: dict[str, str] | None = None,
         simulated_user: bool = False,
+        plan_memory: Path | str | None = None,
     ) -> None:
         self.manifests = Path(manifests)
         self.ledger = Path(ledger)
@@ -61,6 +62,8 @@ class BridgeClient:
         # With it, the bridge's Console approves a request only when every destination and selector traces to the
         # prompt, a store or a record at trust >= 80 (a stand-in for a careful human); without it, it always says no.
         self.simulated_user = simulated_user
+        # Plan memory's directory (docs/plan-memory.md): a stored plan may replace the bridge's planner call.
+        self.plan_memory = plan_memory
         self.calls = 0
         self.denials = 0
         self.tools_run = 0
@@ -76,6 +79,8 @@ class BridgeClient:
         cmd = [*self.command, "bridge", "--manifests", str(self.manifests), "--ledger", str(self.ledger)]
         if self.simulated_user:
             cmd.append("--simulated-user")
+        if self.plan_memory is not None:
+            cmd += ["--plan-memory", str(self.plan_memory)]
         env = {**os.environ, **(self.env or {})}
         self._stderr_file = open(self._stderr_path, "wb")
         try:
@@ -217,6 +222,7 @@ class MunixSession:
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         env: dict[str, str] | None = None,
         simulated_user: bool = False,
+        plan_memory: Path | str | None = None,
     ) -> None:
         self.ledger_dir = Path(ledger_dir)
         self.tag = tag
@@ -225,6 +231,7 @@ class MunixSession:
         self.read_timeout = read_timeout
         self.env = env
         self.simulated_user = simulated_user
+        self.plan_memory = plan_memory
         self.tasks = 0
         self.client: BridgeClient | None = None
         self._record: dict | None = None
@@ -239,7 +246,7 @@ class MunixSession:
         ledger = self.ledger_dir / f"{self.tag}-{self.tasks:04d}-{digest}.jsonl"
         self._record = {"index": self.tasks, "prompt_sha256": digest, "ledger": str(ledger)}
         client = BridgeClient(
-            self.manifests, ledger, self.binary, self.read_timeout, self.env, self.simulated_user
+            self.manifests, ledger, self.binary, self.read_timeout, self.env, self.simulated_user, self.plan_memory
         )
         self.client = client
         try:
@@ -260,7 +267,7 @@ class MunixSession:
         if "error" not in record:
             try:
                 ended = client.end()
-                for key in ("context_trust", "ledger_entries", "ledger_verified", "takeover", "supervisor_usage"):
+                for key in ("context_trust", "ledger_entries", "ledger_verified", "takeover", "supervisor_usage", "plan"):
                     record[key] = ended.get(key)
             except BridgeError as e:
                 record["error"] = str(e)

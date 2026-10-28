@@ -84,6 +84,18 @@ pub struct TaskBrief {
     pub refs: Vec<BriefRef>,
 }
 
+/// A plan-memory fact for the ledger (see [`Gate::log_plan_note`]).
+#[derive(Debug, Clone, Copy)]
+pub enum PlanNote<'a> {
+    /// The task's plan is a stored template, matched `exact` or by `shape`.
+    Reused {
+        template: &'a Digest,
+        level: &'a str,
+    },
+    /// The task's plan was stored as a template after it ended cleanly.
+    Remembered { template: &'a Digest },
+}
+
 /// The Gate's answer to a request or a decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
@@ -337,6 +349,26 @@ impl Gate {
 
     /// How many steps the task's signed plan had; steps after these were added by automatic amendment.
     /// `None` for an unknown task.
+    /// Records where a task's plan came from when plan memory is in play (`docs/plan-memory.md`): a stored plan
+    /// reused for this task, or this task's plan stored for later. Typed, so nothing but these facts reaches the
+    /// ledger this way. Returns false when the ledger write failed.
+    pub fn log_plan_note(&mut self, task: &TaskId, note: PlanNote<'_>) -> bool {
+        let event = match note {
+            PlanNote::Reused { template, level } => json!({
+                "event": "plan_reused",
+                "task": task.as_str(),
+                "template": template.as_str(),
+                "level": level,
+            }),
+            PlanNote::Remembered { template } => json!({
+                "event": "plan_remembered",
+                "task": task.as_str(),
+                "template": template.as_str(),
+            }),
+        };
+        self.log(event)
+    }
+
     pub fn signed_steps(&self, task: &TaskId) -> Option<usize> {
         self.tasks.get(task).map(|t| t.planned_steps)
     }

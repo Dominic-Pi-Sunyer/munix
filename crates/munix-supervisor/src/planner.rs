@@ -152,6 +152,18 @@ pub struct Planner {
     key: SigningKey,
 }
 
+/// Bump when what the planner does to a draft changes (its checks and tighten-only fixes), so plan memory stops
+/// reusing plans an older planner wrote.
+pub const REVISION: u32 = 1;
+
+/// This planner's name for plan memory: the model and reasoning effort, the system prompt's digest and
+/// [`REVISION`]. Any change makes stored plans misses.
+pub fn version(model: &str, effort: &str) -> String {
+    let prompt = munix_core::crypto::Digest::of_bytes(SYSTEM_PROMPT.as_bytes());
+    let short = prompt.as_str().get(7..19).unwrap_or(prompt.as_str());
+    format!("{model}@{effort}|prompt {short}|rev {REVISION}")
+}
+
 /// Limits the planner can only tighten: a plan above them is rejected even if the model writes it.
 pub const MAX_BUDGET_PER_STEP: u32 = 10;
 pub const MAX_STEPS: usize = 8;
@@ -303,7 +315,10 @@ impl Planner {
     }
 }
 
-fn check_plan(
+/// Every check a plan from the planner must pass: `Plan::validate`, the step, budget and amendment limits, and store
+/// paths the task holds. Plan memory runs it on a stored plan before reusing it, so a template can never carry
+/// more than the planner itself would sign.
+pub fn check_plan(
     plan: &Plan,
     catalog: &Catalog,
     stores: &BTreeMap<String, Vec<String>>,

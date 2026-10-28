@@ -8,7 +8,7 @@ AgentDojo's environment whenever the Gate allows it. All security decisions stay
 ## Process
 
 ```
-munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]] [--simulated-user]
+munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer] | --plan-memory <dir>] [--simulated-user]
 ```
 
 - **stdin and stdout:** JSON lines, one object per line, UTF-8. Diagnostics go to stderr.
@@ -40,6 +40,10 @@ munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewe
    `{"op":"ended","context_trust":N,"ledger_entries":N,"ledger_verified":bool,"takeover":"<code>"|null,
    "supervisor_usage":{"calls":N,"prompt_tokens":N,"completion_tokens":N}}` and exits with code 0.
    `supervisor_usage` totals the planner's and reviewer's model calls, so `run.py --budget` counts Munix's own spend.
+   `plan` says where the plan came from: `given`, `planner`, `memory:exact` or `memory:shape`.
+- **`--plan-memory <dir>`** (`docs/plan-memory.md`): before calling the planner, look for a stored plan for an exact
+  or value-masked repeat of the prompt. A match must pass the planner's own checks. After a clean task (no takeover,
+  no off-plan denial), the planner's plan is stored for later. The ledger logs `plan_reused` and `plan_remembered`.
 
 If stdin closes early, the bridge writes nothing more and exits 0. A malformed line gets `{"op":"error",…}` and
 exit code 2.

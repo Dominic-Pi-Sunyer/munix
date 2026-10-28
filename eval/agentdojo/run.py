@@ -132,10 +132,11 @@ def use_system_role() -> None:
     openai_llm._message_to_openai = patched
 
 
-def setup_tag(mode: str, takeover: bool, model: str, simulated_user: bool = False) -> str:
-    """Names a setup in result files and pipeline names: `bare`, `munix-takeover`, `munix-simuser`,
+def setup_tag(mode: str, takeover: bool, model: str, simulated_user: bool = False, plan_memory: bool = False) -> str:
+    """Names a setup in result files and pipeline names: `bare`, `munix-takeover`, `munix-simuser`, `munix-memory`,
     `bare-takeover-llama-3.2-3b`."""
     tag = mode + ("-takeover" if takeover else "") + ("-simuser" if simulated_user else "")
+    tag += "-memory" if plan_memory else ""
     if model != DEFAULT_MODEL:
         tag += "-" + "".join(c if c.isalnum() or c in ".-" else "-" for c in model.split("/")[-1].lower())
     return tag
@@ -156,7 +157,7 @@ def make_pipeline(args, model: str, key: str, usage: Usage, session) -> AgentPip
         pipe = AgentPipeline([*head, munix_executor.MunixStart(session), llm, loop])
     # AgentDojo requires a registered model key in the name ("local"); the attack text then calls the model
     # "Local model", the same for every setup we compare.
-    pipe.name = f"local-{setup_tag(args.mode, args.takeover, model, args.simulated_user)}-{args.effort}"
+    pipe.name = f"local-{setup_tag(args.mode, args.takeover, model, args.simulated_user, bool(getattr(args, 'plan_memory', None)))}-{args.effort}"
     return pipe
 
 
@@ -175,6 +176,9 @@ def cmd_run(args) -> int:
         return 2
     if args.simulated_user and args.mode != "munix":
         print("--simulated-user only applies to --mode munix", file=sys.stderr)
+        return 2
+    if args.plan_memory and args.mode != "munix":
+        print("--plan-memory only applies to --mode munix", file=sys.stderr)
         return 2
     # Munix's Supervisor runs on the Meta API even when the agent is local.
     paid = args.base_url == META_URL or args.mode == "munix"
@@ -198,6 +202,7 @@ def cmd_run(args) -> int:
     if args.system_role == "system":
         use_system_role()
     model = args.model or env_value("MUNIX_WORKER_MODEL") or DEFAULT_MODEL
+    tag = setup_tag(args.mode, args.takeover, model, args.simulated_user, bool(args.plan_memory))
     usage = Usage()
     session = None
     if args.mode == "munix":
@@ -213,6 +218,7 @@ def cmd_run(args) -> int:
             manifests=HERE / "manifests" / args.suite,
             binary=binary,
             simulated_user=args.simulated_user,
+            plan_memory=Path(args.plan_memory).resolve() if args.plan_memory else None,
         )
     munix_executor.SUMMARIES.clear()
     pipe = make_pipeline(args, model, key, usage, session)
@@ -307,7 +313,7 @@ def cmd_run(args) -> int:
         "shard": args.shard,
         "benchmark_version": BENCHMARK_VERSION,
         "attack": ATTACK if args.phase == "attack" else None,
-        "setup": setup_tag(args.mode, args.takeover, model, args.simulated_user),
+        "setup": tag,
         "simulated_user": args.simulated_user,
         "takeover": args.takeover,
         "model": model,
@@ -320,6 +326,11 @@ def cmd_run(args) -> int:
             k: sum((r.get("supervisor_usage") or {}).get(k, 0) for r in summaries)
             for k in ("calls", "prompt_tokens", "completion_tokens")
         },
+        # Where each task's plan came from (planner, memory:exact, memory:shape): plan memory's saving.
+        "plan_origins": {
+            origin: sum(1 for r in summaries if r.get("plan") == origin)
+            for origin in sorted({r.get("plan") for r in summaries if r.get("plan")})
+        },
         "budget_usd": budget,
         "stopped": stopped,
         # The agent's and Munix's Supervisor's spend. A local model costs no Meta credit, but Munix's Supervisor
@@ -329,7 +340,7 @@ def cmd_run(args) -> int:
     }
     if args.mode == "munix":
         doc["munix"] = list(munix_executor.SUMMARIES)
-    out = HERE / "results" / result_name(setup_tag(args.mode, args.takeover, model, args.simulated_user), args.suite, args.phase, args.shard)
+    out = HERE / "results" / result_name(tag, args.suite, args.phase, args.shard)
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out.relative_to(HERE)}: {usage.calls} agent calls, about ${doc['estimated_cost_usd']:.4f}")
@@ -383,6 +394,8 @@ def main() -> int:
     r.add_argument("--munix-bin", default=str(munix_executor.DEFAULT_BINARY), help="the munix binary (--mode munix)")
     r.add_argument("--simulated-user", action="store_true",
                    help="--mode munix: the bridge's Console approves like a careful human would (default: always no)")
+    r.add_argument("--plan-memory", metavar="DIR",
+                   help="--mode munix: reuse stored plans from DIR and keep clean runs' plans there (docs/plan-memory.md)")
     r.add_argument("--effort", default="low", choices=("minimal", "low", "medium", "high"))
     r.add_argument("--takeover", action="store_true", help="add the labeled simulated takeover to the system prompt")
     r.add_argument("--base-url", default=META_URL, help="OpenAI-compatible endpoint (default: the Meta Model API)")

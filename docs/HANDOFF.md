@@ -8,7 +8,9 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
-- **Next build: plan memory** (`docs/plan-memory.md`, planned and approved in design, not built yet).
+- **Plan memory: built and offline-tested (Oct 28), not yet measured.** See `docs/plan-memory.md`.
+  - **Next:** a paid AgentDojo run with `--plan-memory`, utility then attack. The expected result is attack-phase
+    planner calls dropping from 144 to 16 (`plan_origins` in the results).
   - Reuse a stored plan for an exact or value-masked repeat of a prompt.
   - Clean runs only, and opt-in.
   - Build it before plan-on-first-write.

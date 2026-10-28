@@ -24,12 +24,13 @@ use munix_core::ids::{PlanId, SessionId, TaskId};
 use munix_core::manifest::Catalog;
 use munix_core::plan::Plan;
 use munix_core::prompt::PromptEnvelope;
-use munix_gate::gate::{Gate, Store};
+use munix_gate::gate::{Gate, PlanNote, Store};
 use munix_gate::tool::{Tool, ToolFailure};
 use munix_gate::vault::{Credential, Vault};
 use munix_ledger::Ledger;
 use munix_runtime::mcp::McpHandler;
-use munix_supervisor::planner::Planner;
+use munix_supervisor::memory::{Level, PlanMemory};
+use munix_supervisor::planner::{self, Planner};
 use munix_supervisor::reviewer::Reviewer;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -41,7 +42,7 @@ use crate::run::{
     random_hex, rewrite_plan, supervisor_adapter,
 };
 
-const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer]] [--simulated-user]";
+const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer] | --plan-memory <dir>] [--simulated-user]";
 /// What the model-facing diagnostics on stderr are cut to.
 const MAX_DIAGNOSTIC: usize = 200;
 
@@ -57,6 +58,8 @@ struct Options {
     /// The Console is `SimulatedUser` instead of a flat no. Evaluation only; its decisions are marked
     /// `console.simulated_user` in the ledger.
     simulated_user: bool,
+    /// Plan memory's directory (`docs/plan-memory.md`). Only without `--plan`: a stored plan replaces a planner call.
+    plan_memory: Option<PathBuf>,
 }
 
 /// Parses `bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer]] [--simulated-user]`.
@@ -65,7 +68,7 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
     if it.next().map(String::as_str) != Some("bridge") {
         return Err(Failure::usage(USAGE));
     }
-    let (mut manifests, mut ledger, mut plan) = (None, None, None);
+    let (mut manifests, mut ledger, mut plan, mut plan_memory) = (None, None, None, None);
     let (mut no_reviewer, mut simulated_user) = (false, false);
     while let Some(arg) = it.next() {
         if arg == "--no-reviewer" || arg == "--simulated-user" {
@@ -83,6 +86,7 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
             "--manifests" => &mut manifests,
             "--ledger" => &mut ledger,
             "--plan" => &mut plan,
+            "--plan-memory" => &mut plan_memory,
             _ => return Err(Failure::usage(USAGE)),
         };
         let Some(value) = it.next() else {
@@ -94,13 +98,19 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
     }
     match (manifests, ledger) {
         // Without a plan the planner needs a model, and the reviewer is part of the same setup.
-        (Some(manifests), Some(ledger)) if plan.is_some() || !no_reviewer => Ok(Options {
-            manifests,
-            ledger,
-            plan,
-            no_reviewer,
-            simulated_user,
-        }),
+        // Plan memory stands in for the planner, so it makes no sense with a given plan.
+        (Some(manifests), Some(ledger))
+            if (plan.is_some() || !no_reviewer) && !(plan.is_some() && plan_memory.is_some()) =>
+        {
+            Ok(Options {
+                manifests,
+                ledger,
+                plan,
+                no_reviewer,
+                simulated_user,
+                plan_memory,
+            })
+        }
         _ => Err(Failure::usage(USAGE)),
     }
 }
@@ -313,6 +323,8 @@ struct Setup {
     reader: Option<Arc<dyn ModelAdapter>>,
     /// `--simulated-user`: the Console is `SimulatedUser`, not a flat no.
     simulated_user: bool,
+    /// Plan memory, for a planner-written plan: a stored plan replaces the planner call when one matches.
+    memory: Option<PlanMemory>,
     /// The planner's, reviewer's and Readers' adapters, metered, so `ended` can report what the Supervisor spent.
     meters: Vec<Metered>,
     key: SigningKey,
@@ -438,6 +450,10 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         .digest()
         .map_err(|e| Failure::config(format!("prompt: {e}")))?;
     let sign_failed = |e: munix_core::error::Error| Failure::failed(e.to_string());
+    // The bridge's task holds no stores, so the planner and plan memory both see none.
+    let stores = BTreeMap::new();
+    let prompt_text = envelope.text.clone();
+    let mut origin = PlanOrigin::Given;
     let plan = match &setup.plan {
         PlanSource::Given(plan) => {
             let plan = rewrite_plan(
@@ -449,15 +465,32 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
             Signed::sign(key, Purpose::Plan, plan).map_err(sign_failed)?
         }
         PlanSource::Planner(adapter) => {
-            let planner = Planner::new(Arc::clone(adapter), key.clone());
-            planner
-                .plan(
-                    &envelope,
-                    &setup.catalog,
-                    &BTreeMap::new(),
+            // A stored plan that matches and passes the planner's own checks replaces the planner call; anything
+            // else is a miss.
+            let stored = setup.memory.as_ref().and_then(|memory| {
+                let (template, level) = memory.lookup(&prompt_text, &stores)?;
+                let plan = PlanMemory::instantiate(
+                    &template,
+                    setup.task.clone(),
                     setup.plan_id.clone(),
-                )
-                .map_err(|e| Failure::config(e.to_string()))?
+                    prompt_hash.clone(),
+                );
+                planner::check_plan(&plan, &setup.catalog, &stores).ok()?;
+                Some((plan, template.key, level))
+            });
+            match stored {
+                Some((plan, template, level)) => {
+                    origin = PlanOrigin::Memory(template, level);
+                    Signed::sign(key, Purpose::Plan, plan).map_err(sign_failed)?
+                }
+                None => {
+                    origin = PlanOrigin::Planner;
+                    let planner = Planner::new(Arc::clone(adapter), key.clone());
+                    planner
+                        .plan(&envelope, &setup.catalog, &stores, setup.plan_id.clone())
+                        .map_err(|e| Failure::config(e.to_string()))?
+                }
+            }
         }
     };
     let prompt = Signed::sign(key, Purpose::Prompt, envelope.clone()).map_err(sign_failed)?;
@@ -466,6 +499,17 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         .start_task(&prompt, &plan, &store)
         .map_err(|e| Failure::config(format!("cannot start the task: {e}")))?;
     let plan_steps = plan.body.steps.len();
+    if let PlanOrigin::Memory(template, level) = &origin
+        && !gate.log_plan_note(
+            &setup.task,
+            PlanNote::Reused {
+                template,
+                level: level.as_str(),
+            },
+        )
+    {
+        return Err(Failure::failed("cannot write the ledger"));
+    }
     let mut front = GateFront::new(
         &mut gate,
         key,
@@ -510,6 +554,30 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
 
     let takeover = front.takeover();
     drop(front);
+    // After the task: count a reuse, or keep a planner plan from a clean run (no takeover, no off-plan denial).
+    if let Some(memory) = &setup.memory {
+        match &origin {
+            PlanOrigin::Memory(..) => {
+                if let Err(e) = memory.record_use(&prompt_text, &stores) {
+                    eprintln!("munix: {e}");
+                }
+            }
+            PlanOrigin::Planner if takeover.is_none() && !off_plan_in(&setup.ledger_path) => {
+                match memory.remember(&plan.body, &prompt_text, &stores) {
+                    Ok(template) => {
+                        let _ = gate.log_plan_note(
+                            &setup.task,
+                            PlanNote::Remembered {
+                                template: &template.key,
+                            },
+                        );
+                    }
+                    Err(e) => eprintln!("munix: {e}"),
+                }
+            }
+            PlanOrigin::Planner | PlanOrigin::Given => {}
+        }
+    }
     let context_trust = gate.context_trust(&setup.task).map(|t| t.value());
     drop(gate);
     let (entries, verified) = match munix_ledger::verify_file(&setup.ledger_path) {
@@ -529,6 +597,7 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         "ledger_entries": entries,
         "ledger_verified": verified,
         "takeover": takeover.as_ref().map(code_text),
+        "plan": origin.label(),
         "supervisor_usage": {
             "calls": calls,
             "prompt_tokens": prompt_tokens,
@@ -536,6 +605,42 @@ fn session(io: &Arc<Mutex<Io>>, setup: Setup) -> Result<(), Failure> {
         },
     }));
     Ok(())
+}
+
+/// Where a session's plan came from.
+enum PlanOrigin {
+    /// `--plan`.
+    Given,
+    /// The Supervisor's planner, this session.
+    Planner,
+    /// Plan memory: the template's key, and how it matched.
+    Memory(munix_core::crypto::Digest, Level),
+}
+
+impl PlanOrigin {
+    /// What `ended` reports: `given`, `planner`, `memory:exact` or `memory:shape`.
+    fn label(&self) -> String {
+        match self {
+            PlanOrigin::Given => "given".to_owned(),
+            PlanOrigin::Planner => "planner".to_owned(),
+            PlanOrigin::Memory(_, level) => format!("memory:{}", level.as_str()),
+        }
+    }
+}
+
+/// True when the ledger records an off-plan denial or a takeover: the plan missed something, so it isn't kept.
+/// An unreadable or broken ledger counts as true.
+pub(crate) fn off_plan_in(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return true;
+    };
+    let Ok(entries) = munix_ledger::verify_bytes(&bytes) else {
+        return true;
+    };
+    entries.iter().any(|entry| {
+        let event = &entry.event;
+        event["event"] == "takeover" || (event["event"] == "ruling" && event["code"] == "off_plan")
+    })
 }
 
 /// `munix bridge`. Exit codes: 0 after `end` or when stdin closes, 2 for bad usage, bad configuration or
@@ -573,6 +678,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         meters.push(meter.clone());
         Arc::new(meter)
     };
+    let mut memory = None;
     let (plan, reviewer, reader) = match &opts.plan {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -596,6 +702,14 @@ fn run(args: &[String]) -> Result<(), Failure> {
             let planner = supervisor_adapter(&env, &model, Role::Planner, &api_key)?;
             let reviewer = supervisor_adapter(&env, &model, Role::Reviewer, &api_key)?;
             let reader = supervisor_adapter(&env, &model, Role::Reader, &api_key)?;
+            if let Some(dir) = &opts.plan_memory {
+                let effort = env.get_or(Role::Planner.env_var(), "default");
+                memory = Some(PlanMemory::open(
+                    dir,
+                    &catalog,
+                    &planner::version(&model, &effort),
+                ));
+            }
             (
                 PlanSource::Planner(metered(planner)),
                 Some(metered(reviewer)),
@@ -610,6 +724,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         reviewer,
         reader,
         simulated_user: opts.simulated_user,
+        memory,
         meters,
         key: SigningKey::from_bytes(&random_bytes(32)?)
             .map_err(|e| Failure::failed(e.to_string()))?,
@@ -753,6 +868,7 @@ amendments:
             reviewer,
             reader: None,
             simulated_user,
+            memory: None,
             meters,
             key: SigningKey::from_bytes(&[9u8; 32]).unwrap(),
             task: "T-bridge1".parse().unwrap(),
@@ -1176,7 +1292,34 @@ amendments:
                 plan: Some("p.yaml".into()),
                 no_reviewer: false,
                 simulated_user: false,
+                plan_memory: None,
             }
+        );
+        let memory = parse_args(&args(&[
+            "bridge",
+            "--manifests",
+            "m",
+            "--ledger",
+            "l.jsonl",
+            "--plan-memory",
+            "mem",
+        ]))
+        .unwrap();
+        assert_eq!(memory.plan_memory, Some(PathBuf::from("mem")));
+        // Plan memory stands in for the planner: not with a given plan.
+        assert!(
+            parse_args(&args(&[
+                "bridge",
+                "--manifests",
+                "m",
+                "--ledger",
+                "l.jsonl",
+                "--plan",
+                "p.yaml",
+                "--plan-memory",
+                "mem",
+            ]))
+            .is_err()
         );
         let simulated = parse_args(&args(&[
             "bridge",
@@ -1261,5 +1404,163 @@ amendments:
         ] {
             assert_eq!(parse_args(&bad).unwrap_err().code, 2, "{bad:?}");
         }
+    }
+
+    // ---- plan memory ----
+
+    /// The planner's draft for PROMPT: read the headline, then send to the address in the prompt.
+    fn draft() -> Value {
+        json!({
+            "reads": ["editorial", "operator_content", "ugc_review"],
+            "steps": [
+                {"id": 1, "tool": "test.read", "args": {}, "budget": 2},
+                {"id": 2, "tool": "test.news", "args": {}, "budget": 2},
+                {"id": 3, "tool": "test.send", "args": {"to": {"from": ["prompt"]}, "body": {"dlp": "no_secret"}},
+                 "budget": 1}
+            ],
+            "amendments": {"auto_max_tier": 1}
+        })
+    }
+
+    /// A session whose plan comes from `planner` (or plan memory), with memory in `memory_dir`.
+    fn drive_planned(lines: &[Value], planner: Vec<Value>, memory_dir: &Path) -> Run {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("munix-bridge-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut setup = setup_with(&dir, None, PLAN, false);
+        let adapter: Arc<dyn ModelAdapter> =
+            Arc::new(MockAdapter::new(planner.into_iter().map(Ok).collect()));
+        setup.plan = PlanSource::Planner(adapter);
+        setup.memory = Some(PlanMemory::open(memory_dir, &setup.catalog, "test-planner"));
+        let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        drive_raw(&input, setup, dir)
+    }
+
+    fn start_with(prompt: &str) -> Value {
+        json!({"op": "start", "prompt": prompt})
+    }
+
+    fn ledger_events(run: &Run) -> Vec<String> {
+        std::fs::read_to_string(&run.ledger)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<Value>(l).unwrap()["event"]["event"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_clean_planner_plan_is_remembered_and_reused_by_shape_then_exactly() {
+        let memory =
+            std::env::temp_dir().join(format!("munix-bridge-memory-{}-a", std::process::id()));
+        let _ = std::fs::remove_dir_all(&memory);
+        let task = |prompt: &str| {
+            vec![
+                start_with(prompt),
+                call("news", json!({})),
+                tool_ok(json!({"headline": "A quiet day"})),
+                end(),
+            ]
+        };
+        // 1. The planner writes the plan; the run is clean, so it is kept.
+        let first = drive_planned(&task(PROMPT), vec![draft()], &memory);
+        first.result.as_ref().unwrap();
+        assert_eq!(first.out.last().unwrap()["plan"], "planner");
+        assert!(ledger_events(&first).contains(&"plan_remembered".to_owned()));
+        assert_eq!(PlanMemory::list(&memory).len(), 1);
+
+        // 2. The same prompt with another address: the stored plan, no planner call (the mock has no reply left).
+        let other = "Send my status to carol@corp.example when you are done.";
+        let second = drive_planned(&task(other), Vec::new(), &memory);
+        second.result.as_ref().unwrap();
+        assert_eq!(second.out[0]["plan_steps"], 3);
+        assert_eq!(second.out.last().unwrap()["plan"], "memory:shape");
+        assert_eq!(second.out.last().unwrap()["supervisor_usage"]["calls"], 0);
+        assert!(ledger_events(&second).contains(&"plan_reused".to_owned()));
+
+        // 3. That prompt again: an exact match now, and the use is counted.
+        let third = drive_planned(&task(other), Vec::new(), &memory);
+        assert_eq!(third.out.last().unwrap()["plan"], "memory:exact");
+        assert_eq!(PlanMemory::list(&memory)[0].uses, 2);
+    }
+
+    #[test]
+    fn a_stored_plan_over_the_planners_limits_is_a_miss() {
+        let memory =
+            std::env::temp_dir().join(format!("munix-bridge-memory-{}-c", std::process::id()));
+        let _ = std::fs::remove_dir_all(&memory);
+        let task = vec![
+            start_with(PROMPT),
+            call("news", json!({})),
+            tool_ok(json!({"headline": "x"})),
+            end(),
+        ];
+        drive_planned(&task, vec![draft()], &memory)
+            .result
+            .as_ref()
+            .unwrap();
+        // Someone edits the stored plan to allow automatic amendments of payments (tier 3).
+        let path = std::fs::read_dir(&memory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut template: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        template["amendments"]["auto_max_tier"] = json!(3);
+        std::fs::write(&path, template.to_string()).unwrap();
+        // Not reused: the planner is asked again (and here it has a draft ready).
+        let run = drive_planned(&task, vec![draft()], &memory);
+        run.result.as_ref().unwrap();
+        assert_eq!(run.out.last().unwrap()["plan"], "planner");
+    }
+
+    #[test]
+    fn a_plan_from_a_run_with_a_takeover_or_an_off_plan_denial_is_not_kept() {
+        let memory =
+            std::env::temp_dir().join(format!("munix-bridge-memory-{}-b", std::process::id()));
+        let _ = std::fs::remove_dir_all(&memory);
+        // A takeover: the destination comes from a low-trust output.
+        let mut lines = vec![
+            start_with(PROMPT),
+            call("read", json!({})),
+            tool_ok(json!({"note": "hi", "contacts": ["evil@attacker.example"]})),
+        ];
+        let probe = drive_planned(&lines, vec![draft()], &memory);
+        let contact = refs_in(probe.out[2]["text"].as_str().unwrap()).remove(0);
+        drop(probe);
+        let _ = std::fs::remove_dir_all(&memory);
+        lines.push(call("send", json!({"to": [contact], "body": "x"})));
+        lines.push(end());
+        let run = drive_planned(&lines, vec![draft()], &memory);
+        assert_eq!(run.out.last().unwrap()["takeover"], "untrusted_destination");
+        assert!(PlanMemory::list(&memory).is_empty());
+
+        // An off-plan denial in the ledger (the plan missed something) also keeps the plan out, as does a broken
+        // ledger.
+        let dir = std::env::temp_dir().join(format!("munix-bridge-offplan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("l.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut ledger = Ledger::create(&path).unwrap();
+        ledger
+            .append(json!({"event": "ruling", "outcome": "allow"}))
+            .unwrap();
+        drop(ledger);
+        assert!(!off_plan_in(&path));
+        let _ = std::fs::remove_file(dir.join("l2.jsonl"));
+        let mut ledger = Ledger::create(dir.join("l2.jsonl")).unwrap();
+        ledger
+            .append(json!({"event": "ruling", "outcome": "deny", "code": "off_plan"}))
+            .unwrap();
+        assert!(off_plan_in(&dir.join("l2.jsonl")));
+        assert!(off_plan_in(&dir.join("missing.jsonl")));
+        assert!(PlanMemory::list(&memory).is_empty());
     }
 }

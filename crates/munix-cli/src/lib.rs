@@ -6,5 +6,6 @@ pub mod confirm;
 pub mod dashboard;
 pub mod front;
 pub mod ledger;
+pub mod plans;
 pub mod run;
 pub mod term;

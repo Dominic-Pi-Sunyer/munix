@@ -66,6 +66,7 @@ def main() -> int:
                     "ledger_verified": True,
                     "takeover": None,
                     "supervisor_usage": {"calls": 1, "prompt_tokens": 1000, "completion_tokens": 100},
+                    "plan": "memory:exact" if "--plan-memory" in sys.argv else "planner",
                 }
             )
             return 0

@@ -1,4 +1,10 @@
-# Plan memory (design, not built yet)
+# Plan memory
+
+**Status (Oct 28, 2026): built, offline-tested, not yet measured on a paid run.**
+- **Code:** `munix-supervisor::memory`, `munix bridge --plan-memory <dir>`, `MUNIX_PLAN_MEMORY=<dir>` for
+  `munix run`, `munix plans`, and `run.py --plan-memory`.
+- **Beyond the design:** a reused plan must also pass the planner's own checks (`planner::check_plan`: step, budget
+  and amendment limits, store paths), so a hand-edited template can't carry more than the planner would sign.
 
 **Goal:** cut Munix's planner cost on repeated kinds of tasks without moving any security decision to a model.
 
