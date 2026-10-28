@@ -6,13 +6,14 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Wed Oct 28, 2026, by Claude (Opus 5.5)._
-
-- **In progress (Oct 28, night): closing the hacked-page gap (owner-approved).** Tier-3 egress destinations from web
-  content must be bound to the page's own domain, or pinned by an earlier user approval, or else they wait for the
-  user (`<arg>.web_unbound` → `ConfirmUser`, never a takeover). Builder 1 (Sonnet): domain binding, the policy rule,
-  the simulated user declines `web_unbound`, trusted-content tests updated. Builder 2 (next): pin-on-approval.
-  Uncommitted until reviewed.
+- **Builder 2 (Oct 28 night): third-party binding and pins, built, uncommitted, awaiting review.** A match with no web
+  page but third-party content (`RegionType::is_third_party`: a stranger's `message`, reviews, unclassified...) never
+  binds a tier 3 destination; bank records (`operator_content`) still do. Pin on approval: a user `yes` at the Console
+  on a `web_unbound` request pins each unbound `(source, value)` (page host, or tool name); the same value from the
+  same source binds later. Files: `crates/munix-gate/src/pins.rs`, `facts.rs` (`BindEnv`, `binds`), `policy.rs`
+  (`pin_candidates`), `gate.rs` (`enable_pins`, `pin_approved`; ledger `pin_added` digest only, `pin_refused`,
+  `pins_ignored`), `munix bridge --pins <file>`, `munix run` env `MUNIX_PINS` (refused inside a sealed root). Tests:
+  `crates/munix-gate/tests/pins.rs`. Pins stay off unless configured.
 
 - **Security review of the Oct 28 changes (Oct 28, late): no break found.** `docs/redteam/security-review-oct28.md`.
   - Four low findings documented. The Console now says "the prompt" only for `id`/`text` destinations (fixed).

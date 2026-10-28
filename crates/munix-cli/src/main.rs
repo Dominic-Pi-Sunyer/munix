@@ -1,6 +1,6 @@
 //! `munix run [--plan <file>] --prompt <text> -- <agent command...>`,
 //! `munix bridge --manifests <dir> --ledger <file> [--plan <file> [--no-reviewer] | --plan-memory <dir>]
-//! [--simulated-user] [--detector-url <url> [--detector-name <name>] [--detector-threshold <0-1>]]`, `munix dashboard [--runs <dir>] [--port <n>]`, `munix ledger [<file>]` and
+//! [--simulated-user] [--pins <file>] [--detector-url <url> [--detector-name <name>] [--detector-threshold <0-1>]]`, `munix dashboard [--runs <dir>] [--port <n>]`, `munix ledger [<file>]` and
 //! `munix plans [--dir <dir>] [list | forget <id>]`; see [`munix_cli::run`], [`munix_cli::bridge`],
 //! [`munix_cli::dashboard`], [`munix_cli::ledger`] and [`munix_cli::plans`].
 

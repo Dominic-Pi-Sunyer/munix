@@ -184,6 +184,35 @@ impl RegionType {
             RegionType::Hidden => 0,
         })
     }
+
+    /// True for content a stranger or an unknown party can write: user-generated posts, reviews, comments and
+    /// profiles, messages from others, ads, search snippets, embedded third-party content, and anything unclassified
+    /// or hidden. False for what the operator of the source (or the user) wrote itself: legal text, operator content
+    /// and UI, product listings, editorial content and the user's own content.
+    ///
+    /// The Gate uses it for domain binding: a value that comes out of such content never binds a tier 3
+    /// destination by trust alone (see `munix_gate::facts::Traced::binds`). `unclassified` and `hidden` count as
+    /// third-party because unknown means untrusted (invariant 5).
+    pub fn is_third_party(self) -> bool {
+        match self {
+            RegionType::UgcPost
+            | RegionType::UgcReview
+            | RegionType::UgcComment
+            | RegionType::Profile
+            | RegionType::Message
+            | RegionType::Ad
+            | RegionType::SearchSnippet
+            | RegionType::EmbeddedThirdParty
+            | RegionType::Unclassified
+            | RegionType::Hidden => true,
+            RegionType::OperatorLegal
+            | RegionType::OperatorContent
+            | RegionType::OperatorUi
+            | RegionType::ProductListing
+            | RegionType::Editorial
+            | RegionType::UserContent => false,
+        }
+    }
 }
 
 /// Who wrote a piece of content.
@@ -284,6 +313,35 @@ mod tests {
             assert_eq!(region.ceiling().value(), expected, "{region:?}");
         }
         assert_eq!(EmbeddedThirdParty.ceiling(), Unclassified.ceiling());
+    }
+
+    #[test]
+    fn third_party_regions_are_the_ones_strangers_can_write() {
+        use RegionType::*;
+        for r in [
+            UgcPost,
+            UgcReview,
+            UgcComment,
+            Profile,
+            Message,
+            Ad,
+            SearchSnippet,
+            EmbeddedThirdParty,
+            Unclassified,
+            Hidden,
+        ] {
+            assert!(r.is_third_party(), "{r:?}");
+        }
+        for r in [
+            OperatorLegal,
+            OperatorContent,
+            OperatorUi,
+            ProductListing,
+            Editorial,
+            UserContent,
+        ] {
+            assert!(!r.is_third_party(), "{r:?}");
+        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ impl RefEntry {
                 Source::Web { domain } => Some(domain),
                 _ => None,
             },
+            third_party: self.label.region.is_third_party(),
         }
     }
 }
@@ -141,6 +142,7 @@ impl RefTable {
                         trust: s.label.trust,
                         confidential: s.label.confidential,
                         web_domain: None,
+                        third_party: false,
                     })
                     .collect()
             })
@@ -180,6 +182,7 @@ impl RefTable {
             trust: label.trust,
             confidential: label.confidential,
             web_domain: None,
+            third_party: false,
         })
     }
 

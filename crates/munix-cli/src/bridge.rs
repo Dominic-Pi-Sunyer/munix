@@ -44,7 +44,7 @@ use crate::run::{
 };
 use munix_core::detect::{DEFAULT_THRESHOLD, DetectorConfig};
 
-const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer] | --plan-memory <dir>] [--simulated-user] [--detector-url <url> [--detector-name <name>] [--detector-threshold <0-1>]]";
+const USAGE: &str = "usage: munix bridge --manifests <dir> --ledger <file> [--plan <plan.yaml> [--no-reviewer] | --plan-memory <dir>] [--simulated-user] [--pins <file>] [--detector-url <url> [--detector-name <name>] [--detector-threshold <0-1>]]";
 /// What the model-facing diagnostics on stderr are cut to.
 const MAX_DIAGNOSTIC: usize = 200;
 
@@ -70,6 +70,9 @@ struct Options {
     simulated_user: bool,
     /// Plan memory's directory (`docs/plan-memory.md`). Only without `--plan`: a stored plan replaces a planner call.
     plan_memory: Option<PathBuf>,
+    /// The pin store (`munix_gate::pins`). Unset means pinning is off: no pins load and none are added. The
+    /// bridge has no Integrity Seal, so the file may live anywhere the operator likes.
+    pins: Option<PathBuf>,
     /// The injection detector (a loopback guard sidecar). Without it nothing is scored.
     detector: Option<DetectorOpts>,
 }
@@ -80,7 +83,8 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
     if it.next().map(String::as_str) != Some("bridge") {
         return Err(Failure::usage(USAGE));
     }
-    let (mut manifests, mut ledger, mut plan, mut plan_memory) = (None, None, None, None);
+    let (mut manifests, mut ledger, mut plan, mut plan_memory, mut pins) =
+        (None, None, None, None, None);
     let (mut no_reviewer, mut simulated_user) = (false, false);
     let (mut detector_url, mut detector_name, mut detector_threshold) =
         (None::<String>, None::<String>, None::<String>);
@@ -116,6 +120,7 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
             "--ledger" => &mut ledger,
             "--plan" => &mut plan,
             "--plan-memory" => &mut plan_memory,
+            "--pins" => &mut pins,
             _ => return Err(Failure::usage(USAGE)),
         };
         let Some(value) = it.next() else {
@@ -160,6 +165,7 @@ fn parse_args(args: &[String]) -> Result<Options, Failure> {
                 no_reviewer,
                 simulated_user,
                 plan_memory,
+                pins,
                 detector,
             })
         }
@@ -382,6 +388,8 @@ struct Setup {
     memory: Option<PlanMemory>,
     /// The injection detector for the Gate and the Readers; `None` scores nothing.
     detector: Option<DetectorConfig>,
+    /// `--pins`: the pin store's file; `None` turns pinning off.
+    pins: Option<PathBuf>,
     /// The planner's, reviewer's and Readers' adapters, metered, so `ended` can report what the Supervisor spent.
     meters: Vec<Metered>,
     key: SigningKey,
@@ -437,6 +445,9 @@ fn build_gate(setup: &Setup, io: &Arc<Mutex<Io>>) -> Result<Gate, Failure> {
         }
     }
     let mut gate = Gate::new(setup.key.clone(), setup.catalog.clone(), vault, ledger);
+    if let Some(path) = &setup.pins {
+        gate.enable_pins(path);
+    }
     if let Some(detector) = &setup.detector {
         gate.set_detector(detector.clone());
     }
@@ -793,6 +804,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
     let setup = Setup {
         catalog,
         detector,
+        pins: opts.pins,
         ledger_path: opts.ledger,
         plan,
         reviewer,
@@ -942,6 +954,7 @@ amendments:
             reviewer,
             reader: None,
             detector: None,
+            pins: None,
             simulated_user,
             memory: None,
             meters,
@@ -1404,6 +1417,7 @@ amendments:
                 no_reviewer: false,
                 simulated_user: false,
                 plan_memory: None,
+                pins: None,
                 detector: None,
             }
         );
@@ -1418,6 +1432,23 @@ amendments:
         ]))
         .unwrap();
         assert_eq!(memory.plan_memory, Some(PathBuf::from("mem")));
+        let pinned = parse_args(&args(&[
+            "bridge",
+            "--manifests",
+            "m",
+            "--ledger",
+            "l.jsonl",
+            "--pins",
+            "pins.json",
+        ]))
+        .unwrap();
+        assert_eq!(pinned.pins, Some(PathBuf::from("pins.json")));
+        // Repeated or valueless `--pins` is a usage error.
+        for bad in [&["--pins", "a", "--pins", "b"][..], &["--pins"][..]] {
+            let mut v = vec!["bridge", "--manifests", "m", "--ledger", "l.jsonl"];
+            v.extend_from_slice(bad);
+            assert!(parse_args(&args(&v)).is_err(), "{bad:?}");
+        }
         // Plan memory stands in for the planner: not with a given plan.
         assert!(
             parse_args(&args(&[

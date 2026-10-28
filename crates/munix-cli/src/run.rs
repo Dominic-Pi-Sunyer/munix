@@ -31,6 +31,7 @@ use munix_core::validate::Scalar;
 use munix_gate::gate::{
     Gate, PlanNote, QuarantineNote, RecoverError, Store, StoreValue, TripReason,
 };
+use munix_gate::pins::path_in_roots;
 use munix_gate::policy::DenyCode;
 use munix_gate::quarantine::Cause;
 use munix_gate::seal::{Root, Seal, SealCheck, SealGuard, SealWatch, Tamper};
@@ -473,7 +474,9 @@ fn instance_sandbox_name(task: &TaskId, instance: u32) -> String {
 ///    `WEBSPEED_ALLOW_HOSTS`, `MUNIX_SMTP`, `MUNIX_LIVENESS_SECS`, `MUNIX_DEADLINE_SECS`, and the optional injection
 ///    detector `MUNIX_DETECTOR_URL` (a loopback `/score` URL; unset means no detector), `MUNIX_DETECTOR_NAME`
 ///    (default `Llama-Prompt-Guard-2-22M`) and `MUNIX_DETECTOR_THRESHOLD` (default 0.5). The Gate and the review
-///    Reader use it; it only lowers trust, and a failing detector flags.
+///    Reader use it; it only lowers trust, and a failing detector flags. `MUNIX_PINS` (a file; unset means off)
+///    turns on pinning: destinations the user approves at the Console are remembered for the same source
+///    (`munix_gate::pins`). The file must be outside the Integrity Seal's roots or `munix run` refuses to start.
 /// 3. A fresh 32-byte signing key from `/dev/urandom`. Random hex ids: task `T-<8>`, session `S-<8>`, plan `P-<8>`,
 ///    nonce 32 hex characters.
 /// 4. The catalog from `manifests/*.yaml`, the site templates from `sites/`, the tools (`web.open` through Web
@@ -615,6 +618,21 @@ fn seal_roots(plan: Option<&Path>, webspeed_dir: &Path, plan_memory: Option<&Pat
     roots
 }
 
+/// The pin store's path from `MUNIX_PINS` (unset or empty: pinning is off). A path inside one of the Integrity Seal's
+/// `roots` is refused at startup: the Gate rewrites the file when the user approves a pin, which would trip the seal.
+fn pins_path_from(env: &Env, roots: &[Root]) -> Result<Option<PathBuf>, Failure> {
+    let Some(path) = env.get("MUNIX_PINS").filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    if path_in_roots(&path, roots) {
+        return Err(Failure::config(
+            "MUNIX_PINS is inside a path the Integrity Seal covers; put the pins file somewhere else (for example under ~/.munix)",
+        ));
+    }
+    Ok(Some(path))
+}
+
 /// The stop message for a tamper, shown to the user and kept as the run's outcome.
 fn tamper_message(tamper: &Tamper) -> String {
     format!(
@@ -649,12 +667,23 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
 
     // The Integrity Seal, taken before anything it covers is read.
     let webspeed_dir = PathBuf::from(env.get_or("WEBSPEED_OSS_DIR", DEFAULT_WEBSPEED_DIR));
-    let seal = Seal::take(seal_roots(
+    let roots = seal_roots(
         opts.plan.as_deref(),
         &webspeed_dir,
         plan_memory_dir.as_deref(),
-    ))
-    .map_err(|e| Failure::config(format!("cannot seal Munix's files: {e}")))?;
+    );
+    // Pinning (`MUNIX_PINS`): a file the Gate rewrites while a task runs, so it must not be sealed.
+    let pins_path = pins_path_from(&env, &roots)?;
+    if let Some(dir) = pins_path
+        .as_deref()
+        .and_then(Path::parent)
+        .filter(|d| !d.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|_| Failure::config("cannot create the pins directory"))?;
+    }
+    let seal = Seal::take(roots)
+        .map_err(|e| Failure::config(format!("cannot seal Munix's files: {e}")))?;
     eprintln!(
         "munix: sealed {} files (digest {})",
         seal.file_count(),
@@ -692,6 +721,9 @@ fn run(args: &[String]) -> Result<Outcome, Failure> {
     let detector = detector_from(&env)?;
     let mut gate = build_gate(&key, &catalog, ledger, &env, reader_adapter, detector)?;
     gate.set_seal(seal.clone());
+    if let Some(path) = &pins_path {
+        gate.enable_pins(path);
+    }
 
     // The prompt and the plan, both signed here.
     let envelope = PromptEnvelope {
@@ -1427,6 +1459,45 @@ mod tests {
             new: None,
         };
         assert!(tamper_message(&tamper).contains("manifests/email.send.yaml"));
+    }
+
+    #[test]
+    fn a_pins_file_inside_a_sealed_root_is_refused_at_startup() {
+        let roots = seal_roots(
+            Some(Path::new("my-plan.yaml")),
+            Path::new("no-such-webspeed-dir"),
+            Some(Path::new("my-plan-memory")),
+        );
+        let env_with = |path: &str| Env {
+            file: BTreeMap::from([("MUNIX_PINS".to_owned(), path.to_owned())]),
+            process: |_| None,
+        };
+        let off = Env {
+            file: BTreeMap::new(),
+            process: |_| None,
+        };
+        assert_eq!(pins_path_from(&off, &roots).unwrap(), None);
+        // Inside the sealed trees and files: the workspace's crates, manifests, the plan memory, `.env`, the plan.
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/pins.json");
+        for sealed in [
+            "manifests/pins.json",
+            "sites/x/pins.json",
+            "my-plan-memory/pins.json",
+            "./manifests/../manifests/pins.json",
+            ".env",
+            "my-plan.yaml",
+            workspace.to_str().unwrap(),
+        ] {
+            let err = pins_path_from(&env_with(sealed), &roots).unwrap_err();
+            assert!(err.message.contains("Integrity Seal"), "{sealed}");
+        }
+        // Outside every root.
+        let dir = std::env::temp_dir().join(format!("munix-pins-ok-{}", std::process::id()));
+        let ok = dir.join("pins.json");
+        assert_eq!(
+            pins_path_from(&env_with(ok.to_str().unwrap()), &roots).unwrap(),
+            Some(ok)
+        );
     }
 
     #[test]

@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 
 use crate::facts::Origin;
 use crate::ingest::{Delivered, ingest};
-use crate::policy::{DenyCode, Facts, Outcome, Ruling, evaluate};
+use crate::pins::{Pins, PinsError};
+use crate::policy::{DenyCode, Facts, Outcome, Ruling, evaluate, pin_candidates};
 use crate::refs::RefTable;
 use crate::seal::{SealCheck, Tamper};
 use crate::tool::{Tool, ToolFailure};
@@ -170,6 +171,9 @@ pub struct Gate {
     seal: Option<Arc<dyn SealCheck>>,
     tampered: Option<Tamper>,
     detector: Option<DetectorConfig>,
+    /// Destinations the user approved at the Console, remembered across tasks (`None`: pinning is off, nothing is
+    /// read or added). Real strings, kept inside the Gate: the ledger gets digests only.
+    pins: Option<Pins>,
 }
 
 enum Status {
@@ -327,7 +331,32 @@ impl Gate {
             seal: None,
             tampered: None,
             detector: None,
+            pins: None,
         }
+    }
+
+    /// Turns pinning on with the store at `path` (a missing file is an empty store). A file that cannot be read or
+    /// parsed gives an empty store and a `pins_ignored` ledger entry (fail closed: nothing is trusted from it).
+    /// With pinning on, a user approval at the Console of a request parked with `.web_unbound` pins each
+    /// destination that did not bind (see [`Gate::decide`]). Pinning off (the default) loads and adds nothing.
+    pub fn enable_pins(&mut self, path: &std::path::Path) {
+        match Pins::load(path) {
+            Ok(pins) => self.pins = Some(pins),
+            Err(e) => {
+                let _ = self.log(json!({"event": "pins_ignored", "reason": pins_error_code(&e)}));
+                self.pins = Some(Pins::empty_at(path));
+            }
+        }
+    }
+
+    /// Turns pinning on with a store the caller built (tests).
+    pub fn set_pins(&mut self, pins: Pins) {
+        self.pins = Some(pins);
+    }
+
+    /// The pin store, when pinning is on.
+    pub fn pins(&self) -> Option<&Pins> {
+        self.pins.as_ref()
     }
 
     /// Installs an injection detector (invariant 7). Before ingest, every free-text field the plan reads is scored;
@@ -874,6 +903,13 @@ impl Gate {
         };
         match body.verdict {
             Verdict::Approve => {
+                // Read before the request leaves the parked set: did it wait only because a destination was not
+                // bound to the page's own domain?
+                let was_web_unbound = self
+                    .tasks
+                    .get(&request.task)
+                    .and_then(|t| t.pending.get(&hash))
+                    .is_some_and(|p| p.reasons.iter().any(|r| r.ends_with(".web_unbound")));
                 self.remove_pending(&request.task, &hash);
                 // The code rules again: an approval never overrides a deterministic deny, and the budget may have
                 // been used up by another request since this one was parked.
@@ -889,6 +925,14 @@ impl Gate {
                 };
                 if let Outcome::Deny(code) = ruling.outcome {
                     return self.finish_deny(&case, code, &ruling.reasons, true);
+                }
+                // Trust on first use: the user (never the simulated user, never a model) approved these
+                // destinations, so remember them. Only values that passed the plan's `from` rule and did not bind.
+                if was_web_unbound
+                    && body.stage == Stage::User
+                    && !body.reasons.iter().any(|r| r == "console.simulated_user")
+                {
+                    self.pin_approved(&manifest, &request);
                 }
                 self.execute(&case)
             }
@@ -1253,17 +1297,20 @@ impl Gate {
         ))
     }
 
-    /// Stage 1 on one request that already passed the shape check: trace every argument, then evaluate.
-    fn rule(&self, task: &Task, manifest: &ToolManifest, request: &Request) -> Ruling {
-        // Every credential the vault holds for the tools in this task's plan, for the DLP check.
-        let credentials: Vec<&Credential> = task
-            .plan
+    /// Every credential the vault holds for the tools in this task's plan, for the DLP check.
+    fn plan_credentials<'a>(&'a self, task: &'a Task) -> Vec<&'a Credential> {
+        task.plan
             .steps
             .iter()
             .filter_map(|step| self.catalog.get(&step.tool))
             .filter_map(|m| m.credentials.as_ref())
             .filter_map(|at| self.vault.get(at))
-            .collect();
+            .collect()
+    }
+
+    /// Stage 1 on one request that already passed the shape check: trace every argument, then evaluate.
+    fn rule(&self, task: &Task, manifest: &ToolManifest, request: &Request) -> Ruling {
+        let credentials = self.plan_credentials(task);
         // Each argument on its own, plus a confidential value or credential split across content arguments.
         let args = trace_request(&manifest.args, &request.args, &task.refs, &credentials);
         evaluate(&Facts {
@@ -1275,7 +1322,59 @@ impl Gate {
             band: task.instance.context.band(),
             args: &args,
             hosts: &self.hosts,
+            pins: self.pins.as_ref(),
         })
+    }
+
+    /// Pins every destination of an approved request that did not bind (see [`pin_candidates`]). One `pin_added`
+    /// ledger entry per new pin: the task, tool and argument names and the SHA-256 digest of `source + "\n" +
+    /// value`, never the strings. A pin that cannot be stored (full, too long, write error) is logged as
+    /// `pin_refused` with a coarse code; the approved request still runs.
+    fn pin_approved(&mut self, manifest: &ToolManifest, request: &Request) {
+        if self.pins.is_none() {
+            return;
+        }
+        let candidates = match self.tasks.get(&request.task) {
+            Some(task) => {
+                let credentials = self.plan_credentials(task);
+                let args = trace_request(&manifest.args, &request.args, &task.refs, &credentials);
+                pin_candidates(&Facts {
+                    plan: &task.plan,
+                    step: request.step,
+                    tool: &request.tool,
+                    manifest,
+                    calls_so_far: task.calls.get(&request.step).copied().unwrap_or(0),
+                    band: task.instance.context.band(),
+                    args: &args,
+                    hosts: &self.hosts,
+                    pins: self.pins.as_ref(),
+                })
+            }
+            None => return,
+        };
+        for c in candidates {
+            let Some(pins) = self.pins.as_mut() else {
+                return;
+            };
+            let event = match pins.add(&c.source, &c.value) {
+                Ok(false) => continue,
+                Ok(true) => json!({
+                    "event": "pin_added",
+                    "task": request.task.as_str(),
+                    "tool": request.tool.as_str(),
+                    "arg": c.arg,
+                    "digest": Pins::digest(&c.source, &c.value),
+                }),
+                Err(e) => json!({
+                    "event": "pin_refused",
+                    "task": request.task.as_str(),
+                    "tool": request.tool.as_str(),
+                    "arg": c.arg,
+                    "reason": pins_error_code(&e),
+                }),
+            };
+            let _ = self.log(event);
+        }
     }
 
     /// Parks a request until a signed decision arrives.
@@ -2140,6 +2239,17 @@ fn review_arg(
             }
         }
         ArgRole::Control => unreachable!("handled above"),
+    }
+}
+
+/// A coarse, fixed code for the ledger.
+fn pins_error_code(e: &PinsError) -> &'static str {
+    match e {
+        PinsError::Unreadable => "unreadable",
+        PinsError::Malformed => "malformed",
+        PinsError::Full => "full",
+        PinsError::BadPin => "bad_pin",
+        PinsError::WriteFailed => "write_failed",
     }
 }
 

@@ -8,6 +8,7 @@
 pub mod facts;
 pub mod gate;
 pub mod ingest;
+pub mod pins;
 pub mod policy;
 pub mod quarantine;
 pub mod refs;

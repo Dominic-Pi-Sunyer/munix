@@ -58,6 +58,7 @@ pub fn trace_arg(
                 facts.values.push(Traced {
                     matches: refs.find_scalar(item),
                     dest_host: None,
+                    dest_value: None,
                 });
             }
         }
@@ -124,6 +125,7 @@ fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u3
         return match refs.get(&id) {
             Some(entry) => Traced {
                 dest_host: destination_host(&entry.value, entry.scalar),
+                dest_value: Some(entry.value.clone()),
                 matches: vec![entry.to_match(id)],
             },
             None => {
@@ -145,6 +147,7 @@ fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u3
     Traced {
         matches,
         dest_host: destination_host(raw, scalar),
+        dest_value: Some(raw.to_owned()),
     }
 }
 
@@ -221,6 +224,7 @@ fn note_embedded(id: &RefId, refs: &RefTable, facts: &mut ArgFacts) {
             facts.embedded.push(Traced {
                 matches: vec![entry.to_match(id.clone())],
                 dest_host: None,
+                dest_value: None,
             });
         }
         None => {
@@ -246,6 +250,7 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
                     facts.embedded.push(Traced {
                         matches: vec![m],
                         dest_host: None,
+                        dest_value: None,
                     });
                 }
                 None => facts.raw_destinations = facts.raw_destinations.saturating_add(count),
@@ -260,6 +265,7 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
                     .map(|(id, entry)| entry.to_match(id.clone()))
                     .collect(),
                 dest_host: None,
+                dest_value: None,
             });
         }
     }
@@ -2089,7 +2095,8 @@ mod tests {
             &[&c],
         );
         assert!(!facts.contains_credential);
-        assert_eq!(facts.values, vec![Traced::untraced()]);
+        assert_eq!(facts.values.len(), 1);
+        assert!(facts.values[0].matches.is_empty());
     }
 
     // ---- percent decoding ----

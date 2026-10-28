@@ -8,11 +8,12 @@ use std::collections::BTreeMap;
 use munix_core::context::Band;
 use munix_core::ids::ToolName;
 use munix_core::label::{Confidential, Trust};
-use munix_core::manifest::{ArgRole, ToolManifest};
+use munix_core::manifest::{ArgRole, ArgSpec, ToolManifest};
 use munix_core::plan::{ArgRule, Dlp, Plan};
 use serde::{Deserialize, Serialize};
 
-use crate::facts::{ArgFacts, Traced};
+use crate::facts::{ArgFacts, BindEnv, Traced};
+use crate::pins::Pins;
 
 /// A coarse denial reason, the only thing the agent learns about a denial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -87,6 +88,9 @@ pub struct Facts<'a> {
     /// the domain-binding check on tier 3 egress destinations; these strings never go into a reason, the ledger
     /// or any model's view.
     pub hosts: &'a BTreeMap<u32, String>,
+    /// The destinations the user approved earlier (`None` when pinning is off). Read only by the domain-binding
+    /// check; see [`crate::pins`].
+    pub pins: Option<&'a Pins>,
 }
 
 /// Rules on one request. Checks run in this order and the first failure decides:
@@ -101,9 +105,12 @@ pub struct Facts<'a> {
 ///      `Destination` argument of a **tier 3 egress** tool there is one more rule, domain binding: trust says how
 ///      likely a region is to carry an attack, not who chose a value, so a destination taken from web content
 ///      must also name the page's own domain. A value is bound when some match satisfies `from` and `min_trust`
-///      and either comes from no web page (`web_domain` is `None`), or the host the value itself names
-///      (`dest_host`) is bound to that page's host in `hosts` (the same host, or a dot-boundary subdomain or
-///      parent of it, with at least two labels). A missing `dest_host` or host is never bound. If every value is
+///      and is bound ([`Traced::binds`]): it comes from the user's side or a trusted service's own records
+///      (`web_domain` is `None` and `third_party` is false), or the host the value itself names (`dest_host`) is
+///      bound to the web page's host in `hosts` (the same host, or a dot-boundary subdomain or parent of it, with
+///      at least two labels; a missing `dest_host` or host is never bound), or its `(source, value)` was pinned by
+///      an earlier user approval (`pins`). Third-party content a tool delivered (a stranger's email in an inbox
+///      tool) never binds unless pinned. If every value is
 ///      bound the reason is `{name}.trace_ok`; if not, but every value passes the plain rule, the reason is
 ///      `{name}.web_unbound`, the other checks go on, and unless something denies, the outcome is `ConfirmUser`
 ///      whatever the band says (never `Allow` or `Gray`, never a takeover). Tiers 0-2 and tools without egress
@@ -138,6 +145,68 @@ pub fn evaluate(facts: &Facts<'_>) -> Ruling {
             ruling(outcome, reasons)
         }
     }
+}
+
+fn bind_env<'a>(facts: &Facts<'a>) -> BindEnv<'a> {
+    BindEnv {
+        hosts: facts.hosts,
+        plan: facts.plan,
+        pins: facts.pins,
+    }
+}
+
+/// True for the arguments domain binding applies to: a destination of a tier 3 egress tool.
+fn guarded(manifest: &ToolManifest, spec: &ArgSpec) -> bool {
+    manifest.tier == 3 && manifest.egress && spec.role == ArgRole::Destination
+}
+
+/// One value the user would pin by approving a request that was parked with `.web_unbound`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinCandidate {
+    /// The argument name (a manifest name, safe for the ledger).
+    pub arg: String,
+    /// The page host or tool name behind the value. A real string: it stays inside the Gate.
+    pub source: String,
+    /// The destination as sent. A real string: it stays inside the Gate.
+    pub value: String,
+}
+
+/// The `(source, value)` pairs of every guarded destination value in `facts` that does not bind yet but passes the
+/// plan's `from` and `min_trust` rule (the same test as the `.web_unbound` reason). Empty when nothing needs a pin.
+/// Values that fail the rule are not candidates: a pin never rescues them.
+pub fn pin_candidates(facts: &Facts<'_>) -> Vec<PinCandidate> {
+    let Some(step) = facts.plan.steps.iter().find(|s| s.id == facts.step) else {
+        return Vec::new();
+    };
+    let env = bind_env(facts);
+    let mut out = Vec::new();
+    for (name, arg) in facts.args {
+        let Some(spec) = facts.manifest.args.get(name) else {
+            continue;
+        };
+        let Some(rule) = step.args.get(name) else {
+            continue;
+        };
+        let Some(from) = rule.from.as_deref() else {
+            continue;
+        };
+        if !guarded(facts.manifest, spec) {
+            continue;
+        }
+        if !arg.values.iter().all(|v| v.satisfies(from, rule.min_trust)) {
+            continue;
+        }
+        for v in &arg.values {
+            for (source, value) in v.pin_candidates(from, rule.min_trust, &env) {
+                out.push(PinCandidate {
+                    arg: name.clone(),
+                    source,
+                    value,
+                });
+            }
+        }
+    }
+    out
 }
 
 fn ruling(outcome: Outcome, reasons: Vec<String>) -> Ruling {
@@ -201,14 +270,9 @@ fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<bool, D
                 reasons.push(format!("{name}.trace_untrusted"));
                 return Err(DenyCode::UntrustedDestination);
             }
-            let guarded = facts.manifest.tier == 3
-                && facts.manifest.egress
-                && spec.role == ArgRole::Destination;
-            if guarded
-                && !arg
-                    .values
-                    .iter()
-                    .all(|v| v.binds(from, min_trust, facts.hosts))
+            let env = bind_env(facts);
+            if guarded(facts.manifest, spec)
+                && !arg.values.iter().all(|v| v.binds(from, min_trust, &env))
             {
                 reasons.push(format!("{name}.web_unbound"));
                 web_unbound = true;
@@ -388,6 +452,7 @@ args:
             trust: Trust::new(trust),
             confidential,
             web_domain: None,
+            third_party: false,
         }
     }
 
@@ -395,6 +460,7 @@ args:
         Traced {
             matches: vec![matched(origin, trust, Confidential::Public)],
             dest_host: None,
+            dest_value: None,
         }
     }
 
@@ -465,6 +531,7 @@ args:
             band,
             args,
             hosts: &BTreeMap::new(),
+            pins: None,
         })
     }
 
@@ -1125,6 +1192,7 @@ args:
                     matched(Origin::UserData, 70, Confidential::Public),
                 ],
                 dest_host: None,
+                dest_value: None,
             }]),
         )]);
         let r = run_with(&plan, 1, "web.open", &m, 0, Band::Lockdown, &both);
