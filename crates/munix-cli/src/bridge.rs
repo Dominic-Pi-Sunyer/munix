@@ -983,6 +983,10 @@ amendments:
         assert_eq!(refs_in(text).len(), 1, "{text}");
         // An output with refs says what they are, without naming one.
         assert!(text.ends_with(crate::front::REFS_NOTE), "{text}");
+        assert!(
+            !text.contains(crate::front::FLAG_NOTE),
+            "no Reader flag, no note"
+        );
 
         let ended = &run.out[3];
         assert_eq!(ended["takeover"], Value::Null);

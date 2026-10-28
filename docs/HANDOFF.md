@@ -8,6 +8,16 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Tue Oct 27, 2026, by Claude (Opus 5.5)._
 
+- **PixelMart demo re-checked on today's code (Oct 28), about $0.03.**
+  - Left side (v01): clean.
+  - Right side, 2 runs with `MUNIX_PLAN_MEMORY`: both clean (the summary went to the boss only, context trust 100,
+    ledgers verified). The first logged `plan_remembered`, the second `plan_reused` (exact). That is plan memory end
+    to end in `munix run`.
+- **Reader flag note (Oct 28), offline, unmeasured.** When a Reader flags instructions, the agent's tool output
+  ends with `front::FLAG_NOTE`: none of that text reached you, use the typed summary for the user's request, and
+  Munix checks every action in code.
+  - Aimed at UT2 and UT12, where the agent stopped on a flagged rent notice.
+  - Measuring it needs the attack phase.
 - **Plan memory: built and measured (Oct 28).** See `docs/plan-memory.md`.
   - **Attack phase:** $6.00 → $3.34 (1.2x bare). ASR still 0/144, and 139 of 144 plans reused.
   - **Utility with no attack:** 12/16, which includes the refs note.
