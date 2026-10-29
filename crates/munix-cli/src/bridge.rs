@@ -1138,9 +1138,9 @@ amendments:
             ops(&run),
             ["started", "run_tool", "result", "result", "result", "ended"]
         );
-        assert_eq!(run.out[3]["text"], "denied: untrusted_destination");
+        assert_eq!(run.out[3]["text"], "denied: not permitted");
         assert_eq!(run.out[3]["is_error"], true);
-        assert_eq!(run.out[4]["text"], "denied: task halted");
+        assert_eq!(run.out[4]["text"], "denied: not permitted");
         assert_eq!(run.out[4]["is_error"], true);
         assert_eq!(run.out[5]["takeover"], "untrusted_destination");
         assert_eq!(run.out[5]["ledger_verified"], true);
@@ -1169,7 +1169,7 @@ amendments:
             ["started", "run_tool", "result", "result", "ended"]
         );
         assert_eq!(reviewer.seen().len(), 1);
-        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["text"], "denied: the user declined");
         assert_eq!(run.out[3]["is_error"], true);
         assert_eq!(run.out[4]["takeover"], Value::Null);
         // The reviewer's one call is reported, so the runner can count the Supervisor's spend.
@@ -1194,7 +1194,7 @@ amendments:
             ops(&run),
             ["started", "run_tool", "result", "result", "ended"]
         );
-        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["text"], "denied: the user declined");
         assert_eq!(run.out[3]["is_error"], true);
         assert_eq!(run.out[4]["takeover"], Value::Null);
         assert_eq!(run.out[4]["supervisor_usage"]["calls"], 0);
@@ -1248,7 +1248,7 @@ amendments:
             ops(&run),
             ["started", "run_tool", "result", "result", "ended"]
         );
-        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["text"], "denied: the user declined");
         assert_eq!(run.out[3]["is_error"], true);
         assert_eq!(run.out[4]["takeover"], Value::Null);
         let ledger = std::fs::read_to_string(&run.ledger).unwrap();
@@ -1264,7 +1264,7 @@ amendments:
         lines.push(end());
         let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
         let run = drive_raw(&input, setup_with(&dir, None, &plan, false), dir);
-        assert_eq!(run.out[3]["text"], "denied: user_denied");
+        assert_eq!(run.out[3]["text"], "denied: the user declined");
     }
 
     #[test]
@@ -1324,7 +1324,7 @@ amendments:
         );
         run.result.as_ref().unwrap();
         assert_eq!(ops(&run), ["started", "result", "ended"]);
-        assert_eq!(run.out[1]["text"], "denied: off_plan");
+        assert_eq!(run.out[1]["text"], "denied: not permitted");
         assert_eq!(run.out[2]["takeover"], "off_plan");
     }
 

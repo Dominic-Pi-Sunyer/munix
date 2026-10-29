@@ -222,12 +222,12 @@ impl<'a, C: Confirmer> GateFront<'a, C> {
                 let codes: Vec<String> = violations.iter().map(|v| code_text(&v.code)).collect();
                 refused(format!("denied: {}", codes.join(", ")))
             }
-            Reply::Denied(code) => refused(format!("denied: {}", code_text(&code))),
+            Reply::Denied(code) => refused(agent_refusal(code)),
             Reply::Takeover(code) => {
                 self.takeover = Some(code);
-                refused(format!("denied: {}", code_text(&code)))
+                refused(agent_refusal(code))
             }
-            Reply::Halted => refused("denied: task halted".to_owned()),
+            Reply::Halted => refused(NOT_PERMITTED.to_owned()),
             Reply::Failed(failure) => refused(format!("tool failed: {}", code_text(&failure))),
             // A user decision never leaves a request waiting; if it ever did, nothing ran.
             Reply::Pending { .. } => refused(format!(
@@ -312,7 +312,7 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     ///
     /// - The name maps back by replacing `_` with `.`. A name that isn't a valid tool name, or any tool, is still
     ///   submitted (with step 0 when no plan step uses it), so the Gate rules on it and logs it. A name that can't
-    ///   become a `ToolName` at all is answered `denied: off_plan` and treated as a takeover.
+    ///   become a `ToolName` at all is answered `denied: not permitted` and treated as a takeover.
     /// - The step is the first step of the Gate's current plan (planned or amended) with that tool whose budget isn't
     ///   used up (`Gate::calls_made`), else the last step with that tool. A tool no step uses is sent as step 0 and
     ///   the Gate may amend a step in for it (low tiers only).
@@ -322,7 +322,7 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     /// - `Delivered`: one block per field in name order, headed `## <field> [<region>, trust <n>]`, with strings as
     ///   they are and list items as `- item` lines; then one line naming the withheld fields, if any.
     /// - `Malformed`: `denied: ` and the violation codes, comma-separated.
-    /// - `Denied(code)`: `denied: <code>`.
+    /// - `Denied(code)`: [`NOT_PERMITTED`] (`denied: the user declined` for `UserDenied`).
     /// - `Pending`: when `needs` is `Stage::LlmReview` and a reviewer is attached, asks `Reviewer::review` on the
     ///   Gate's redacted `review_view` and passes the signed decision to `Gate::decide`; if `decide` answers
     ///   `Pending { needs: User }` (or if there is no reviewer, the view or plan is missing, or `review` errors),
@@ -330,15 +330,15 @@ impl<C: Confirmer> McpHandler for GateFront<'_, C> {
     ///   and the confirmer), signs a `Stage::User` decision (approve or deny, the band from the view, reason
     ///   `Confirmer::label`, `console.user` for a person) with `Purpose::UserConfirmation`, passes it to `Gate::decide`, and answers with that reply
     ///   mapped the same way.
-    /// - `Takeover(code)`: `denied: <code>`; records the code so `should_stop` ends the session.
-    /// - `Halted`: `denied: task halted`. `Failed(f)`: `tool failed: <f>`.
+    /// - `Takeover(code)`: the same text; records the code so `should_stop` ends the session.
+    /// - `Halted`: [`NOT_PERMITTED`]. `Failed(f)`: `tool failed: <f>`.
     fn call(&mut self, name: &str, arguments: &Value) -> CallResult {
         if let Some(p) = &self.progress {
             p.note_call();
         }
         let Some(tool) = self.tool_named(name) else {
             self.takeover = Some(DenyCode::OffPlan);
-            return refused(format!("denied: {}", code_text(&DenyCode::OffPlan)));
+            return refused(NOT_PERMITTED.to_owned());
         };
         let args = match arguments {
             Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
@@ -463,6 +463,21 @@ fn arg_schema(spec: &ArgSpec) -> Value {
         })
     } else {
         item
+    }
+}
+
+/// What the agent is told when the Gate refuses a request on policy: one fixed sentence, whatever the reason, so a
+/// refusal gives an agent (or whoever steers it) nothing to work around. The code and reasons go to the ledger and
+/// the operator log only. Malformed arguments still get their shape codes: they describe the tool's published
+/// schema, not the policy, and an honest agent needs them to fix a call.
+pub const NOT_PERMITTED: &str = "denied: not permitted";
+
+/// The refusal text for a deny code. The user's own "no" is said as such, so the agent stops and reports back
+/// instead of trying again; every other code is [`NOT_PERMITTED`].
+fn agent_refusal(code: DenyCode) -> String {
+    match code {
+        DenyCode::UserDenied => "denied: the user declined".to_owned(),
+        _ => NOT_PERMITTED.to_owned(),
     }
 }
 

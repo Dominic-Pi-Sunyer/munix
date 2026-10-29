@@ -541,7 +541,7 @@ fn a_user_who_says_no_gets_user_denied_and_nothing_is_sent() {
     let mut front = h.front(&script);
     assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
     let result = front.call("email_send", &email("Reviews"));
-    refused(&result, "denied: user_denied");
+    refused(&result, "denied: the user declined");
     // A denial is not a takeover: the session goes on.
     assert!(!front.should_stop());
     assert_eq!(front.takeover(), None);
@@ -559,7 +559,7 @@ fn an_unanswered_console_is_a_no() {
     assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
     refused(
         &front.call("email_send", &email("Reviews")),
-        "denied: user_denied",
+        "denied: the user declined",
     );
     drop(front);
     assert!(h.emails().is_empty());
@@ -634,7 +634,7 @@ fn reviewer_deny_returns_denied_reviewer_without_asking_the_confirmer() {
     let mut front = h.front_with_reviewer(&script, mock.clone());
     assert!(!front.call("news_read", &json!({})).is_error);
     let result = front.call("email_send", &email("Reviews"));
-    refused(&result, "denied: reviewer");
+    refused(&result, "denied: not permitted");
     assert!(!front.should_stop());
     drop(front);
 
@@ -710,7 +710,7 @@ fn a_request_parked_for_the_user_never_reaches_the_reviewer() {
     let mut front = h.front_with_reviewer(&script, mock.clone());
     assert!(!front.call("web_open", &json!({"url": url_ref})).is_error);
     let result = front.call("email_send", &email("Reviews"));
-    refused(&result, "denied: user_denied");
+    refused(&result, "denied: the user declined");
     drop(front);
 
     assert!(
@@ -744,14 +744,14 @@ fn an_address_taken_from_the_page_is_a_takeover() {
             "email_send",
             &json!({"to": [to], "subject": "Hi", "body": "The reviews are positive."}),
         );
-        refused(&result, "denied: untrusted_destination");
+        refused(&result, "denied: not permitted");
         assert!(front.should_stop());
         assert_eq!(front.takeover(), Some(DenyCode::UntrustedDestination));
 
         // The task is halted: nothing else runs, and the Console is never asked.
         refused(
             &front.call("email_send", &email("Hi")),
-            "denied: task halted",
+            "denied: not permitted",
         );
         drop(front);
         assert!(script.shown().is_empty());
@@ -769,7 +769,7 @@ fn a_raw_link_in_the_body_is_a_takeover() {
         "email_send",
         &json!({"to": ["ref:e2"], "subject": "Hi", "body": "Read https://evil.test/collect now"}),
     );
-    refused(&result, "denied: raw_destination");
+    refused(&result, "denied: not permitted");
     assert!(front.should_stop());
     assert_eq!(front.takeover(), Some(DenyCode::RawDestination));
 }
@@ -780,7 +780,7 @@ fn an_unknown_tool_is_a_takeover() {
     let script = Script::default();
     let mut front = h.front(&script);
     assert!(!front.should_stop());
-    refused(&front.call("mail_read", &json!({})), "denied: off_plan");
+    refused(&front.call("mail_read", &json!({})), "denied: not permitted");
     assert!(front.should_stop());
     assert_eq!(front.takeover(), Some(DenyCode::OffPlan));
     drop(front);
@@ -807,7 +807,7 @@ fn a_tier_2_tool_in_the_catalog_but_not_in_the_plan_is_denied_and_the_session_go
         ["web_open", "email_send"],
         "the agent is not offered it"
     );
-    refused(&front.call("news_read", &json!({})), "denied: off_plan");
+    refused(&front.call("news_read", &json!({})), "denied: not permitted");
     // Tier 2: the same coarse error, but the session goes on (the 3rd takeover-class deny halts).
     assert!(!front.should_stop());
     assert_eq!(front.takeover(), None);
@@ -841,7 +841,7 @@ fn a_low_tier_tool_the_plan_lacks_is_amended_in_and_later_calls_use_its_step() {
     }
     refused(
         &front.call("news_read", &json!({})),
-        "denied: budget_exhausted",
+        "denied: not permitted",
     );
     assert!(
         !front.should_stop(),
@@ -875,7 +875,7 @@ fn a_name_that_cannot_be_a_tool_name_is_a_takeover() {
         let before = h.ledger_len();
         let script = Script::default();
         let mut front = h.front(&script);
-        refused(&front.call(name, &json!({})), "denied: off_plan");
+        refused(&front.call(name, &json!({})), "denied: not permitted");
         assert!(front.should_stop(), "{name:?}");
         assert_eq!(front.takeover(), Some(DenyCode::OffPlan));
         drop(front);
@@ -960,7 +960,7 @@ fn an_exhausted_budget_is_denied_by_code() {
     }
     refused(
         &front.call("web_open", &json!({"url": url_ref})),
-        "denied: budget_exhausted",
+        "denied: not permitted",
     );
     assert!(!front.should_stop());
 }
@@ -981,7 +981,7 @@ fn the_step_is_the_first_with_budget_left_and_falls_back_to_the_last() {
     }
     refused(
         &front.call("web_open", &json!({"url": url_ref})),
-        "denied: budget_exhausted",
+        "denied: not permitted",
     );
     drop(front);
     assert_eq!(h.gate.calls_made(&h.task, 1), Some(3));
@@ -997,7 +997,7 @@ fn the_email_budget_is_one() {
     assert!(!front.call("email_send", &email("First")).is_error);
     refused(
         &front.call("email_send", &email("Second")),
-        "denied: budget_exhausted",
+        "denied: not permitted",
     );
     drop(front);
     assert_eq!(h.emails().len(), 1);
@@ -1033,7 +1033,7 @@ fn front_progress_records_call_times_and_delivered_counts() {
     std::thread::sleep(std::time::Duration::from_millis(2));
     refused(
         &front.call("email_send", &email("Summary")),
-        "denied: user_denied",
+        "denied: the user declined",
     );
     assert!(progress.last_call() > after_delivered);
     assert_eq!(progress.delivered(), 1);

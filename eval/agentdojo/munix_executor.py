@@ -398,7 +398,7 @@ class MunixToolsExecutor(ToolsExecutor):
                     tool_call.args[arg_k] = literal_eval(arg_v)
 
             if getattr(self.session, "refused", False):  # oracle.py passes a bare namespace
-                tool_call_results.append(failure(tool_call, "denied: task refused"))
+                tool_call_results.append(failure(tool_call, "denied: not permitted"))
                 continue
             client = self.session.client
             if client is None:

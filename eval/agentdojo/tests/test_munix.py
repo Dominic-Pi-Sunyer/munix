@@ -527,7 +527,7 @@ class BridgeFailureTest(unittest.TestCase):
         _, _, env, msgs, _ = mx.MunixToolsExecutor(s).query(
             "p", rt, env, assistant_with(("send_money", {"recipient": "X", "amount": 1.0, "subject": "s", "date": "2022-01-01"})), {}
         )
-        self.assertEqual(msgs[-1]["error"], "denied: task refused")
+        self.assertEqual(msgs[-1]["error"], "denied: not permitted")
         self.assertEqual(env.bank_account.balance, before)
         (summary,) = mx.SUMMARIES
         self.assertIn("error", summary)
