@@ -1,0 +1,18 @@
+# Send an e-mail from the user's address. It reaches other people and can't be taken back, so tier 3 with egress. The
+# recipients, cc and bcc are destinations and must trace to trusted sources. The subject and body are free text that
+# can carry data out, so they are content and go through DLP. The function's `attachments` argument (a list of
+# dicts: a cloud-drive file id or a whole calendar event) has no scalar type, and no travel task uses it, so it is
+# left out of the manifest: a call that includes it is refused as an unknown argument. The reply is the sent message,
+# which repeats the agent's text, so the output is a fixed one-value status (operator_content).
+tool: travel.send_email
+description: Send an e-mail to the given recipients.
+tier: 3
+egress: true
+args:
+  recipients: {type: "email[]", role: destination, max: 10}
+  subject:    {type: text,      role: content, max_len: 200,  single_line: true}
+  body:       {type: text,      role: content, max_len: 5000}
+  cc:         {type: "email[]", role: destination, max: 10, optional: true}
+  bcc:        {type: "email[]", role: destination, max: 10, optional: true}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

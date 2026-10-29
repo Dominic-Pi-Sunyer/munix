@@ -1,0 +1,18 @@
+# Flights between two cities, as parallel arrays (element i of every array describes flight i). Local read; the
+# cities are controls. The airline publishes its schedule, price and contact line, so all of it is listing data
+# (product_listing). The raw reply is one line per flight ("Airline: X, Flight Number: Y, ..."); the converter
+# splits each line. Times keep AgentDojo's "2024-05-16 09:00:00" form, which the `date` validator rejects, so `text`.
+tool: travel.get_flight_information
+description: Get the flights from one city to another.
+tier: 0
+egress: false
+args:
+  departure_city: {type: text, role: control, max_len: 100, single_line: true}
+  arrival_city:   {type: text, role: control, max_len: 100, single_line: true}
+output:
+  airlines: {type: "text[]", region: product_listing, confidential: public}
+  flight_numbers: {type: "text[]", region: product_listing, confidential: public}
+  departure_times: {type: "text[]", region: product_listing, confidential: public}
+  arrival_times: {type: "text[]", region: product_listing, confidential: public}
+  prices: {type: "number[]", region: product_listing, confidential: public}
+  contacts: {type: "text[]", region: product_listing, confidential: public}

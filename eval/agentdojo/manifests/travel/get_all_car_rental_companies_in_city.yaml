@@ -1,0 +1,10 @@
+# List the car rental companies in a city. Local read; the city is a control. The names are the platform's own listing data (product_listing): the business or the booking platform wrote them, not the user and not a reviewer. The raw reply is
+# "Car Rental Companies in <city>: A\nB\n"; the converter splits it into a list.
+tool: travel.get_all_car_rental_companies_in_city
+description: List the names of the car rental companies in a given city.
+tier: 0
+egress: false
+args:
+  city: {type: text, role: control, max_len: 100, single_line: true}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}

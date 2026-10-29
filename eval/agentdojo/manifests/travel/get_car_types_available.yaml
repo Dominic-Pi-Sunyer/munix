@@ -1,0 +1,11 @@
+# Car types available (each company's list joined with ", ") of the named car rental companies, as parallel arrays (element i of every array describes company i).
+# Local read; the company names are controls. Names and this column are the company's own listing data (product_listing).
+tool: travel.get_car_types_available
+description: Get the car types available at the named car rental companies.
+tier: 0
+egress: false
+args:
+  company_name: {type: "text[]", role: control, max: 20, max_len: 100}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}
+  car_types: {type: "text[]", region: product_listing, confidential: public}

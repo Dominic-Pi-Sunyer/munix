@@ -10,7 +10,7 @@ Each run writes `results/<mode>-<suite>-<phase>[-<shard>].json` (scores, token u
 transcripts). Against the Meta API `--budget USD` is required: the run stops before the next case once the agent's and
 Munix's Supervisor's estimated spend reaches it (it can go over by at most the one case that crosses it). Every paid
 run also charges `scripts/credit.py`'s shared balance and stops at its floor ($25 by default), kept for the demo. Transcripts go to `runs/` (gitignored). Reads MODEL_API_KEY from the repo's .env and never prints it.
-`--mode munix` (banking and slack) sends every tool call through a Munix Gate via `munix bridge`; see BRIDGE.md.
+`--mode munix` (banking, slack and travel) sends every tool call through a Munix Gate via `munix bridge`; see BRIDGE.md.
 `--detector-url` points the bridge at a prompt-injection detector's sidecar; such runs are named `munix+guard`.
 Spends Meta credit; the lead runs it.
 """
@@ -438,7 +438,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--suite", required=True, choices=("banking", "slack"))
+    r.add_argument("--suite", required=True, choices=("banking", "slack", "travel"))
     r.add_argument("--phase", required=True, choices=PHASES)
     r.add_argument("--mode", default="bare", choices=("bare", "munix"))
     r.add_argument("--model", help="default: MUNIX_WORKER_MODEL from .env, else muse-spark-1.3")
@@ -462,7 +462,7 @@ def main() -> int:
     r.add_argument("--budget", type=float, help="USD: required against the Meta API; stops before the next case once "
                    "the estimated spend (agent and Supervisor) reaches it")
     rp = sub.add_parser("report")
-    rp.add_argument("--suite", required=True, choices=("banking", "slack"))
+    rp.add_argument("--suite", required=True, choices=("banking", "slack", "travel"))
     args = ap.parse_args()
     return cmd_run(args) if args.cmd == "run" else cmd_report(args)
 

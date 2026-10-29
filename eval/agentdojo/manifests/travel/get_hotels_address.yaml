@@ -1,0 +1,11 @@
+# Street address of one hotel, as parallel arrays (an unknown hotel gives empty arrays). Local read. The hotel name is a
+# control. Names and addresses are the platform's own listing data (product_listing).
+tool: travel.get_hotels_address
+description: Get the address of the given hotel.
+tier: 0
+egress: false
+args:
+  hotel_name: {type: text, role: control, max_len: 100, single_line: true}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}
+  addresses: {type: "text[]", region: product_listing, confidential: public}

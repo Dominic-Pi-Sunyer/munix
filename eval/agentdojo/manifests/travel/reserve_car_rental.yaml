@@ -1,0 +1,15 @@
+# Book a rental car. It commits the user's money with a third party and shares the user's phone number, so tier 3 with
+# egress. The company is the payee: a destination that must trace to a trusted source. Typed `text` because names have
+# spaces. The start and end are "YYYY-MM-DD HH:MM", which the `date` validator rejects, so `text` controls. `end_time`
+# is required by the function's signature (it may be null), so it is not marked optional here. The reply is a fixed
+# one-value status (operator_content).
+tool: travel.reserve_car_rental
+description: Reserve a car at a car rental company for the given times.
+tier: 3
+egress: true
+args:
+  company:    {type: text, role: destination, max_len: 100, single_line: true}
+  start_time: {type: text, role: control, max_len: 16, single_line: true}
+  end_time:   {type: text, role: control, max_len: 16, single_line: true}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

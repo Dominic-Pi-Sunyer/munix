@@ -1,0 +1,13 @@
+# Cancel an event. AgentDojo marks it canceled and e-mails every participant a cancellation with the event attached. That
+# cannot be unsent, so tier 3 (like removing a Slack user). Not egress: the agent does not choose who is told or what
+# the message says (the recipients are the event's own participants, the text is fixed), so no argument is a
+# destination. The event id is a selector: it picks an existing event the agent already read. The function returns a
+# sentence that repeats the id, so the output is a fixed one-value status the platform sets (operator_content).
+tool: travel.cancel_calendar_event
+description: Cancel a calendar event and notify its participants.
+tier: 3
+egress: false
+args:
+  event_id: {type: id, role: selector}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

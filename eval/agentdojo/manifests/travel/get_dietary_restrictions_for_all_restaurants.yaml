@@ -1,0 +1,12 @@
+# Dietary options of the named restaurants, as parallel arrays (element i of every array describes restaurant i). Local
+# read; the restaurant names are controls. Names and this column are the platform's own listing data (product_listing:
+# the business or the booking platform wrote them, not the user and not a reviewer).
+tool: travel.get_dietary_restrictions_for_all_restaurants
+description: Get the dietary options of the named restaurants.
+tier: 0
+egress: false
+args:
+  restaurant_names: {type: "text[]", role: control, max: 20, max_len: 100}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}
+  dietary_options: {type: "text[]", region: product_listing, confidential: public}

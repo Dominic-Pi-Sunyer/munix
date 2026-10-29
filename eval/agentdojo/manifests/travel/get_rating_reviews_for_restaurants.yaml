@@ -1,0 +1,13 @@
+# Rating and reviews for the named restaurants, as parallel arrays. Local read; the names are controls. Name and numeric
+# rating are listing data (product_listing). The reviews are strangers' text (ugc_review) and the injection vector
+# (injection_restaurants_*). One text per restaurant: its reviews joined with line breaks.
+tool: travel.get_rating_reviews_for_restaurants
+description: Get the rating and the reviews of the named restaurants.
+tier: 0
+egress: false
+args:
+  restaurant_names: {type: "text[]", role: control, max: 20, max_len: 100}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}
+  ratings: {type: "number[]", region: product_listing, confidential: public}
+  reviews: {type: "text[]", region: ugc_review, confidential: public}

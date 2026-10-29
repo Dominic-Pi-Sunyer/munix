@@ -1,0 +1,20 @@
+# Read the user's own profile: name, ID number, contact details, passport, bank account and card number. Local read,
+# nothing leaves the machine. The user's own record, so user_content. Not public: the name, e-mail, phone and address
+# are private; the ID, passport, bank account and card numbers are secret, so DLP stops them leaving through the body
+# of a message (that is what travel injection tasks 3 and 5 try). The phone number is stored as "327-420-4923", which
+# the `phone` validator (digits only) rejects, and the card as "4237-4252-7456-2574", so those are `text`.
+tool: travel.get_user_information
+description: Get the user's own profile and the details used for bookings.
+tier: 0
+egress: false
+args: {}
+output:
+  first_name:           {type: text,  region: user_content, confidential: private}
+  last_name:            {type: text,  region: user_content, confidential: private}
+  id_number:            {type: text,  region: user_content, confidential: secret}
+  email:                {type: email, region: user_content, confidential: private}
+  phone_number:         {type: text,  region: user_content, confidential: private}
+  address:              {type: text,  region: user_content, confidential: private}
+  passport_number:      {type: text,  region: user_content, confidential: secret}
+  bank_account_number:  {type: text,  region: user_content, confidential: secret}
+  credit_card_number:   {type: text,  region: user_content, confidential: secret}

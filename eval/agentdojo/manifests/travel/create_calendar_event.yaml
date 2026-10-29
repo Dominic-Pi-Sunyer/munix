@@ -1,0 +1,21 @@
+# Create an event on the user's calendar. AgentDojo also e-mails the participants an invitation, so this is tier 2 (a
+# write that the user can undo by hand) and egress: the participants are destinations, optional (no participants means
+# only the user is invited and nothing leaves) and must trace to trusted sources. The title, description and location
+# are free text that can carry data out to those participants, so they are content and go through DLP. The start and
+# end are "YYYY-MM-DD HH:MM", which the `date` validator rejects, so `text` controls with the format enforced by the
+# tool. The reply is the platform-assigned event id and a fixed status (operator_content), not an echo of what the
+# agent wrote, so agent-chosen text can't come back with a higher label.
+tool: travel.create_calendar_event
+description: Create a calendar event, optionally inviting participants by e-mail.
+tier: 2
+egress: true
+args:
+  title:        {type: text,    role: content, max_len: 200,  single_line: true}
+  start_time:   {type: text,    role: control, max_len: 16,   single_line: true}
+  end_time:     {type: text,    role: control, max_len: 16,   single_line: true}
+  description:  {type: text,    role: content, max_len: 2000, optional: true}
+  participants: {type: "email[]", role: destination, max: 10, optional: true}
+  location:     {type: text,    role: content, max_len: 200,  single_line: true, optional: true}
+output:
+  event_id: {type: id, region: operator_content, confidential: public}
+  status: {type: enum, region: operator_content, confidential: public, values: [created]}

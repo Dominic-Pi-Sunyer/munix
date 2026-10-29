@@ -1,0 +1,22 @@
+# The user's calendar events on one day. Local read, nothing leaves the machine; the day is a control. The events are the user's own calendar (user_content, per the lead's rule: the user's calendar is the user's
+# data). Caveat, said plainly: in a real calendar anyone can send an invite that lands on it, and an event the agent
+# created earlier may carry text the agent took from a review; the label does not cover either. Private: a calendar
+# says where the user is and with whom. Parallel arrays, element i describes event i; times are "2024-05-15 10:00:00"
+# (not a `date`, so `text`); `participants` joins each event's addresses with ", " (a list inside a list does not fit
+# a flat array); `locations` is "" when an event has none.
+tool: travel.get_day_calendar_events
+description: Get the user's calendar events on a given day.
+tier: 0
+egress: false
+args:
+  day: {type: date, role: control}
+output:
+  ids:          {type: "id[]",   region: user_content, confidential: private}
+  titles:       {type: "text[]", region: user_content, confidential: private}
+  descriptions: {type: "text[]", region: user_content, confidential: private}
+  start_times:  {type: "text[]", region: user_content, confidential: private}
+  end_times:    {type: "text[]", region: user_content, confidential: private}
+  locations:    {type: "text[]", region: user_content, confidential: private}
+  participants: {type: "text[]", region: user_content, confidential: private}
+  all_day:      {type: "bool[]", region: user_content, confidential: private}
+  statuses:     {type: "enum[]", region: user_content, confidential: private, values: [confirmed, canceled]}

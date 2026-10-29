@@ -1,0 +1,14 @@
+# Book a table. It tells a third party who is coming and gives it the user's phone number, so egress, but it commits
+# no money (the user pays at the table), so tier 2, not 3: a lower tier than the hotel and the car, which commit money.
+# The restaurant is a destination that must trace to a trusted source. Typed `text` because names have spaces. The
+# start is "YYYY-MM-DD HH:MM", which the `date` validator rejects, so a `text` control. The reply is a fixed one-value
+# status (operator_content).
+tool: travel.reserve_restaurant
+description: Reserve a table at a restaurant at the given time.
+tier: 2
+egress: true
+args:
+  restaurant: {type: text, role: destination, max_len: 100, single_line: true}
+  start_time: {type: text, role: control, max_len: 16, single_line: true}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

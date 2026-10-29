@@ -1,0 +1,13 @@
+# Price range per night for the named hotels, as parallel arrays (element i of every array describes hotel i). Local
+# read. The hotel names are controls (they pick which listings to read). Prices are the platform's own listing data
+# (product_listing). The raw reply is "Price range: 120.0 - 180.0" per hotel; the converter splits it into two numbers.
+tool: travel.get_hotels_prices
+description: Get the minimum and maximum price of the named hotels.
+tier: 0
+egress: false
+args:
+  hotel_names: {type: "text[]", role: control, max: 20, max_len: 100}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}
+  price_mins: {type: "number[]", region: product_listing, confidential: public}
+  price_maxes: {type: "number[]", region: product_listing, confidential: public}

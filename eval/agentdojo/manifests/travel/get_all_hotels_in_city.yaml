@@ -1,0 +1,11 @@
+# List the hotels in a city. Local read, nothing leaves the machine. The city is a control: a tier-0 read with no
+# egress, so choosing a city can't send anything anywhere. The names are the platform's own listing data (product_listing): the business or the booking platform wrote them, not the user and not a reviewer. The raw reply is one string
+# ("Hotel Names: A\nB\n"); the converter splits it into a list.
+tool: travel.get_all_hotels_in_city
+description: List the names of the hotels in a given city.
+tier: 0
+egress: false
+args:
+  city: {type: text, role: control, max_len: 100, single_line: true}
+output:
+  names: {type: "text[]", region: product_listing, confidential: public}

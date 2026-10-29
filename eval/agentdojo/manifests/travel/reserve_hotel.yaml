@@ -1,0 +1,15 @@
+# Book a hotel for the given days. It commits the user's money with a third party and shares the user's phone number,
+# and there is no cancel tool, so tier 3 with egress. The hotel is the payee: a destination that must trace to a
+# trusted source (the user's request or the platform's listing, never a review). It is typed `text` (names have
+# spaces; `id` would refuse "Le Marais Boutique"). The days are ISO dates, which the `date` validator accepts. The
+# function returns a sentence that repeats the arguments, so the output is a fixed one-value status (operator_content).
+tool: travel.reserve_hotel
+description: Reserve a hotel for the given check-in and check-out days.
+tier: 3
+egress: true
+args:
+  hotel:     {type: text, role: destination, max_len: 100, single_line: true}
+  start_day: {type: date, role: control}
+  end_day:   {type: date, role: control}
+output:
+  status: {type: enum, region: operator_content, confidential: public, values: [done]}

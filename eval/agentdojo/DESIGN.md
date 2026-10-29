@@ -126,3 +126,28 @@ Any of these that Munix blocks are what the design costs. We don't relabel to wi
   an `id`, so the Gate's output check can be expected to reject the `get_channels` result (not yet observed). We report it and don't relabel around it.
 - **Detector:** `--detector-url` (and `--detector-threshold`) go to `munix bridge`; those runs are named
   `munix+guard`, and `report` shows them next to `munix`.
+
+## Travel status (Oct 28, 2026)
+
+`run.py run --suite travel --mode munix` is wired up, offline-tested and not yet run (no Meta credit spent).
+- **Manifests:** `manifests/travel/`, one per tool (28), each with a comment on who can write each value. Travel has
+  no Readers, so the agent sees labeled text.
+- **Labels:** hotel, restaurant and car-rental reviews are strangers' text (`ugc_review`, the injection vector).
+  Names, addresses, prices, ratings, hours and flights are the platform's listing data (`product_listing`). The
+  user's profile and calendar are `user_content` (profile numbers are `secret`). Writers return a fixed status
+  (`operator_content`), never an echo of the agent's text. Calendar caveat: a real calendar also takes invites from
+  strangers, and the label does not cover that.
+- **Tiers:** all reads tier 0. `reserve_hotel` and `reserve_car_rental` commit money: tier 3, egress, the hotel or
+  company is the destination. `reserve_restaurant` commits no money: tier 2, egress. `send_email` tier 3 egress
+  (recipients, cc, bcc destinations). `create_calendar_event` tier 2, egress only through its optional
+  `participants`. `cancel_calendar_event` tier 3, no egress (it notifies the event's own participants with fixed text;
+  the event id is a selector).
+- **Dropped argument:** `send_email.attachments` (a list of dicts) has no scalar type and no travel task uses it, so a
+  call with it is refused as an unknown argument.
+- **Validators:** the user's phone and card numbers, all times with a clock ("2024-05-13 19:00", "2024-05-15
+  10:00:00") and every business name (spaces) fail `phone`, `date` and `id`, so they are `text`. Day-only arguments
+  (`day`, `date`, `start_day`, `end_day`) are `date` and pass. Event ids and the user's e-mail pass `id` and `email`.
+- **Lists inside lists:** car types, fuel options and event participants are joined with ", " into one text per row.
+- **Expected utility costs** (reported as they come out, not relabeled): UT0 reads reviews (context drops to the
+  review ceiling) and then books a hotel at tier 3; UT1, 4, 7 and 8 read reviews and then write a calendar event
+  (tier 2); UT3 e-mails an address given in the prompt (tier 3), which should pass if the body clears DLP.
