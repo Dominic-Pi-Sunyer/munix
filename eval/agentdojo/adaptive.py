@@ -754,7 +754,9 @@ def cmd_replay(args) -> int:
     label = f"{args.mode}+guard" if args.detector_url else args.mode
     if args.target_model:
         label += f"-{args.target_model}"
-    out = RESULTS / f"adaptive--{suite_name}-replay-{label}-{stamp()}.json"
+    # The source search's own stamp keeps replays of different searches started in the same second apart.
+    src_stamp = Path(args.source).stem.rsplit("-", 1)[-1]
+    out = RESULTS / f"adaptive--{suite_name}-replay-{label}-from{src_stamp}-{stamp()}.json"
     config = {
         "mode": args.mode,
         "detector_url": args.detector_url,

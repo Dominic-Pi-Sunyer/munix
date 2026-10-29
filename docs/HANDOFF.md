@@ -6,24 +6,23 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-- **`visit` goal for the adaptive web attacker (Oct 28, Claude, uncommitted):** `scripts/adaptive_web.py`, its test, `fixtures/mock-web/{server.py,test_server.py,README.md}`. Opens `pixelmart-deals.test:8080/claim`; needs `127.0.0.1 pixelmart-deals.test` in /etc/hosts. Tests only; no paid run.
+_Last updated: Thu Oct 29, 2026 (early morning), by Claude (Opus 5.5)._
 
-- **Adaptive web attacker built, uncommitted, never run (Oct 28):** `scripts/adaptive_web.py`, the `adaptive` variant in `fixtures/mock-web/server.py`, `scripts/tests/test_adaptive_web.py`. Tests only; no paid run. Start the site with `MOCK_ADAPTIVE_DIR=$PWD/scripts/private/slots python3 -I fixtures/mock-web/server.py`.
-
-- **Headed browser for the demo video (Oct 28, Claude, uncommitted):** `WEBSPEED_HEADED=1` (+ `WEBSPEED_HEADED_HOLD_MS`)
-  makes Web Speed OSS read pages in a visible Chromium. web-speed-oss: `fetcher.py`, `server.py`, `README.md`,
-  `tests/test_headed.py`. Munix: `PASSED_ENV` in `webspeed.rs`, `demo/direct-server/server.py`, `demo/left.sh`,
-  `demo/right.sh`, `demo/README.md`, tests. Not committed in either repo.
-
-_Last updated: Wed Oct 28, 2026 (night), by Claude (Opus 5.5)._
-
-- **In progress (Oct 28, night): a visual website demo (owner-approved).** Two Sonnet builders, uncommitted:
-  - `scripts/adaptive_web.py` + a mock-site `adaptive` variant: Muse Spark writes a review against the unchanged
-    demo agent on PixelMart, scored in Mailpit (goals `exfil` and `link`). Winners withheld; payloads in
-    gitignored `scripts/private/`.
-  - Headed mode: `WEBSPEED_HEADED=1` in web-speed-oss (the owner's repo, owner-approved change) makes page reads
-    open a visible Chromium; `HEADED=1 demo/left.sh` / `demo/right.sh` pass it through.
-  - Next: the search (about $2–4), then replay the winner on both sides for the video.
+- **Data collection (Oct 29, owner's $25 cap, $21.83 spent).** The credit floor is temporarily $55.48 to enforce the
+  cap; the tracker now starts from an estimate, so reset it from the Meta dashboard
+  (`scripts/credit.py set <balance>`, floor back to 25).
+  - **Adaptive attacks:** 7 more broke bare Muse Spark (24 new pairs). Total 16 of 60 pairs; replays: bare 42/48,
+    Munix 0/48, Munix + Prompt Guard 0/48. Prompt Guard flagged 0/16 winners (7/402 of all AgentDojo payloads).
+  - **Model swap:** Muse Wonder 1.0 as the agent on the first 9 attacks: bare 7/27, Munix 0/27; banking utility
+    14/16 bare, 9/16 Munix.
+  - **Repeats (3 runs, no attack):** banking bare 15/14/14, Munix 10/10/11; Slack bare 20/19/19, Munix 2/2/2
+    (`results/repeats/`).
+  - **Travel suite:** 28 manifests (Sonnet); utility 18/20 bare, 12/20 Munix; goals 5/7 and 2/7. Attack phase stopped
+    for budget.
+  - `eval/agentdojo/layers.py`: what stopped each case (48 replays: 26 no attempt, 21 trace, 1 plan).
+  - Benchmark doc (Claude Doc, owner's): "Munix: Benchmark and Trial Results", updated with all of this.
+  - Fixed: replays of different searches started in the same second overwrote each other; names now carry the source
+    stamp, and the lost Wonder pair was rerun (same result).
 
 - **Hacked-page gap closed (Oct 28, night, owner-approved):** `dc42c41` and `855956b`, written up in
   `docs/redteam/security-review-oct28.md`.
