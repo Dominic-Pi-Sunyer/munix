@@ -6,7 +6,14 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
-_Last updated: Thu Oct 29, 2026 (early morning), by Claude (Opus 5.5)._
+_Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
+
+- **Stage 1 white-box red team (Oct 29, offline, done):** `crates/munix-gate/tests/redteam_whitebox.rs` (56 tests,
+  each asserts today's outcome) and `docs/redteam/whitebox-oct29.md`. Destination tracing held everywhere. Found:
+  control args (amount, date, recurring) are never traced or bounded, so an attacker's document (even via a typed
+  Reader) can set a payment's amount to the right recipient; free-text outputs labeled private/secret are not in
+  the DLP copy check; plan `from` on a control arg is a no-op that logs `trace_ok`; manifest `max` doesn't bound
+  negatives; no public-suffix list; pins are per host. No enforcement changes yet: fixes await the owner's pick.
 
 - **Data collection (Oct 29, owner's $25 cap, $21.83 spent).** The credit floor is temporarily $55.48 to enforce the
   cap; the tracker now starts from an estimate, so reset it from the Meta dashboard
