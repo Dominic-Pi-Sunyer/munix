@@ -8,11 +8,12 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
-- **In progress: Stage 2, an adaptive attacker that targets Munix** (Sonnet builder, no paid runs until the owner
-  OKs a budget). `eval/agentdojo/adaptive.py search --mode munix`: the target runs under Munix, the attacker gets
-  a short description of Munix's rules plus, each round, the Gate's first stop (code and reason name only, from
-  the ledger, as `layers.py` reads it); optional `--seed-from` starts each pair from an earlier search's winner.
-  Files: `adaptive.py`, `layers.py` (import only), `tests/test_adaptive.py`. Uncommitted.
+- **Stage 2 (Oct 29, owner's $5 budget, $4.70 spent):** `docs/redteam/adaptive-vs-munix-oct29.md`. The adaptive
+  attacker targeting Munix (`adaptive.py search --mode munix`) got 0 successes in 29 rounds; closest: Slack UT3×IT3
+  reached `confirm_user` 4 times. 9 banking rounds didn't start (planner `from` on untraced control args; fixed in
+  `700b4e2`, not rerun). Banking utility after the amount fix: 7/16 simuser, 6/16 no user (was 10 and 11); UT2 and
+  UT11 are the amount rule's cost, the rest unverified variance. Credit floor is $53.65 (room ~$0.30): reset from
+  the Meta dashboard before any paid run.
 - **Stage 1 fixes (Oct 29, owner-approved, done, uncommitted until this commit):** see the "Fixed (Oct 29)" section
   of `docs/redteam/whitebox-oct29.md`.
   - `trace: true` on control args (banking `amount` and `recurring`, with `min: 0`, `max: 100000` on amounts):
