@@ -183,6 +183,9 @@ def handle_call(msg_id, params):
         flags = {
             "model_api_key": "MODEL_API_KEY" in os.environ,
             "allow_hosts": os.environ.get("WEBSPEED_ALLOW_HOSTS"),
+            "unrelated": "MUNIX_UNRELATED_VAR" in os.environ,
+            "headed": os.environ.get("WEBSPEED_HEADED"),
+            "headed_hold_ms": os.environ.get("WEBSPEED_HEADED_HOLD_MS"),
             "read_flag": args.get("read"),
             "registry_sync": os.environ.get("WEB_SPEED_REGISTRY_SYNC"),
         }

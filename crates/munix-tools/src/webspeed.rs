@@ -44,7 +44,15 @@ const MAX_LINKS: usize = 50;
 /// Most entries in one template field built with `each`.
 const MAX_ITEMS: usize = 50;
 /// Parent environment variables the child may see.
-const PASSED_ENV: [&str; 4] = ["PATH", "HOME", "LANG", "PLAYWRIGHT_BROWSERS_PATH"];
+const PASSED_ENV: [&str; 6] = [
+    "PATH",
+    "HOME",
+    "LANG",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    // demo only: show the browser
+    "WEBSPEED_HEADED",
+    "WEBSPEED_HEADED_HOLD_MS",
+];
 
 /// How to launch Web Speed OSS.
 #[derive(Clone, Debug, PartialEq)]

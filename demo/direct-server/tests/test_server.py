@@ -140,3 +140,16 @@ def test_exposes_exactly_two_tools():
 def test_web_speed_registry_sync_is_always_off(monkeypatch):
     monkeypatch.setenv("WEB_SPEED_REGISTRY_SYNC", "true")
     assert server._webspeed_params().env["WEB_SPEED_REGISTRY_SYNC"] == "false"
+
+
+def test_headed_switches_pass_through_and_unrelated_vars_do_not(monkeypatch):
+    monkeypatch.setenv("WEBSPEED_HEADED", "1")
+    monkeypatch.setenv("WEBSPEED_HEADED_HOLD_MS", "2000")
+    monkeypatch.setenv("MODEL_API_KEY", "sk-test-secret")
+    env = server._webspeed_params().env
+    assert env["WEBSPEED_HEADED"] == "1"
+    assert env["WEBSPEED_HEADED_HOLD_MS"] == "2000"
+    assert "MODEL_API_KEY" not in env
+    monkeypatch.delenv("WEBSPEED_HEADED")
+    monkeypatch.delenv("WEBSPEED_HEADED_HOLD_MS")
+    assert "WEBSPEED_HEADED" not in server._webspeed_params().env

@@ -7,12 +7,16 @@ Routes (GET and HEAD, any Host header):
   /                          index linking to the review page
   /reviews/gaming-monitor    product page; `?variant=hidden` adds three hidden copies of the payload;
                              `?variant=v01`..`v10` serve the red-team variants (see VARIANTS)
+  /reviews/gaming-monitor?variant=adaptive&slot=<id>
+                             adaptive red-team page: the normal page plus one extra review whose text is read from
+                             `$MOCK_ADAPTIVE_DIR/<id>.txt` (404 when MOCK_ADAPTIVE_DIR is unset; see the README)
   /healthz                   plain-text `ok`
   anything else              404
 """
 
 import base64
 import os
+import re
 import sys
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -139,6 +143,12 @@ VARIANTS = {
     },
 }
 
+# The adaptive variant (scripts/adaptive_web.py): one extra visible review whose text comes from a file the harness
+# writes. Slot ids name the file, so they are validated; the file is capped and HTML-escaped like every other review.
+SLOT_RE = re.compile(r"[a-z0-9-]{1,40}")
+MAX_SLOT_BYTES = 4096
+ADAPTIVE_REVIEW = {"name": "verified_buyer_77", "stars": 4}
+
 PRODUCT_TITLE = 'Aurora G27Q 27" QHD 165Hz Gaming Monitor'
 
 SPECS = [
@@ -236,8 +246,21 @@ def render_index() -> bytes:
     return _page("PixelMart", body)
 
 
-def render_review_page(hidden: bool = False, variant: str | None = None) -> bytes:
-    """The product page. `variant` is a VARIANTS id; "v01" and "v02" are the default and `hidden` pages."""
+def read_slot(directory: str | None, slot: str | None) -> str | None:
+    """The text of `<directory>/<slot>.txt` (at most MAX_SLOT_BYTES), or None when the variant is off, the id is not
+    valid or the file is missing."""
+    if not directory or not slot or SLOT_RE.fullmatch(slot) is None:
+        return None
+    try:
+        with open(os.path.join(directory, slot + ".txt"), "rb") as f:
+            return f.read(MAX_SLOT_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def render_review_page(hidden: bool = False, variant: str | None = None, adaptive_text: str | None = None) -> bytes:
+    """The product page. `variant` is a VARIANTS id; "v01" and "v02" are the default and `hidden` pages.
+    `adaptive_text` adds one extra visible customer review with that text (escaped)."""
     spec = VARIANTS.get(variant) if variant else None
     if spec is not None and spec["place"] == "default":
         spec = None
@@ -272,6 +295,15 @@ def render_review_page(hidden: bool = False, variant: str | None = None) -> byte
             f'{r["stars"]} stars<span class="verified">Verified purchase</span></div>\n'
             f'<p class="text">{escape(review_texts[r["name"]])}</p>{extra}\n</article>'
         )
+    if adaptive_text is not None:
+        reviews.append(
+            f'<article class="review" data-reviewer="{ADAPTIVE_REVIEW["name"]}">\n'
+            f'<div class="meta"><strong>{ADAPTIVE_REVIEW["name"]}</strong> '
+            f'<span class="stars" aria-label="{ADAPTIVE_REVIEW["stars"]} out of 5 stars">'
+            f'{_stars(ADAPTIVE_REVIEW["stars"])}</span> '
+            f'{ADAPTIVE_REVIEW["stars"]} stars<span class="verified">Verified purchase</span></div>\n'
+            f'<p class="text">{escape(adaptive_text)}</p>\n</article>'
+        )
     body = (
         '<main>\n<div class="breadcrumb"><a href="/">Home</a> &rsaquo; <a href="/">Monitors</a> &rsaquo; '
         "Gaming Monitors</div>\n"
@@ -289,13 +321,20 @@ def render_review_page(hidden: bool = False, variant: str | None = None) -> byte
 class Handler(BaseHTTPRequestHandler):
     server_version = "PixelMartMock/1.0"
     protocol_version = "HTTP/1.1"
+    adaptive_dir: str | None = None  # set by make_server from MOCK_ADAPTIVE_DIR; None means the variant is off
 
     def _route(self):
         url = urlsplit(self.path)
         if url.path == "/":
             return 200, "text/html; charset=utf-8", render_index()
         if url.path == REVIEW_PATH:
-            ids = parse_qs(url.query).get("variant", [])
+            query = parse_qs(url.query)
+            ids = query.get("variant", [])
+            if "adaptive" in ids:
+                text = read_slot(self.adaptive_dir, (query.get("slot") or [None])[0])
+                if text is None:
+                    return 404, "text/plain; charset=utf-8", b"not found"
+                return 200, "text/html; charset=utf-8", render_review_page(adaptive_text=text)
             hidden = "hidden" in ids
             variant = next((i for i in ids if i in VARIANTS), None)
             return 200, "text/html; charset=utf-8", render_review_page(hidden, variant)
@@ -322,9 +361,12 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(False)
 
 
-def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    """Build the server bound to loopback. Pass port 0 for an ephemeral port (tests)."""
-    return ThreadingHTTPServer((HOST, port), Handler)
+def make_server(port: int = DEFAULT_PORT, adaptive_dir: str | None = None) -> ThreadingHTTPServer:
+    """Build the server bound to loopback. Pass port 0 for an ephemeral port (tests). The adaptive variant is on
+    only when `adaptive_dir` (default: the MOCK_ADAPTIVE_DIR env var, read now) is set."""
+    adaptive_dir = adaptive_dir or os.environ.get("MOCK_ADAPTIVE_DIR") or None
+    handler = type("BoundHandler", (Handler,), {"adaptive_dir": adaptive_dir})
+    return ThreadingHTTPServer((HOST, port), handler)
 
 
 def main() -> None:

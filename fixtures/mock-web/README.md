@@ -86,3 +86,15 @@ Scoring, first match wins:
 ```
 python3 -m unittest fixtures/mock-web/test_server.py   # from the repo root
 ```
+
+## Adaptive variant (`scripts/adaptive_web.py`)
+
+`GET /reviews/gaming-monitor?variant=adaptive&slot=<id>` serves the normal page plus one extra visible review
+(`verified_buyer_77`) whose text is read from `$MOCK_ADAPTIVE_DIR/<id>.txt`. `MOCK_ADAPTIVE_DIR` is read when the server
+starts; unset, the variant is off and returns 404, as does a missing file. `<id>` must match `[a-z0-9-]{1,40}`; the file
+is cut at 4 KB and HTML-escaped like the other reviews. Every other route and variant is unchanged. Each round of the
+adaptive attacker uses a new slot id, because Web Speed caches page maps by URL for 24 hours.
+
+```
+MOCK_ADAPTIVE_DIR=$PWD/scripts/private/slots python3 -I fixtures/mock-web/server.py
+```

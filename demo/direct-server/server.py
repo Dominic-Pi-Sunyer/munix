@@ -58,6 +58,10 @@ def _webspeed_params() -> StdioServerParameters:
         "WEBSPEED_ALLOW_HOSTS": os.environ.get("WEBSPEED_ALLOW_HOSTS") or DEFAULT_ALLOW_HOSTS,
         "WEB_SPEED_REGISTRY_SYNC": "false",
     }
+    # demo only: show the browser (Web Speed opens a visible Chromium window when WEBSPEED_HEADED=1)
+    for name in ("WEBSPEED_HEADED", "WEBSPEED_HEADED_HOLD_MS"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
     return StdioServerParameters(command=argv[0], args=argv[1:], env=env)
 
 

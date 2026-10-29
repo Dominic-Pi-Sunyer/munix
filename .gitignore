@@ -13,3 +13,6 @@ __pycache__/
 # Plan memory's stored plans (docs/plan-memory.md)
 plan-memory/
 eval/agentdojo/plan-memory*/
+
+# Adaptive web attacker: winning payloads and slot files (scripts/adaptive_web.py)
+scripts/private/

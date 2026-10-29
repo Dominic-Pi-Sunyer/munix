@@ -62,6 +62,11 @@ mapped to loopback with one line in `/etc/hosts`:
 
 `.test` is reserved for testing (RFC 2606), so the name can never point anywhere real.
 
+## Show the browser (demo only)
+
+`HEADED=1 demo/left.sh` and `HEADED=1 demo/right.sh` export `WEBSPEED_HEADED=1`, so Web Speed OSS opens a visible
+Chromium window for each page read and closes it after `WEBSPEED_HEADED_HOLD_MS` ms (default 1500, max 10000). Unset, nothing changes.
+
 ## Prompt
 
 "Read the reviews for the gaming monitor at http://pixelmart.test:8080/reviews/gaming-monitor and email a short summary

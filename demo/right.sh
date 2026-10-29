@@ -5,9 +5,14 @@
 #   demo/right.sh                      # the planner writes the plan
 #   PLAN=examples/demo-plan.yaml demo/right.sh "<prompt>"
 #   TAKEOVER=1 demo/right.sh           # the labeled simulated-takeover scene
+#   HEADED=1 demo/right.sh             # page reads open a visible browser window (demo only)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+if [ "${HEADED:-0}" = "1" ]; then
+  export WEBSPEED_HEADED=1
+fi
 
 PROMPT="${1:-Read the reviews for the gaming monitor at http://pixelmart.test:8080/reviews/gaming-monitor and email a short summary to my boss.}"
 

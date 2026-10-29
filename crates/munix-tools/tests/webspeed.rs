@@ -206,6 +206,9 @@ fn a_model_api_key_in_the_parent_does_not_reach_the_child() {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "secret_check_inner", "--ignored", "--nocapture"])
         .env("MODEL_API_KEY", "sk-test-secret")
+        .env("WEBSPEED_HEADED", "1")
+        .env("WEBSPEED_HEADED_HOLD_MS", "2000")
+        .env("MUNIX_UNRELATED_VAR", "x")
         .env("MUNIX_SECRET_CHECK_INNER", "1")
         .status()
         .unwrap();
@@ -222,10 +225,12 @@ fn secret_check_inner() {
         std::env::var("MODEL_API_KEY").as_deref(),
         Ok("sk-test-secret")
     );
-    assert_eq!(
-        env_flags(Some("127.0.0.1:8080"))["model_api_key"],
-        json!(false)
-    );
+    let flags = env_flags(Some("127.0.0.1:8080"));
+    assert_eq!(flags["model_api_key"], json!(false));
+    // demo only: the two browser switches pass through; unrelated variables still don't.
+    assert_eq!(flags["headed"], json!("1"));
+    assert_eq!(flags["headed_hold_ms"], json!("2000"));
+    assert_eq!(flags["unrelated"], json!(false));
 }
 
 #[test]

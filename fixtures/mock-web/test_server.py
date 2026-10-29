@@ -255,5 +255,132 @@ class PixelMartTests(unittest.TestCase):
             self.assertEqual(status, 404, path)
 
 
+class AdaptiveVariantTests(unittest.TestCase):
+    """`?variant=adaptive&slot=<id>`: one extra review read from $MOCK_ADAPTIVE_DIR/<id>.txt."""
+
+    def serve(self, adaptive_dir):
+        httpd = server.make_server(0, adaptive_dir=adaptive_dir)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+
+        def stop():
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(stop)
+        return httpd.server_address[1]
+
+    def get(self, port, path):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, resp.read().decode("utf-8")
+        finally:
+            conn.close()
+
+    def make_dir(self):
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return tmp.name
+
+    def test_off_when_dir_unset(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MOCK_ADAPTIVE_DIR", None)
+            port = self.serve(None)
+        status, _ = self.get(port, REVIEW + "?variant=adaptive&slot=abc")
+        self.assertEqual(status, 404)
+
+    def test_env_var_is_read_at_server_start(self):
+        import os
+        from unittest import mock
+
+        d = self.make_dir()
+        Path(d, "abc.txt").write_text("hello", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"MOCK_ADAPTIVE_DIR": d}):
+            port = self.serve(None)
+        status, body = self.get(port, REVIEW + "?variant=adaptive&slot=abc")
+        self.assertEqual(status, 200)
+        self.assertIn("hello", body)
+
+    def test_renders_extra_review_escaped(self):
+        d = self.make_dir()
+        text = "Great <b>monitor</b> & \"quotes\" <script>alert(1)</script>\nsecond line"
+        Path(d, "r1.txt").write_text(text, encoding="utf-8")
+        port = self.serve(d)
+        status, body = self.get(port, REVIEW + "?variant=adaptive&slot=r1")
+        self.assertEqual(status, 200)
+        self.assertIn(escape(text), body)
+        self.assertNotIn("<script>alert", body)
+        self.assertEqual(body.count('<article class="review"'), 4)
+        self.assertLess(body.index("casual_gamer_42"), body.index("verified_buyer_77"))
+
+    def test_other_reviews_still_there_and_default_payload_present(self):
+        d = self.make_dir()
+        Path(d, "r1.txt").write_text("x", encoding="utf-8")
+        port = self.serve(d)
+        _, body = self.get(port, REVIEW + "?variant=adaptive&slot=r1")
+        for name in ("pixel_pusher", "tech_fan_88", "casual_gamer_42"):
+            self.assertIn(name, body)
+
+    def test_text_is_capped_at_4kb(self):
+        d = self.make_dir()
+        Path(d, "big.txt").write_text("a" * 3000 + "b" * 3000, encoding="utf-8")
+        port = self.serve(d)
+        _, body = self.get(port, REVIEW + "?variant=adaptive&slot=big")
+        self.assertIn("a" * 3000 + "b" * 1096, body)
+        self.assertNotIn("b" * 1097, body)
+
+    def test_bad_or_missing_slots_404(self):
+        d = self.make_dir()
+        Path(d, "ok.txt").write_text("x", encoding="utf-8")
+        Path(d, "UP.txt").write_text("x", encoding="utf-8")
+        port = self.serve(d)
+        for q in (
+            "variant=adaptive",
+            "variant=adaptive&slot=",
+            "variant=adaptive&slot=missing",
+            "variant=adaptive&slot=UP",
+            "variant=adaptive&slot=..%2Fok",
+            "variant=adaptive&slot=ok.txt",
+            "variant=adaptive&slot=ok%00",
+            "variant=adaptive&slot=" + "a" * 41,
+        ):
+            status, _ = self.get(port, REVIEW + "?" + q)
+            self.assertEqual(status, 404, q)
+        self.assertEqual(self.get(port, REVIEW + "?variant=adaptive&slot=ok")[0], 200)
+
+    def test_slot_id_pattern(self):
+        for good in ("a", "a-1", "0" * 40):
+            self.assertIsNotNone(server.SLOT_RE.fullmatch(good), good)
+        for bad in ("", "A", "a_b", "a.b", "a/b", "a b", "a" * 41, "a\n"):
+            self.assertIsNone(server.SLOT_RE.fullmatch(bad), bad)
+
+    def test_old_pages_unchanged_with_adaptive_on(self):
+        d = self.make_dir()
+        port = self.serve(d)
+        _, default = self.get(port, REVIEW)
+        _, hidden = self.get(port, REVIEW + "?variant=hidden")
+        self.assertEqual(hashlib.sha256(default.encode()).hexdigest(), DEFAULT_PAGE_SHA256)
+        self.assertEqual(hashlib.sha256(hidden.encode()).hexdigest(), HIDDEN_PAGE_SHA256)
+        for vid in VARIANT_IDS:
+            self.assertEqual(
+                self.get(port, REVIEW + f"?variant={vid}")[1],
+                server.render_review_page(variant=vid).decode("utf-8"),
+                vid,
+            )
+
+    def test_adaptive_variant_does_not_change_other_routes(self):
+        port = self.serve(None)
+        self.assertEqual(self.get(port, "/healthz"), (200, "ok"))
+        self.assertEqual(self.get(port, "/nope")[0], 404)
+
+
 if __name__ == "__main__":
     unittest.main()
