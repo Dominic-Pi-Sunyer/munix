@@ -141,27 +141,44 @@ fn scalar_items(value: &Value) -> Vec<&Value> {
     }
 }
 
-/// Traces one destination or selector value: a `ref:` token resolves through the table, a raw string matches
-/// every entry holding exactly that string, plus (for `id` and `text`) the prompt-token match if `raw` is one.
+/// Traces one destination or selector value: a raw string matches every entry holding exactly that string, plus
+/// (for `id` and `text`) the prompt-token match if `raw` is one. A `ref:` token resolves through the table and then
+/// traces like its value written out: its own entry first, then every other entry holding the same value (so a ref
+/// to a stranger's copy of an IBAN the user typed also traces to the prompt). This adds nothing the agent could not
+/// get by writing the value raw; a ref to any other value matches only where that value came from.
 fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u32) -> Traced {
     if raw.starts_with("ref:")
         && let Ok(id) = raw.parse::<RefId>()
     {
         return match refs.get(&id) {
-            Some(entry) => Traced {
-                dest_host: destination_host(&entry.value, entry.scalar),
-                dest_value: Some(entry.value.clone()),
-                matches: vec![entry.to_match(id)],
-            },
+            Some(entry) => {
+                let mut matches = vec![entry.to_match(id.clone())];
+                matches.extend(value_matches(&entry.value, scalar, refs, Some(&id)));
+                Traced {
+                    dest_host: destination_host(&entry.value, entry.scalar),
+                    dest_value: Some(entry.value.clone()),
+                    matches,
+                }
+            }
             None => {
                 *unknown_refs = unknown_refs.saturating_add(1);
                 Traced::untraced()
             }
         };
     }
+    Traced {
+        matches: value_matches(raw, scalar, refs, None),
+        dest_host: destination_host(raw, scalar),
+        dest_value: Some(raw.to_owned()),
+    }
+}
+
+/// Every entry holding exactly `raw` (except `skip`), plus the prompt-token match for `id` and `text`.
+fn value_matches(raw: &str, scalar: Scalar, refs: &RefTable, skip: Option<&RefId>) -> Vec<Match> {
     let mut matches: Vec<Match> = refs
         .find_value(raw)
         .into_iter()
+        .filter(|(id, _)| Some(*id) != skip)
         .map(|(id, entry)| entry.to_match(id.clone()))
         .collect();
     if matches!(scalar, Scalar::Id | Scalar::Text)
@@ -169,11 +186,7 @@ fn trace_value(raw: &str, scalar: Scalar, refs: &RefTable, unknown_refs: &mut u3
     {
         matches.push(m);
     }
-    Traced {
-        matches,
-        dest_host: destination_host(raw, scalar),
-        dest_value: Some(raw.to_owned()),
-    }
+    matches
 }
 
 /// The lowercased host a destination value names, read from the value itself (never from where it came from):
@@ -1136,6 +1149,7 @@ mod tests {
     use crate::facts::Origin;
     use munix_core::label::{Author, Capacity, Confidential, Label, RegionType, Source, Trust};
     use munix_core::manifest::ArgType;
+    use munix_core::plan::SourcePath;
     use serde_json::json;
 
     fn label(trust: u8, confidential: Confidential) -> Label {
@@ -1495,6 +1509,46 @@ mod tests {
         assert!(facts.values[2].matches.is_empty());
         assert!(facts.values[3].matches.is_empty());
         assert_eq!(facts.unknown_refs, 1);
+    }
+
+    #[test]
+    fn a_ref_traces_like_its_value_written_out_and_no_further() {
+        let mut refs = RefTable::new();
+        refs.issue(
+            "GB29NWBK60161331926819",
+            Scalar::Iban,
+            Origin::Prompt,
+            label(100, Confidential::Public),
+        );
+        // A stranger's incoming payment lists the same IBAN the user typed, and another one.
+        let same = refs.issue(
+            "GB29NWBK60161331926819",
+            Scalar::Iban,
+            step(1, "paid_by"),
+            label(15, Confidential::Public),
+        );
+        let other = refs.issue(
+            "DE89370400440532013000",
+            Scalar::Iban,
+            step(1, "paid_by"),
+            label(15, Confidential::Public),
+        );
+        let facts = trace_arg(
+            &spec(Scalar::Iban, true, ArgRole::Destination),
+            &json!([same.as_str(), other.as_str(), "GB29NWBK60161331926819"]),
+            &refs,
+            &[],
+        );
+        let origins = |i: usize| -> Vec<&Origin> {
+            facts.values[i].matches.iter().map(|m| &m.origin).collect()
+        };
+        // The ref keeps its own origin first, and also traces to the prompt, as the raw value does.
+        assert_eq!(origins(0), vec![&step(1, "paid_by"), &Origin::Prompt]);
+        assert!(facts.values[0].satisfies(&[SourcePath::Prompt], None));
+        // A ref to a value the user never typed traces only to where it came from.
+        assert_eq!(origins(1), vec![&step(1, "paid_by")]);
+        assert!(!facts.values[1].satisfies(&[SourcePath::Prompt], None));
+        assert!(facts.values[2].satisfies(&[SourcePath::Prompt], None));
     }
 
     #[test]
