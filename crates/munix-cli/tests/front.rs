@@ -780,7 +780,10 @@ fn an_unknown_tool_is_a_takeover() {
     let script = Script::default();
     let mut front = h.front(&script);
     assert!(!front.should_stop());
-    refused(&front.call("mail_read", &json!({})), "denied: not permitted");
+    refused(
+        &front.call("mail_read", &json!({})),
+        "denied: not permitted",
+    );
     assert!(front.should_stop());
     assert_eq!(front.takeover(), Some(DenyCode::OffPlan));
     drop(front);
@@ -807,7 +810,10 @@ fn a_tier_2_tool_in_the_catalog_but_not_in_the_plan_is_denied_and_the_session_go
         ["web_open", "email_send"],
         "the agent is not offered it"
     );
-    refused(&front.call("news_read", &json!({})), "denied: not permitted");
+    refused(
+        &front.call("news_read", &json!({})),
+        "denied: not permitted",
+    );
     // Tier 2: the same coarse error, but the session goes on (the 3rd takeover-class deny halts).
     assert!(!front.should_stop());
     assert_eq!(front.takeover(), None);
