@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use munix_core::ids::RefId;
-use munix_core::label::{Confidential, Trust};
+use munix_core::label::{Confidential, RegionType, Trust};
 use munix_core::plan::{Plan, SourcePath};
 
 use crate::pins::Pins;
@@ -61,8 +61,7 @@ pub struct Match {
     pub trust: Trust,
     pub confidential: Confidential,
     /// `Some(n)` when the place this match came from is a web page: the opaque number of that page's host (the
-    /// label's `Source::Web { domain: n }`). `None` for every other source, including prompt-token and scalar
-    /// matches.
+    /// label's `Source::Web { domain: n }`). `None` for every other source, including prompt-token matches.
     pub web_domain: Option<u32>,
     /// True when the place this match came from holds content a stranger can write (the label's region is
     /// `RegionType::is_third_party`): a stranger's email in an inbox tool, a review, a profile, unclassified
@@ -70,6 +69,27 @@ pub struct Match {
     /// [`Traced::binds`]). False for the user's own data, a trusted service's own records, and prompt-token,
     /// scalar and clean-side (prompt, user data, store) matches.
     pub third_party: bool,
+    /// The region of the output field this match came from; `None` for prompt tokens, prompt numbers and dates.
+    /// Read by [`Match::is_own_record`].
+    pub region: Option<RegionType>,
+}
+
+impl Match {
+    /// True when the place this match came from is the user's or the operator's own say-so rather than a
+    /// stranger's: the prompt, user data or a store; or an output field of a `user_content` or `operator_content`
+    /// region that did not come from a web page. Binds a traced control value ([`Traced::value_binds`]).
+    pub fn is_own_record(&self) -> bool {
+        match self.origin {
+            Origin::Step { .. } => {
+                self.web_domain.is_none()
+                    && matches!(
+                        self.region,
+                        Some(RegionType::UserContent | RegionType::OperatorContent)
+                    )
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Everything the tracer found for one value. No matches means the value is untraced, which counts as trust 0
@@ -216,6 +236,18 @@ impl Traced {
             }
         }
         out
+    }
+
+    /// Binding for a traced control value (an amount, a date, a flag; see `ArgSpec::trace`): true when some match
+    /// satisfies the plan's `from` (when it has one) and `min_trust`, and [`Match::is_own_record`]. Domains and
+    /// pins play no part: a number has no host to bind to, and the user approving one amount says nothing about
+    /// the next. No match (an untraceable value) never binds.
+    pub fn value_binds(&self, from: Option<&[SourcePath]>, min_trust: Option<Trust>) -> bool {
+        self.matches.iter().any(|m| {
+            from.is_none_or(|f| f.iter().any(|p| m.origin.matches(p)))
+                && min_trust.is_none_or(|t| m.trust >= t)
+                && m.is_own_record()
+        })
     }
 
     /// The highest trust among the matches; 0 when untraced.

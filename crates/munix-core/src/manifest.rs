@@ -87,6 +87,10 @@ pub struct ArgSpec {
     /// largest value allowed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
+    /// For a single `int` or `number`, the smallest value allowed (signed, so `min: 0` refuses negatives). A
+    /// `max` alone is only a ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i32>,
     /// The most characters allowed in a string-shaped value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_len: Option<u32>,
@@ -96,6 +100,11 @@ pub struct ArgSpec {
     /// Text must not contain line breaks.
     #[serde(default, skip_serializing_if = "is_false")]
     pub single_line: bool,
+    /// Opt in to value tracing for a control argument (an amount, a date, a recurrence flag). Allowed only on a
+    /// single `role: control` value of type int, number, date or bool. The Gate then traces the value to the
+    /// prompt or to an earlier tool output, and on a tier 3 egress tool an unbound value goes to the user.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trace: bool,
 }
 
 /// One output field of a tool, and how the Gate labels it.
@@ -267,6 +276,26 @@ impl ToolManifest {
                     "a destination cannot be a bool, int, number, date or enum",
                 ));
             }
+            if arg.trace
+                && (arg.role != ArgRole::Control
+                    || arg.ty.list
+                    || !matches!(
+                        arg.ty.scalar,
+                        Scalar::Int | Scalar::Number | Scalar::Date | Scalar::Bool
+                    ))
+            {
+                return Err(invalid(
+                    "trace applies only to a single control int, number, date or bool",
+                ));
+            }
+            if let Some(min) = arg.min {
+                if arg.ty.list || !matches!(arg.ty.scalar, Scalar::Int | Scalar::Number) {
+                    return Err(invalid("min applies only to a single int or number"));
+                }
+                if arg.max.is_some_and(|max| i64::from(min) > i64::from(max)) {
+                    return Err(invalid("min cannot be above max"));
+                }
+            }
             if arg.ty.scalar == Scalar::Enum {
                 if !(1..=16).contains(&arg.values.len()) {
                     return Err(invalid("an enum needs 1-16 values"));
@@ -420,10 +449,74 @@ output:
             role,
             optional: false,
             max: None,
+            min: None,
             max_len: None,
             values: vec![],
             single_line: false,
+            trace: false,
         }
+    }
+
+    #[test]
+    fn trace_is_allowed_only_on_single_control_scalars_of_four_types() {
+        for ty in ["int", "number", "date", "bool"] {
+            let ok = with(|m| {
+                let mut a = arg(ty, ArgRole::Control);
+                a.trace = true;
+                m.args.insert("amount".into(), a);
+            });
+            assert!(ok.is_ok(), "{ty}");
+        }
+        for (ty, role) in [
+            ("text", ArgRole::Control),
+            ("enum", ArgRole::Control),
+            ("int[]", ArgRole::Control),
+            ("int", ArgRole::Selector),
+            ("int", ArgRole::Content),
+            ("iban", ArgRole::Destination),
+        ] {
+            let bad = with(|m| {
+                let mut a = arg(ty, role);
+                a.trace = true;
+                if ty == "enum" {
+                    a.values = vec!["a".into()];
+                }
+                m.args.insert("amount".into(), a);
+            });
+            assert!(bad.is_err(), "{ty} {role:?}");
+        }
+        let yaml = "
+tool: bank.pay
+description: Pay.
+tier: 3
+egress: true
+args:
+  amount: {type: number, role: control, trace: true, min: 0, max: 100000}
+";
+        let m = ToolManifest::from_yaml(yaml).unwrap();
+        assert!(m.args["amount"].trace);
+        assert_eq!(m.args["amount"].min, Some(0));
+        // The key changes the digest.
+        let plain = ToolManifest::from_yaml(&yaml.replace(" trace: true,", "")).unwrap();
+        assert_ne!(m.digest().unwrap(), plain.digest().unwrap());
+    }
+
+    #[test]
+    fn min_applies_only_to_a_single_int_or_number_and_not_above_max() {
+        let with_min = |ty: &str, min: i32, max: Option<u32>| {
+            with(|m| {
+                let mut a = arg(ty, ArgRole::Control);
+                a.min = Some(min);
+                a.max = max;
+                m.args.insert("n".into(), a);
+            })
+        };
+        assert!(with_min("int", -5, None).is_ok());
+        assert!(with_min("number", 0, Some(10)).is_ok());
+        assert!(with_min("number", 11, Some(10)).is_err());
+        assert!(with_min("text", 0, None).is_err());
+        assert!(with_min("date", 0, None).is_err());
+        assert!(with_min("int[]", 0, Some(3)).is_err());
     }
 
     #[test]

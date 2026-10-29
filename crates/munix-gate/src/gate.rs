@@ -27,7 +27,7 @@ use crate::policy::{DenyCode, Facts, Outcome, Ruling, evaluate, pin_candidates};
 use crate::refs::RefTable;
 use crate::seal::{SealCheck, Tamper};
 use crate::tool::{Tool, ToolFailure};
-use crate::trace::{trace_arg, trace_request};
+use crate::trace::{trace_arg, trace_arg_named, trace_request};
 use crate::vault::{Credential, Vault};
 
 /// Why the Gate refused to set something up. Returned to the runtime and the Supervisor, never to the agent.
@@ -127,7 +127,10 @@ pub struct PendingView {
     pub band: Band,
     pub args: Vec<PendingArg>,
     /// True when the Gate parked this request because a destination came from web content without naming that
-    /// page's own domain (the ruling carries a `.web_unbound` reason). A careful user would not approve it.
+    /// page's own domain (the ruling carries a `.web_unbound` reason), or because a traced control value (an
+    /// amount, a date, a flag) did not come from the user or their own records (a `.value_unbound` reason; the
+    /// argument's `sources` then say so in words). A careful user would not approve either, and the simulated
+    /// user declines both.
     pub web_unbound: bool,
 }
 
@@ -538,8 +541,21 @@ impl Gate {
             prompt_tokens(&envelope.text),
             user_label(Source::Prompt, Confidential::Internal),
         );
+        refs.record_prompt_scalars(&envelope.text);
         let mut store_names: BTreeSet<String> = BTreeSet::new();
-        for (name, key) in named_store_values(body, store) {
+        let named = named_store_values(body, store);
+        // Store values the plan never names are not issued to the agent, but the agent could still know one: they
+        // join the copy check as known values, so a `private` or `secret` one written into content is found.
+        for (name, keys) in store {
+            for (key, entry) in keys {
+                if entry.confidential >= Confidential::Private
+                    && !named.contains(&(name.clone(), key.clone()))
+                {
+                    refs.record_known(&entry.value, entry.confidential);
+                }
+            }
+        }
+        for (name, key) in named {
             let Some(entry) = store.get(&name).and_then(|keys| keys.get(&key)) else {
                 continue;
             };
@@ -1218,7 +1234,7 @@ impl Gate {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     },
-                    sources: describe_sources(raw, prompt_words(manifest, name), &t.refs),
+                    sources: describe_arg_sources(manifest, name, raw, &t.refs),
                     destination: manifest
                         .args
                         .get(name)
@@ -1232,7 +1248,10 @@ impl Gate {
             needs: parked.needs,
             band: parked.band,
             args,
-            web_unbound: parked.reasons.iter().any(|r| r.ends_with(".web_unbound")),
+            web_unbound: parked
+                .reasons
+                .iter()
+                .any(|r| r.ends_with(".web_unbound") || r.ends_with(".value_unbound")),
         })
     }
 
@@ -1662,6 +1681,19 @@ impl Gate {
             ),
             None => return Reply::Halted,
         };
+        // Free text or store secrets the copy check could not take in whole (see `RefTable::record_known`).
+        if self
+            .tasks
+            .get_mut(&request.task)
+            .is_some_and(|task| task.refs.take_known_capped())
+        {
+            let _ = self.log(request_event(
+                "known_values_capped",
+                request,
+                case.hash,
+                json!({"reason": "dlp.known_capped"}),
+            ));
+        }
         let delivered = match ingested {
             Ok(delivered) => delivered,
             Err(_) => {
@@ -1960,6 +1992,73 @@ fn describe_sources(value: &Value, prompt_words: bool, refs: &RefTable) -> Vec<S
     out
 }
 
+/// Where the values of argument `name` came from, for the Console. A traced control argument (an amount, a date, a
+/// flag) is described in plain words about who chose the value; everything else as [`describe_sources`].
+fn describe_arg_sources(
+    manifest: &ToolManifest,
+    name: &str,
+    raw: &Value,
+    refs: &RefTable,
+) -> Vec<String> {
+    let Some(spec) = manifest
+        .args
+        .get(name)
+        .filter(|s| s.role == ArgRole::Control && s.trace)
+    else {
+        return describe_sources(raw, prompt_words(manifest, name), refs);
+    };
+    let facts = trace_arg_named(name, spec, raw, refs, &[]);
+    let mut out = Vec::new();
+    for (traced, shown) in facts.values.iter().zip(control_values_text(raw)) {
+        if traced.matches.is_empty() {
+            out.push(format!(
+                "{name} {shown} matches nothing you wrote and no record (untraced)"
+            ));
+        }
+        for m in &traced.matches {
+            let place = match &m.origin {
+                Origin::Prompt => "the prompt".to_owned(),
+                Origin::UserData => "the user's data".to_owned(),
+                Origin::Store { name, key } => format!("store {name}.{key}"),
+                Origin::Step { step, field } => {
+                    let region = m
+                        .region
+                        .and_then(|r| serde_json::to_value(r).ok())
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    format!("step {step} {field}, {region}")
+                }
+            };
+            if m.is_own_record() {
+                out.push(format!("{place} (trust {})", m.trust.value()));
+            } else {
+                out.push(format!(
+                    "{name} {shown} came from a document, not from you ({place}, trust {})",
+                    m.trust.value()
+                ));
+            }
+        }
+    }
+    out.dedup();
+    out
+}
+
+/// The values of a control argument as text, one per element (a list gives several).
+fn control_values_text(raw: &Value) -> Vec<String> {
+    match raw {
+        Value::Null => Vec::new(),
+        Value::Array(items) => items.iter().map(control_value_text).collect(),
+        one => vec![control_value_text(one)],
+    }
+}
+
+fn control_value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// The summary of how a destination or selector argument traced, from `trace_arg` (the Gate's own tracer). `None`
 /// for any other role. Fails closed: no values means not clean-side and no trust.
 fn destination_trace(
@@ -2160,6 +2259,39 @@ fn traced_value_view(traced: &crate::facts::Traced, refs: &RefTable) -> crate::v
     }
 }
 
+/// The view of one traced control value: its sources only, from the matches (they have no ref).
+fn control_value_view(traced: &crate::facts::Traced) -> crate::view::ValueView {
+    let sources: Vec<crate::view::SourceView> = traced
+        .matches
+        .iter()
+        .map(|m| match (&m.origin, m.region) {
+            (Origin::Prompt, _) => crate::view::SourceView::Prompt { trust: m.trust },
+            (Origin::UserData, _) => crate::view::SourceView::UserData { trust: m.trust },
+            (Origin::Store { name, key }, _) => crate::view::SourceView::Store {
+                name: name.clone(),
+                key: key.clone(),
+                trust: m.trust,
+            },
+            (Origin::Step { step, field }, region) => crate::view::SourceView::Step {
+                step: *step,
+                field: field.clone(),
+                // A match always has a region for a step output; `Unclassified` is the lowest-trust fallback.
+                region: region.unwrap_or(RegionType::Unclassified),
+                domain: m.web_domain,
+                trust: m.trust,
+            },
+        })
+        .collect();
+    if sources.is_empty() {
+        return untraced_value_view();
+    }
+    crate::view::ValueView {
+        ref_id: None,
+        ty: None,
+        sources,
+    }
+}
+
 fn value_strings(value: &Value) -> Vec<&str> {
     match value {
         Value::String(s) => vec![s.as_str()],
@@ -2178,6 +2310,22 @@ fn review_arg(
     let ty = spec.ty.to_string();
     let role = spec.role;
     let control = role == ArgRole::Control || !spec.ty.scalar.is_string_shaped();
+    if role == ArgRole::Control && spec.trace {
+        // A traced control value (an amount, a date, a flag) is attacker-influenced, so the value itself is never
+        // shown. The reviewer sees only where it came from: source kind, step, field, region and trust.
+        let facts = trace_arg_named(name, spec, value, refs, credentials);
+        return crate::view::ArgView {
+            name: name.to_owned(),
+            ty,
+            role,
+            values: facts.values.iter().map(control_value_view).collect(),
+            chars: None,
+            embeds: Vec::new(),
+            raw_destinations: 0,
+            confidential: Confidential::Public,
+            control: true,
+        };
+    }
     if control {
         return crate::view::ArgView {
             name: name.to_owned(),
@@ -2270,6 +2418,8 @@ mod tests {
             max_len: None,
             values: Vec::new(),
             single_line: false,
+            min: None,
+            trace: false,
         }
     }
 

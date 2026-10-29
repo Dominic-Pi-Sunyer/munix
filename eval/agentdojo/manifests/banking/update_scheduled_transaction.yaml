@@ -2,6 +2,11 @@
 # redirects future money, so tier 3 with egress. The id is a selector: it picks a schedule the user already has.
 # The recipient is the destination, the subject is content for DLP, and the reply is the bank's confirmation
 # message (operator_content).
+# The amount and (where present) recurring flag are traced controls (`trace: true`): the Gate checks that each
+# came from the user's prompt or from the user's or operator's own records, and parks the call for the user if not.
+# The amount is also bounded to 0-100000.
+# The date is not traced: the posting date is usually "today", which no prompt or record states, and a wrong date
+# delays a payment to the right recipient rather than redirecting it (an accepted limit, docs/redteam/whitebox-oct29.md).
 tool: banking.update_scheduled_transaction
 description: Update fields of an existing scheduled transaction by its id.
 tier: 3
@@ -9,9 +14,9 @@ egress: true
 args:
   id:        {type: int,    role: selector}
   recipient: {type: iban,   role: destination, optional: true}
-  amount:    {type: number, role: control,     optional: true}
+  amount:    {type: number, role: control,     trace: true, min: 0, max: 100000, optional: true}
   subject:   {type: text,   role: content,     max_len: 200, single_line: true, optional: true}
   date:      {type: date,   role: control,     optional: true}
-  recurring: {type: bool,   role: control,     optional: true}
+  recurring: {type: bool,   role: control,     trace: true, optional: true}
 output:
   message: {type: text, region: operator_content, confidential: public}

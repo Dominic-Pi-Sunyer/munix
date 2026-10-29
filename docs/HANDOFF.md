@@ -8,6 +8,17 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
+- **Stage 1 fixes (Oct 29, owner-approved, done, uncommitted until this commit):** see the "Fixed (Oct 29)" section
+  of `docs/redteam/whitebox-oct29.md`.
+  - `trace: true` on control args (banking `amount` and `recurring`, with `min: 0`, `max: 100000` on amounts):
+    on tier-3 egress tools a value must come from the prompt or the user's/operator's own records, else
+    `ConfirmUser` (`<arg>.value_unbound`; the simulated user declines it). Dates are deliberately not traced.
+  - `Plan::validate` refuses `from`/`min_trust` on untraced control args; no vacuous `trace_ok`; `min` bound
+    (code `too_small`). Private/secret free text and unnamed store secrets join the DLP copy check.
+  - **Not yet measured:** AgentDojo utility under Munix will drop. Predicted newly parked banking tasks: UT0, 2,
+    3, 5, 10, 11, 12 (amount from the rent/bill Reader or computed). The rent demo's Munix side now asks the user
+    to approve the 1,200. The published numbers (README, benchmark doc) predate this. Rerunning costs money:
+    owner's call. Local plan-memory templates are keyed to the old catalog digest and will be relearned.
 - **Stage 1 white-box red team (Oct 29, offline, done):** `crates/munix-gate/tests/redteam_whitebox.rs` (56 tests,
   each asserts today's outcome) and `docs/redteam/whitebox-oct29.md`. Destination tracing held everywhere. Found:
   control args (amount, date, recurring) are never traced or bounded, so an attacker's document (even via a typed

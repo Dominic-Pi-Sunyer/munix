@@ -114,7 +114,14 @@ pub struct Facts<'a> {
 ///      bound the reason is `{name}.trace_ok`; if not, but every value passes the plain rule, the reason is
 ///      `{name}.web_unbound`, the other checks go on, and unless something denies, the outcome is `ConfirmUser`
 ///      whatever the band says (never `Allow` or `Gray`, never a takeover). Tiers 0-2 and tools without egress
-///      are not affected;
+///      are not affected. An argument with no values (`null`) logs no `trace_ok`;
+///    - **value binding**, the same idea for a control argument with `trace: true` (an amount, a date, a flag) of
+///      a tier 3 egress tool: each value must have a match that satisfies the rule's `from` and `min_trust` (when
+///      set) and is the user's or operator's own ([`Traced::value_binds`]: the prompt, user data, a store, or an
+///      output of region `user_content` or `operator_content`). Pins do not apply. If every value binds the
+///      reason is `{name}.trace_ok`; if one does not, or traces to nothing, it is `{name}.value_unbound` and the
+///      outcome is `ConfirmUser` exactly as for `.web_unbound` (a value that fails the plan's `from` is
+///      `UntrustedDestination` first). Without `trace`, a control argument is shape-checked only;
 ///    - a destination argument of a tier 1+ tool with no `from` rule: `UntrustedDestination`;
 ///    - content of an egress tool with `raw_destinations > 0`: `RawDestination`;
 ///    - `embedded` refs: each must trace to a clean-side origin (prompt, user data or a store), or satisfy
@@ -158,6 +165,12 @@ fn bind_env<'a>(facts: &Facts<'a>) -> BindEnv<'a> {
 /// True for the arguments domain binding applies to: a destination of a tier 3 egress tool.
 fn guarded(manifest: &ToolManifest, spec: &ArgSpec) -> bool {
     manifest.tier == 3 && manifest.egress && spec.role == ArgRole::Destination
+}
+
+/// True for the arguments value binding applies to: a control argument that opted in to tracing (`trace: true`:
+/// an amount, a date, a flag) on a tier 3 egress tool.
+fn value_guarded(manifest: &ToolManifest, spec: &ArgSpec) -> bool {
+    manifest.tier == 3 && manifest.egress && spec.role == ArgRole::Control && spec.trace
 }
 
 /// One value the user would pin by approving a request that was parked with `.web_unbound`.
@@ -264,19 +277,34 @@ fn check_request(facts: &Facts<'_>, reasons: &mut Vec<String>) -> Result<bool, D
         }
 
         let from = rule.and_then(|r| r.from.as_deref());
-        if let Some(from) = from {
-            let min_trust = rule.and_then(|r| r.min_trust);
-            if !arg.values.iter().all(|v| v.satisfies(from, min_trust)) {
-                reasons.push(format!("{name}.trace_untrusted"));
-                return Err(DenyCode::UntrustedDestination);
+        let min_trust = rule.and_then(|r| r.min_trust);
+        // The plan's `from` / `min_trust` rule: every value must satisfy it, for any argument it is set on.
+        if let Some(from) = from
+            && !arg.values.iter().all(|v| v.satisfies(from, min_trust))
+        {
+            reasons.push(format!("{name}.trace_untrusted"));
+            return Err(DenyCode::UntrustedDestination);
+        }
+        if value_guarded(facts.manifest, spec) {
+            // A traced control value of a tier 3 egress tool must also be bound: the prompt, or the user's or
+            // operator's own records, never a stranger's document. A value that traces to nothing is unbound too.
+            if arg.values.is_empty() {
+                // `null`: no value to bind.
+            } else if arg.values.iter().all(|v| v.value_binds(from, min_trust)) {
+                reasons.push(format!("{name}.trace_ok"));
+            } else {
+                reasons.push(format!("{name}.value_unbound"));
+                web_unbound = true;
             }
+        } else if let Some(from) = from {
             let env = bind_env(facts);
             if guarded(facts.manifest, spec)
                 && !arg.values.iter().all(|v| v.binds(from, min_trust, &env))
             {
                 reasons.push(format!("{name}.web_unbound"));
                 web_unbound = true;
-            } else {
+            } else if !arg.values.is_empty() {
+                // An argument with no values has nothing to trace: no `trace_ok` (an empty `all()` is vacuous).
                 reasons.push(format!("{name}.trace_ok"));
             }
         } else if spec.role == ArgRole::Destination && facts.manifest.tier >= 1 {
@@ -453,6 +481,7 @@ args:
             confidential,
             web_domain: None,
             third_party: false,
+            region: None,
         }
     }
 
@@ -1340,5 +1369,121 @@ args:
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("off_plan"));
         assert_eq!(serde_json::from_str::<Ruling>(&json).unwrap(), r);
+    }
+
+    const PAY: &str = "
+tool: bank.pay
+description: Pay someone.
+tier: 3
+egress: true
+args:
+  to:     {type: iban,   role: destination}
+  amount: {type: number, role: control, trace: true}
+  flag:   {type: bool,   role: control}
+";
+
+    fn pay_plan(amount_rule: &str) -> Plan {
+        Plan::from_yaml(&format!(
+            "plan: P-t\ntask: T-t\nprompt_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000\nreads: [operator_content]\nsteps:\n  - id: 1\n    tool: bank.pay\n    args:\n      to: {{from: [prompt]}}\n      amount: {amount_rule}\n    budget: 2\namendments:\n  auto_max_tier: 1\n"
+        ))
+        .unwrap()
+    }
+
+    fn record(region: munix_core::label::RegionType, trust: u8) -> Traced {
+        Traced {
+            matches: vec![Match {
+                region: Some(region),
+                ..matched(
+                    Origin::Step {
+                        step: 1,
+                        field: "amount_cents".into(),
+                    },
+                    trust,
+                    Confidential::Private,
+                )
+            }],
+            dest_host: None,
+            dest_value: None,
+        }
+    }
+
+    fn pay(rule: &str, amount: ArgFacts) -> Ruling {
+        run_with(
+            &pay_plan(rule),
+            1,
+            "bank.pay",
+            &manifest(PAY),
+            0,
+            Band::Clean,
+            &args(vec![
+                ("to", with_values(vec![traced(Origin::Prompt, 100)])),
+                ("amount", amount),
+            ]),
+        )
+    }
+
+    #[test]
+    fn a_traced_control_value_binds_only_to_the_prompt_or_own_records() {
+        use munix_core::label::RegionType::{OperatorContent, Unclassified, UserContent};
+        let ok = pay("{}", with_values(vec![traced(Origin::Prompt, 100)]));
+        assert_eq!(ok.outcome, Outcome::Allow, "{:?}", ok.reasons);
+        assert!(has_reason(&ok, "amount.trace_ok"));
+        for region in [OperatorContent, UserContent] {
+            let r = pay("{}", with_values(vec![record(region, 85)]));
+            assert_eq!(r.outcome, Outcome::Allow, "{region:?} {:?}", r.reasons);
+        }
+        // A stranger's document, or a value that traces to nothing, parks (never a deny, never Allow).
+        for amount in [
+            with_values(vec![record(Unclassified, 10)]),
+            with_values(vec![Traced::untraced()]),
+            // One bound value does not cover a second, unbound one.
+            with_values(vec![traced(Origin::Prompt, 100), Traced::untraced()]),
+        ] {
+            let r = pay("{}", amount);
+            assert_eq!(r.outcome, Outcome::ConfirmUser, "{:?}", r.reasons);
+            assert!(has_reason(&r, "amount.value_unbound"));
+            assert!(!has_reason(&r, "amount.trace_ok"));
+        }
+    }
+
+    #[test]
+    fn a_plan_from_rule_on_a_traced_control_value_must_also_hold() {
+        use munix_core::label::RegionType::OperatorContent;
+        // The record is own, but the plan says the amount must come from the prompt.
+        let r = pay(
+            "{from: [prompt]}",
+            with_values(vec![record(OperatorContent, 85)]),
+        );
+        assert_eq!(r.outcome, Outcome::Deny(DenyCode::UntrustedDestination));
+        let r = pay(
+            "{from: [prompt]}",
+            with_values(vec![traced(Origin::Prompt, 100)]),
+        );
+        assert_eq!(r.outcome, Outcome::Allow, "{:?}", r.reasons);
+        let r = pay("{from: [prompt]}", with_values(vec![Traced::untraced()]));
+        assert_eq!(r.outcome, Outcome::Deny(DenyCode::UntrustedDestination));
+    }
+
+    #[test]
+    fn no_trace_ok_is_logged_for_an_argument_with_no_values() {
+        let r = pay("{from: [prompt]}", ArgFacts::default());
+        assert!(!has_reason(&r, "amount.trace_ok"), "{:?}", r.reasons);
+        let r = pay("{}", ArgFacts::default());
+        assert!(!r.reasons.iter().any(|x| x.starts_with("amount.")));
+        // A control argument without `trace` is never value-checked.
+        let r = run_with(
+            &pay_plan("{}"),
+            1,
+            "bank.pay",
+            &manifest(PAY),
+            0,
+            Band::Clean,
+            &args(vec![
+                ("to", with_values(vec![traced(Origin::Prompt, 100)])),
+                ("amount", with_values(vec![traced(Origin::Prompt, 100)])),
+                ("flag", ArgFacts::default()),
+            ]),
+        );
+        assert!(!r.reasons.iter().any(|x| x.starts_with("flag.")));
     }
 }

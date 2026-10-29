@@ -223,6 +223,14 @@ impl Plan {
                 {
                     return Err(invalid("a forbidden argument cannot have other rules"));
                 }
+                if spec.role == ArgRole::Control
+                    && !spec.trace
+                    && (rule.from.is_some() || rule.min_trust.is_some())
+                {
+                    return Err(invalid(
+                        "from and min_trust apply to a control argument only when its manifest sets trace",
+                    ));
+                }
                 if let Some(from) = &rule.from {
                     self.check_sources(from, index, catalog)?;
                     if rule.min_trust.is_none()
@@ -443,6 +451,75 @@ amendments:
         assert!(Plan::from_yaml(&PLAN.replace("[operator_content,", "[bogus_region,")).is_err());
         assert!(Plan::from_yaml(&PLAN.replace("sha256:000", "sha256:XYZ")).is_err());
         assert!(Plan::from_yaml(&PLAN.replace("web.open", "Web Open")).is_err());
+    }
+
+    #[test]
+    fn from_and_min_trust_on_a_control_argument_need_trace() {
+        let pay = |trace: &str| {
+            ToolManifest::from_yaml(&format!(
+                "
+tool: bank.pay
+description: Pay someone.
+tier: 3
+egress: true
+args:
+  to:     {{type: iban,   role: destination}}
+  amount: {{type: number, role: control{trace}}}
+  flag:   {{type: bool,   role: control}}
+"
+            ))
+            .unwrap()
+        };
+        let plan_with = |amount: ArgRule, flag: ArgRule| Plan {
+            steps: vec![Step {
+                id: 1,
+                tool: "bank.pay".parse().unwrap(),
+                args: BTreeMap::from([
+                    (
+                        "to".to_owned(),
+                        ArgRule {
+                            from: Some(vec![SourcePath::Prompt]),
+                            ..ArgRule::default()
+                        },
+                    ),
+                    ("amount".to_owned(), amount),
+                    ("flag".to_owned(), flag),
+                ]),
+                budget: 1,
+            }],
+            ..plan()
+        };
+        let from_prompt = ArgRule {
+            from: Some(vec![SourcePath::Prompt]),
+            ..ArgRule::default()
+        };
+        let min_trust = ArgRule {
+            min_trust: Some(Trust::new(50)),
+            ..ArgRule::default()
+        };
+        let forbid = ArgRule {
+            forbid: Some(true),
+            ..ArgRule::default()
+        };
+        let check_with = |trace: &str, amount: ArgRule, flag: ArgRule| {
+            plan_with(amount, flag)
+                .validate(&Catalog::from_manifests([pay(trace)]).unwrap())
+                .is_ok()
+        };
+        // Untraced control argument: from / min_trust are refused, forbid and no rule are fine.
+        assert!(!check_with("", from_prompt.clone(), ArgRule::default()));
+        assert!(!check_with("", min_trust.clone(), ArgRule::default()));
+        assert!(!check_with("", ArgRule::default(), from_prompt.clone()));
+        assert!(check_with("", forbid.clone(), forbid.clone()));
+        assert!(check_with("", ArgRule::default(), ArgRule::default()));
+        // Traced: from and min_trust are allowed (the flag still is not traced).
+        assert!(check_with(", trace: true", from_prompt.clone(), forbid));
+        assert!(check_with(", trace: true", min_trust, ArgRule::default()));
+        assert!(!check_with(
+            ", trace: true",
+            ArgRule::default(),
+            from_prompt
+        ));
     }
 
     #[test]

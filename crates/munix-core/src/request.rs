@@ -36,6 +36,8 @@ pub enum ViolationCode {
     TooMany,
     TooLong,
     NotInEnum,
+    /// A number or int below the manifest's `min`.
+    TooSmall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +97,7 @@ impl Request {
 /// Checks one argument value against its spec. String-shaped scalars accept a `ref:` id in place of the value.
 pub fn check_arg_value(spec: &ArgSpec, v: &Value) -> Result<(), ViolationCode> {
     if !spec.ty.list {
-        return check_scalar(spec, v, spec.max);
+        return check_scalar(spec, v, spec.max, spec.min);
     }
     let Value::Array(items) = v else {
         return Err(ViolationCode::WrongType);
@@ -105,10 +107,15 @@ pub fn check_arg_value(spec: &ArgSpec, v: &Value) -> Result<(), ViolationCode> {
     }
     items
         .iter()
-        .try_for_each(|item| check_scalar(spec, item, None))
+        .try_for_each(|item| check_scalar(spec, item, None, None))
 }
 
-fn check_scalar(spec: &ArgSpec, v: &Value, value_max: Option<u32>) -> Result<(), ViolationCode> {
+fn check_scalar(
+    spec: &ArgSpec,
+    v: &Value,
+    value_max: Option<u32>,
+    value_min: Option<i32>,
+) -> Result<(), ViolationCode> {
     let scalar = spec.ty.scalar;
     match scalar {
         Scalar::Bool => v.is_boolean().then_some(()).ok_or(ViolationCode::WrongType),
@@ -118,6 +125,8 @@ fn check_scalar(spec: &ArgSpec, v: &Value, value_max: Option<u32>) -> Result<(),
                 Err(ViolationCode::WrongType)
             } else if value_max.is_some_and(|max| n > i64::from(max)) {
                 Err(ViolationCode::TooMany)
+            } else if value_min.is_some_and(|min| n < i64::from(min)) {
+                Err(ViolationCode::TooSmall)
             } else {
                 Ok(())
             }
@@ -139,6 +148,8 @@ fn check_scalar(spec: &ArgSpec, v: &Value, value_max: Option<u32>) -> Result<(),
                 .ok_or(ViolationCode::WrongType)?;
             if value_max.is_some_and(|max| f > f64::from(max)) {
                 Err(ViolationCode::TooMany)
+            } else if value_min.is_some_and(|min| f < f64::from(min)) {
+                Err(ViolationCode::TooSmall)
             } else {
                 Ok(())
             }
@@ -213,6 +224,32 @@ mod tests {
 
     fn spec(ty: &str) -> ArgSpec {
         serde_json::from_value(json!({"type": ty, "role": "control"})).unwrap()
+    }
+
+    #[test]
+    fn min_refuses_values_below_it_and_max_still_caps_the_top() {
+        let mut n = spec("number");
+        n.min = Some(0);
+        n.max = Some(100_000);
+        for ok in [json!(0), json!(0.01), json!(1200.5), json!(100_000)] {
+            assert_eq!(check_arg_value(&n, &ok), Ok(()), "{ok}");
+        }
+        for (bad, code) in [
+            (json!(-0.01), ViolationCode::TooSmall),
+            (json!(-5000), ViolationCode::TooSmall),
+            (json!(100_000.5), ViolationCode::TooMany),
+        ] {
+            assert_eq!(check_arg_value(&n, &bad), Err(code), "{bad}");
+        }
+        let mut i = spec("int");
+        i.min = Some(-10);
+        assert_eq!(check_arg_value(&i, &json!(-10)), Ok(()));
+        assert_eq!(
+            check_arg_value(&i, &json!(-11)),
+            Err(ViolationCode::TooSmall)
+        );
+        // Without a min, a negative still passes (the old behaviour).
+        assert_eq!(check_arg_value(&spec("number"), &json!(-3)), Ok(()));
     }
 
     #[test]

@@ -1,15 +1,20 @@
 # Schedule a payment (one-off or recurring) from the user's account. It moves money later, so tier 3 with egress.
 # Same labels as send_money: the recipient is the destination, the subject is content for DLP, and the reply is the
 # bank's confirmation message (operator_content).
+# The amount and (where present) recurring flag are traced controls (`trace: true`): the Gate checks that each
+# came from the user's prompt or from the user's or operator's own records, and parks the call for the user if not.
+# The amount is also bounded to 0-100000.
+# The date is not traced: the posting date is usually "today", which no prompt or record states, and a wrong date
+# delays a payment to the right recipient rather than redirecting it (an accepted limit, docs/redteam/whitebox-oct29.md).
 tool: banking.schedule_transaction
 description: Schedule a future or recurring payment from the user's account.
 tier: 3
 egress: true
 args:
   recipient: {type: iban,   role: destination}
-  amount:    {type: number, role: control}
+  amount:    {type: number, role: control, trace: true, min: 0, max: 100000}
   subject:   {type: text,   role: content, max_len: 200, single_line: true}
   date:      {type: date,   role: control}
-  recurring: {type: bool,   role: control}
+  recurring: {type: bool,   role: control, trace: true}
 output:
   message: {type: text, region: operator_content, confidential: public}

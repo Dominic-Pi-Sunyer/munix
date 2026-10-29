@@ -43,8 +43,23 @@ use crate::vault::Credential;
 ///   element) is matched exactly (canonical JSON equality) against the scalar values the Gate delivered from tool
 ///   outputs (`RefTable::find_scalar`), so a numeric id must have come from a step output to pass a `from` rule.
 ///   A value nothing delivered is traced as untraced. Prompt numerals are not recorded.
-/// - Everything else (control arguments, content numbers, bools, enums) gives default facts.
+/// - A control argument with `trace: true` (an int, number, date or bool): one `Traced` per value, matched by
+///   [`RefTable::find_control`] (the prompt's numbers and ISO dates, then delivered outputs, with the `_cents`
+///   unit rule keyed on the argument name given to [`trace_arg_named`]).
+/// - Everything else (other control arguments, content numbers, bools, enums) gives default facts.
 pub fn trace_arg(
+    spec: &ArgSpec,
+    value: &Value,
+    refs: &RefTable,
+    credentials: &[&Credential],
+) -> ArgFacts {
+    trace_arg_named("", spec, value, refs, credentials)
+}
+
+/// [`trace_arg`] for the argument called `name` (the name matters only for the `_cents` unit rule of a traced
+/// control argument).
+pub fn trace_arg_named(
+    name: &str,
     spec: &ArgSpec,
     value: &Value,
     refs: &RefTable,
@@ -52,6 +67,16 @@ pub fn trace_arg(
 ) -> ArgFacts {
     let mut facts = ArgFacts::default();
     let scalar = spec.ty.scalar;
+    if spec.role == ArgRole::Control && spec.trace {
+        for item in scalar_items(value) {
+            facts.values.push(Traced {
+                matches: refs.find_control(scalar, item, name),
+                dest_host: None,
+                dest_value: None,
+            });
+        }
+        return facts;
+    }
     if !scalar.is_string_shaped() {
         if matches!(spec.role, ArgRole::Destination | ArgRole::Selector) {
             for item in scalar_items(value) {
@@ -280,7 +305,7 @@ fn scan_text(text: &str, refs: &RefTable, credentials: &[&Credential], facts: &m
 }
 
 /// Known values shorter than this are not treated as copied into text (too many accidental hits).
-const MIN_COPIED_LEN: usize = 6;
+pub(crate) const MIN_COPIED_LEN: usize = 6;
 
 /// Values shorter than this are only checked plainly: no base64 or hex form is looked for.
 const MIN_ENCODED_LEN: usize = 8;
@@ -438,17 +463,24 @@ fn known_value_level(
     alone: &[Vec<View>],
 ) -> Option<Confidential> {
     let mut found: Option<Confidential> = None;
-    for (_, entry) in refs.iter() {
-        let level = entry.label.confidential;
+    for (value, level) in known_iter(refs) {
         if level < floor || found.is_some_and(|f| f >= level) {
             continue;
         }
-        let needle = Needle::new(&entry.value, min_plain, level >= Confidential::Private);
+        let needle = Needle::new(value, min_plain, level >= Confidential::Private);
         if needle.in_views(views) && !alone.iter().any(|v| needle.in_views(v)) {
             found = Some(level);
         }
     }
     found
+}
+
+/// Every value the copy check looks for: the ref table's entries, then the free text and store secrets the Gate
+/// registered without a ref ([`RefTable::record_known`]), each with its confidentiality.
+fn known_iter(refs: &RefTable) -> impl Iterator<Item = (&str, Confidential)> {
+    refs.iter()
+        .map(|(_, e)| (e.value.as_str(), e.label.confidential))
+        .chain(refs.known_values())
 }
 
 fn text_has_credential(views: &[View], credentials: &[&Credential], min_plain: usize) -> bool {
@@ -507,15 +539,9 @@ impl<'a> SplitScan<'a> {
             .map(|c| Needle::new(c.expose_secret(), MIN_SPLIT_LEN, true))
             .filter(|n| !whole(n))
             .collect();
-        let mut known: Vec<(Confidential, Needle<'a>)> = refs
-            .iter()
-            .filter(|(_, e)| e.label.confidential >= Confidential::Private)
-            .map(|(_, e)| {
-                (
-                    e.label.confidential,
-                    Needle::new(&e.value, MIN_SPLIT_LEN, true),
-                )
-            })
+        let mut known: Vec<(Confidential, Needle<'a>)> = known_iter(refs)
+            .filter(|(_, level)| *level >= Confidential::Private)
+            .map(|(value, level)| (level, Needle::new(value, MIN_SPLIT_LEN, true)))
             .filter(|(_, n)| !whole(n))
             .collect();
         known.sort_by_key(|(level, _)| std::cmp::Reverse(*level));
@@ -658,7 +684,10 @@ pub fn trace_request(
         let Some(spec) = specs.get(name) else {
             continue;
         };
-        out.insert(name.clone(), trace_arg(spec, value, refs, credentials));
+        out.insert(
+            name.clone(),
+            trace_arg_named(name, spec, value, refs, credentials),
+        );
         if spec.role == ArgRole::Content
             && spec.ty.scalar.is_string_shaped()
             && spec.ty.scalar != Scalar::Ref
@@ -705,10 +734,9 @@ fn split_hits(
     let alone: Vec<Vec<View>> = pieces.iter().map(|p| views_of(p)).collect();
     // A value that is not inside one piece but is inside a join must cross a boundary, so only the text near each
     // piece's ends matters: long pieces are cut down to their first and last `width` bytes before joining.
-    let longest = refs
-        .iter()
-        .filter(|(_, e)| e.label.confidential >= Confidential::Private)
-        .map(|(_, e)| e.value.len())
+    let longest = known_iter(refs)
+        .filter(|(_, level)| *level >= Confidential::Private)
+        .map(|(value, _)| value.len())
         .chain(credentials.iter().map(|c| c.expose_secret().len()))
         .max()
         .unwrap_or(0);
@@ -1130,6 +1158,8 @@ mod tests {
             max_len: None,
             values: Vec::new(),
             single_line: false,
+            min: None,
+            trace: false,
         }
     }
 

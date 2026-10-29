@@ -45,7 +45,10 @@ a \"step.<id>\" source) or null;
     - \"forbid\": true to forbid an optional argument (when true, all other fields on that rule \
 must be null), or null. On read-only tools (tier 0) never forbid control arguments (counts, \
 flags): they carry no destination or data. On any other tool, forbid a control argument (amount, \
-date, recurring) whenever the task does not call for changing it;
+date, recurring) whenever the task does not call for changing it. Never write \"from\" or \"min_trust\" on a \
+control argument unless the catalog marks it \"traced\"; on a traced control argument (an amount, a date) \
+leave \"from\" null unless the task needs a specific source, because the Gate already checks that the value \
+came from the prompt or the user's own records;
   - \"budget\": maximum calls for this step (integer 1 to 10).
 - \"amendments\": {\"auto_max_tier\": 0 or 1}.
 
@@ -401,9 +404,10 @@ fn format_user_prompt(
             } else {
                 "required"
             };
+            let traced = if spec.trace { ", traced" } else { "" };
             let _ = writeln!(
                 out,
-                "  arg {arg_name}: type={}, role={}, {opt}",
+                "  arg {arg_name}: type={}, role={}, {opt}{traced}",
                 spec.ty,
                 role_name(spec.role)
             );
@@ -1014,6 +1018,27 @@ amendments:
         eprintln!(
             "live plan: {}",
             serde_json::to_string_pretty(verified).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_catalog_text_marks_traced_control_arguments() {
+        let m = ToolManifest::from_yaml(
+            "tool: bank.pay\ndescription: Pay.\ntier: 3\negress: true\nargs:\n  amount: {type: number, role: control, trace: true}\n  flag: {type: bool, role: control}\n",
+        )
+        .unwrap();
+        let catalog = Catalog::from_manifests([m]).unwrap();
+        let text = format_user_prompt("pay", &catalog, &BTreeMap::new());
+        assert!(
+            text.contains("arg amount: type=number, role=control, required, traced"),
+            "{text}"
+        );
+        assert!(
+            text.contains("arg flag: type=bool, role=control, required\n"),
+            "{text}"
+        );
+        assert!(
+            SYSTEM_PROMPT.contains("Never write \"from\" or \"min_trust\" on a control argument")
         );
     }
 }

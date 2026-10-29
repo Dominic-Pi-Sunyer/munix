@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use munix_core::context::Band;
 use munix_core::detect::DETECTOR_FLAGGED;
 use munix_core::ids::RefId;
-use munix_core::label::{Author, Capacity, Label, RegionType, Source, Trust};
+use munix_core::label::{Author, Capacity, Confidential, Label, RegionType, Source, Trust};
 use munix_core::manifest::{ArgRole, ArgSpec, OutputSpec, TYPED_BUDGET_BITS, ToolManifest};
 use munix_core::request::check_arg_value;
 use munix_core::validate::Scalar;
@@ -175,9 +175,11 @@ fn check_value(spec: &OutputSpec, value: &Value) -> Result<(), IngestError> {
         role: ArgRole::Content,
         optional: false,
         max: spec.max,
+        min: None,
         max_len: None,
         values: spec.values.clone(),
         single_line: false,
+        trace: false,
     };
     let forged = match value {
         Value::String(s) => s.parse::<RefId>().is_ok(),
@@ -237,6 +239,72 @@ fn note_scalar(value: &Value, step: u32, field: &str, label: &Label, refs: &mut 
     refs.record_scalar(value, origin, label.clone());
 }
 
+/// The longest text (bytes) registered whole for the copy check, and the longest fragment.
+const MAX_KNOWN_BYTES: usize = 16 * 1024;
+/// The shortest sentence or line registered as a fragment of a longer text (characters).
+const MIN_FRAGMENT_CHARS: usize = 20;
+/// The most fragments registered from one delivered text.
+const MAX_FRAGMENTS_PER_TEXT: usize = 64;
+
+/// Registers a `private` or `secret` free-text value the agent receives whole, so a copy of it (or of one of its
+/// lines or sentences of at least [`MIN_FRAGMENT_CHARS`] characters) in a content argument is found by the copy
+/// check. No ref is issued and the text is delivered as it is. Values shorter than the copy check's minimum are
+/// not registered (same rule as for table entries). At most [`MAX_FRAGMENTS_PER_TEXT`] fragments per text and
+/// [`MAX_KNOWN_BYTES`] bytes per registered piece; anything left out raises the table's capped flag, which the
+/// Gate writes to the ledger.
+fn register_known_text(text: &str, level: Confidential, refs: &mut RefTable) {
+    let trimmed = text.trim();
+    if trimmed.chars().count() < crate::trace::MIN_COPIED_LEN {
+        return;
+    }
+    if trimmed.len() <= MAX_KNOWN_BYTES {
+        if !refs.record_known(trimmed, level) {
+            return;
+        }
+    } else {
+        refs.note_known_capped();
+    }
+    let mut count = 0usize;
+    for fragment in fragments(trimmed) {
+        if fragment == trimmed || fragment.chars().count() < MIN_FRAGMENT_CHARS {
+            continue;
+        }
+        if count >= MAX_FRAGMENTS_PER_TEXT || fragment.len() > MAX_KNOWN_BYTES {
+            refs.note_known_capped();
+            continue;
+        }
+        count += 1;
+        if !refs.record_known(fragment, level) {
+            return;
+        }
+    }
+}
+
+/// The lines of `text`, each further cut after `.`, `!` or `?` followed by white space, trimmed, empties dropped.
+fn fragments(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut start = 0usize;
+        let mut chars = line.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            let ends = matches!(c, '.' | '!' | '?')
+                && chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+            if ends {
+                let end = i + c.len_utf8();
+                if let Some(piece) = line.get(start..end) {
+                    out.push(piece.trim());
+                }
+                start = end;
+            }
+        }
+        if let Some(rest) = line.get(start..) {
+            out.push(rest.trim());
+        }
+    }
+    out.retain(|f| !f.is_empty());
+    out
+}
+
 /// Replaces url, email and phone values with refs, defuses `ref:` in every other string, and records delivered
 /// int, number, bool and enum values in the table.
 fn swap(
@@ -262,8 +330,13 @@ fn swap(
             Value::String(id.as_str().to_owned())
         }
         Value::String(s) => {
-            if scalar == Scalar::Enum {
+            if matches!(scalar, Scalar::Enum | Scalar::Date) {
                 note_scalar(&Value::String(s.clone()), step, field, label, refs);
+            }
+            if matches!(scalar, Scalar::Text | Scalar::Id)
+                && label.confidential >= Confidential::Private
+            {
+                register_known_text(&s, label.confidential, refs);
             }
             Value::String(s.replace("ref:", "ref-"))
         }
