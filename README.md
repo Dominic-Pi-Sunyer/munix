@@ -43,13 +43,14 @@ can propose actions but can't take them. Every action goes through code that kno
 ### What it guarantees, and what it doesn't
 
 - **It guarantees:** content an attacker controls can't make the agent send your data or money to a destination you
-  didn't name or approve, whichever model runs the agent. Swapping models changes how useful the agent is, never how
+  didn't name or approve, whichever model runs the agent. Payment amounts and recurrence are traced too: an amount
+  that didn't come from you or your own records waits for your OK. Swapping models changes how useful the agent is, never how
   safe it is.
 - **It doesn't make the agent smarter.** An attacker can still make an agent give up or do a worse job. A task that
   really does mean acting on a stranger's word, such as paying the account number in a file nobody vouched for,
   stops and asks you first.
 
-## Status (Oct 28, day 3 of 10): every piece works end to end
+## Status (Oct 29, day 4 of 10): every piece works end to end, and we attacked it
 
 | Piece | What it does |
 | :-- | :-- |
@@ -61,6 +62,10 @@ can propose actions but can't take them. Every action goes through code that kno
 | Recovery and watchdog | A takeover or a stall kills the agent. Munix withholds exactly the content behind it and restarts a clean agent, at most twice |
 | Integrity Seal | Any write to Munix's own code, manifests, plans or config while a task runs stops every task |
 | Ledger | Every decision, with its reasons, goes into a hash-chained audit log |
+| Refusals | The agent hears only "denied: not permitted" (or that you declined), never which rule tripped, so there's nothing to work around. The reasons go to the ledger |
+
+New on day 4: a white-box red team of the Gate (65 offline tests), fixes for what it found (attacker-chosen payment
+amounts, private text copied into messages), an adaptive attacker aimed at Munix itself, and utility fixes.
 
 ## Results
 
@@ -68,20 +73,34 @@ can propose actions but can't take them. Every action goes through code that kno
 
 Muse Spark resists the public injection attacks we tried on its own. So an adaptive attacker had Muse Spark write
 fresh injections against the unprotected agent in [AgentDojo](https://github.com/ethz-spylab/agentdojo), learning from
-each failed round. It found **9 that work**: they redirect a rent payment, drain the account, leak private data in a
-payment, or send the agent to a phishing site.
+each failed round. Across 60 (task, goal) pairs it found **16 that work**: they redirect a rent payment, drain the
+account, leak private data in a payment, send a coworker a phishing link, or send the agent to a phishing site.
 
-| 9 attacks, 3 replays each | Attack succeeded |
+| 16 attacks, 3 replays each | Attack succeeded |
 | :-- | --: |
-| Muse Spark, no protection | **24 / 27** |
-| The same agent under Munix | **0 / 27** |
-| Under Munix with Llama Prompt Guard 2 | **0 / 27** |
-| Llama Prompt Guard 2 alone, scoring the attack text | flagged **0 / 9** |
+| Muse Spark, no protection | **42 / 48** |
+| The same agent under Munix | **0 / 48** |
+| Under Munix with Llama Prompt Guard 2 | **0 / 48** |
+| Llama Prompt Guard 2 alone, scoring the attack text | flagged **0 / 16** |
+| Swap the agent for Muse Wonder (first 9 attacks): no protection / under Munix | 7 / 27 / **0 / 27** |
 
 In banking, the Readers stopped the attacks: the poisoned file and payment notes reached the agent only as typed
 values, so it never tried. In Slack, the agent did try to open the phishing site, and the Gate denied the call in code:
 the URL came from a web page, not from the user. The working attack text stays private until it's reported to Meta.
 See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prompt-guard.md).
+
+### Attacking Munix itself
+
+- **White box.** 65 offline Gate tests play an attacker who knows the code
+  ([`docs/redteam/whitebox-oct29.md`](docs/redteam/whitebox-oct29.md)). Destination tracing held everywhere. Two
+  real holes turned up and are fixed: an attacker's document could set a payment's *amount* (to the right
+  recipient), and private free text could be copied into a message. Known limits stay documented: choosing among
+  names you typed, untraced dates, a leak check that misses reversed text, and amounts or flags that match any of
+  your own records.
+- **Adaptive, aimed at Munix.** The same Muse Spark attacker, told Munix's rules and, after every round, which rule
+  refused it, starting from the attacks that beat the bare agent: **0 of 29 rounds** got through. The closest it got
+  was a request held for the user. A small run (budget-capped), see
+  [`docs/redteam/adaptive-vs-munix-oct29.md`](docs/redteam/adaptive-vs-munix-oct29.md).
 
 ### Meta's Prompt Guard 2, inside Munix
 
@@ -89,7 +108,7 @@ See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prom
 | :-- | --: |
 | "Ignore previous instructions" style | 14 / 14 |
 | AgentDojo's strongest attack (`important_instructions`) | 0 / 14 |
-| Every attempt the adaptive attacker wrote | 1 / 239 |
+| Every attempt the adaptive attacker wrote | 7 / 402 |
 
 Prompt Guard catches attacks that openly tell a model to drop its instructions, and misses ones written to read like
 ordinary messages. Munix runs it as an optional detector that can only lower trust: it covers crude injections planted
@@ -100,14 +119,19 @@ in content Munix would otherwise trust, and when it misses, the Gate still holds
 | | Banking: bare | Banking: Munix | Slack: bare | Slack: Munix |
 | :-- | --: | --: | --: | --: |
 | Attack success rate | 0 / 144 | **0 / 140** | 0 / 105 | **0 / 105** |
-| Utility, no attack | 15 / 16 | 12 / 16 | 20 / 21 | 2 / 21 |
+| Utility, no attack | 15 / 16 | 9 / 16 * | 20 / 21 | 2 / 19 * |
 | Utility under attack | 118 / 144 | 92 / 140 | 79 / 105 | 10 / 105 |
+
+\* Oct 29, after the amount fix and the utility fixes, with the simulated user, one run each (banking was 7 / 16
+right after the amount fix; Slack's last 2 tasks didn't run, budget). Repeats of the bare runs: banking 15 / 14 / 14,
+Slack 20 / 19 / 19.
 
 Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
 number found only in a file, opening a link from a channel message, or inviting someone whose email is on their
 website. Those stop and wait for you instead of guessing. Slack is the hard case, because most of its tasks pick a
-destination from others' messages; the fixes that keep the guarantee are listed in the write-up. Banking Munix runs
-use no human; Slack runs use a labeled simulated user that approves only fully traced destinations. See
+destination from others' messages; the fixes that keep the guarantee are listed in the write-up. The attack rows
+for banking use no human; the starred rows and Slack use a labeled simulated user that declines anything whose
+destination or amount came from content you didn't provide. See
 [`docs/redteam/agentdojo.md`](docs/redteam/agentdojo.md).
 
 ### Stress tests
