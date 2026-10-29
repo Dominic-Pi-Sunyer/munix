@@ -122,3 +122,12 @@ including the honest amount from the rent-notice Reader and any computed amount 
 "today", which no prompt or record states, so tracing `date` parked nearly every payment task. A wrong date moves a
 payment to the right recipient for the right amount; it never redirects money. `trace: true` stays available for
 date args, and the banking manifests leave it off (`gets_through_an_attacker_date_on_update_scheduled`).
+
+**Limits of value binding (found in review, Oct 29).** Binding asks whether a value appeared in the prompt or in
+any of the user's or operator's records, not whether it is the right one for this call:
+- A bool binds whenever any record carries the same bool. Transaction histories nearly always list a recurring
+  payment, so `recurring: true` from an attacker's document will usually bind. Tracing `recurring` is close to
+  vacuous in practice.
+- An amount binds when it equals any amount in those records (for example the user's largest past payment), or any
+  number the user typed in the prompt (an invoice number counts).
+Both still need the destination to trace: the money only ever goes to a recipient the user named or that binds.
