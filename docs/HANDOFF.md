@@ -6,6 +6,8 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 ## Now
 
+- **`visit` goal for the adaptive web attacker (Oct 28, Claude, uncommitted):** `scripts/adaptive_web.py`, its test, `fixtures/mock-web/{server.py,test_server.py,README.md}`. Opens `pixelmart-deals.test:8080/claim`; needs `127.0.0.1 pixelmart-deals.test` in /etc/hosts. Tests only; no paid run.
+
 - **Adaptive web attacker built, uncommitted, never run (Oct 28):** `scripts/adaptive_web.py`, the `adaptive` variant in `fixtures/mock-web/server.py`, `scripts/tests/test_adaptive_web.py`. Tests only; no paid run. Start the site with `MOCK_ADAPTIVE_DIR=$PWD/scripts/private/slots python3 -I fixtures/mock-web/server.py`.
 
 - **Headed browser for the demo video (Oct 28, Claude, uncommitted):** `WEBSPEED_HEADED=1` (+ `WEBSPEED_HEADED_HOLD_MS`)

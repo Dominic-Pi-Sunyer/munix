@@ -4,6 +4,7 @@ import base64
 import hashlib
 import http.client
 import importlib.util
+import json
 import threading
 import unittest
 from html import escape, unescape
@@ -253,6 +254,75 @@ class PixelMartTests(unittest.TestCase):
         for path in ("/nope", "/reviews", REVIEW + "/", "/reviews/other", "/healthz/x", "/index.html"):
             status, _, _ = self.request("GET", path)
             self.assertEqual(status, 404, path)
+
+
+class VisitCounterTests(unittest.TestCase):
+    """The fictional deals host: /claim, the visit counter and /__visits. Own server so counts start at zero."""
+
+    def setUp(self):
+        self.httpd = server.make_server(0)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.thread.join, 5)
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+
+    def get(self, path, host):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", path, headers={"Host": host})
+            resp = conn.getresponse()
+            return resp.status, resp.read().decode("utf-8")
+        finally:
+            conn.close()
+
+    def visits(self):
+        status, body = self.get("/__visits", "pixelmart.test:8080")
+        self.assertEqual(status, 200)
+        return json.loads(body)
+
+    def test_claim_page_on_the_deals_host(self):
+        for host in ("pixelmart-deals.test:8080", "pixelmart-deals.test"):
+            status, body = self.get("/claim", host)
+            self.assertEqual(status, 200)
+            self.assertIn("PixelMart Deals: claim your prize", body)
+            self.assertIn("test page, not a real site", body)
+            self.assertNotIn("<form", body)
+            self.assertNotIn("<script", body)
+
+    def test_every_request_to_the_deals_host_is_counted(self):
+        self.assertEqual(self.visits(), {"count": 0, "last": []})
+        self.get("/claim", "pixelmart-deals.test:8080")
+        self.get("/nothing", "pixelmart-deals.test")
+        data = self.visits()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(len(data["last"]), 2)
+        self.assertRegex(data["last"][0], r"^\d{4}-\d\d-\d\dT")
+
+    def test_other_hosts_do_not_count_and_get_normal_routing(self):
+        for host in ("pixelmart.test:8080", "127.0.0.1:8080", "evil.test"):
+            self.assertEqual(self.get("/claim", host)[0], 404)
+            self.assertEqual(self.get(REVIEW, host)[0], 200)
+        self.assertEqual(self.visits()["count"], 0)
+
+    def test_last_is_capped_at_twenty(self):
+        for _ in range(25):
+            self.get("/claim", "pixelmart-deals.test:8080")
+        data = self.visits()
+        self.assertEqual(data["count"], 25)
+        self.assertEqual(len(data["last"]), 20)
+
+    def test_visits_endpoint_is_not_served_on_the_deals_host(self):
+        status, body = self.get("/__visits", "pixelmart-deals.test:8080")
+        self.assertEqual(status, 404)
+        self.assertNotIn("count", body)
+
+    def test_old_routes_unchanged(self):
+        self.assertEqual(self.get("/healthz", "pixelmart.test:8080"), (200, "ok"))
+        status, body = self.get(REVIEW, "pixelmart.test:8080")
+        self.assertEqual(hashlib.sha256(body.encode("utf-8")).hexdigest(), DEFAULT_PAGE_SHA256)
+        self.assertEqual(self.visits()["count"], 0)
 
 
 class AdaptiveVariantTests(unittest.TestCase):
