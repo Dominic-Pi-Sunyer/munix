@@ -202,6 +202,28 @@ fn allow_control_args(plan: &mut Plan, catalog: &Catalog) {
     }
 }
 
+/// Drops a `from` / `min_trust` the model wrote on a control argument whose manifest does not set `trace` (a file
+/// path, a count). The Gate never traces such an argument, so the rule never constrained anything; `Plan::validate`
+/// refuses it so a hand-written plan can't look stricter than it is. Dropping it here leaves the plan exactly as
+/// strict as before instead of failing the task. Traced control arguments, and every other role, are untouched.
+fn drop_untraced_control_sources(plan: &mut Plan, catalog: &Catalog) {
+    for step in &mut plan.steps {
+        let Some(manifest) = catalog.get(&step.tool) else {
+            continue;
+        };
+        for (name, rule) in &mut step.args {
+            if manifest
+                .args
+                .get(name)
+                .is_some_and(|spec| spec.role == ArgRole::Control && !spec.trace)
+            {
+                rule.from = None;
+                rule.min_trust = None;
+            }
+        }
+    }
+}
+
 /// Raises every `min_trust` the model set on a step source to at least [`MIN_STEP_TRUST`]. Tighten-only; a missing
 /// `min_trust` is left for the validator to reject.
 fn raise_step_trust_floors(plan: &mut Plan) {
@@ -305,6 +327,7 @@ impl Planner {
             };
             raise_step_trust_floors(&mut plan);
             allow_control_args(&mut plan, catalog);
+            drop_untraced_control_sources(&mut plan, catalog);
             match check_plan(&plan, catalog, stores) {
                 Ok(()) => {
                     return Signed::sign(&self.key, Purpose::Plan, plan)
@@ -741,6 +764,56 @@ amendments:
             "a read-only tool's control forbid is dropped"
         );
         assert!(read["tag"].is_forbidden(), "a selector stays forbidden");
+    }
+
+    #[test]
+    fn a_source_rule_on_an_untraced_control_arg_is_dropped_and_a_traced_one_kept() {
+        let pay = munix_core::manifest::ToolManifest::from_yaml(
+            "
+tool: bank.pay
+description: Pay someone.
+tier: 3
+egress: true
+args:
+  to:     {type: iban,   role: destination}
+  amount: {type: number, role: control, trace: true}
+  date:   {type: date,   role: control}
+output:
+  message: {type: text, region: operator_content, confidential: public}
+",
+        )
+        .unwrap();
+        let catalog = Catalog::from_manifests([pay]).unwrap();
+        let mut plan = Plan::from_yaml(&format!(
+            "
+plan: P-1
+task: T-1
+prompt_hash: \"{}\"
+reads: [operator_content]
+steps:
+  - id: 1
+    tool: bank.pay
+    args:
+      to:     {{from: [prompt]}}
+      amount: {{from: [prompt]}}
+      date:   {{from: [prompt]}}
+    budget: 1
+amendments:
+  auto_max_tier: 0
+",
+            prompt().digest().unwrap().as_str()
+        ))
+        .unwrap();
+        assert!(plan.validate(&catalog).is_err(), "as the model wrote it");
+        drop_untraced_control_sources(&mut plan, &catalog);
+        let args = &plan.steps[0].args;
+        assert!(args["date"].from.is_none() && args["date"].min_trust.is_none());
+        assert!(
+            args["amount"].from.is_some(),
+            "a traced control arg keeps its rule"
+        );
+        assert!(args["to"].from.is_some(), "a destination keeps its rule");
+        plan.validate(&catalog).unwrap();
     }
 
     #[test]
