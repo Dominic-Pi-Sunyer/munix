@@ -20,7 +20,7 @@ use munix_core::request::{Request, ViolationCode};
 use munix_core::validate::Scalar;
 use munix_gate::gate::{
     AMENDMENT_BUDGET, Gate, GateError, MAX_READ_AMENDMENTS, READ_AMENDMENT_BUDGET, Reply, Store,
-    StoreValue, TaskBrief,
+    StoreValue, TAKEOVER_STRIKES, TaskBrief,
 };
 use munix_gate::policy::DenyCode;
 use munix_gate::tool::{Tool, ToolFailure};
@@ -909,8 +909,8 @@ fn gatekeeping_of_unknown_tasks_plans_and_tools() {
         Reply::Halted
     );
     h.start();
-    // A wrong plan id, a tool outside the catalog, and a catalog tool on another tool's step are all takeover
-    // signals: each halts the task.
+    // A wrong plan id halts the task at once. A catalog tool on another tool's step is a takeover-class deny on a
+    // tier 0-2 tool: refused and counted, the task goes on (see `takeover_strikes` tests).
     let mut wrong_plan = req(1, "web.open", json!({"url": "ref:u1"}));
     wrong_plan.plan = "P-other".parse().unwrap();
     assert_eq!(
@@ -923,21 +923,25 @@ fn gatekeeping_of_unknown_tasks_plans_and_tools() {
     );
     assert!(h.opened.lock().unwrap().is_empty());
 
-    for (step, tool, args) in [
-        (1, "mail.read", json!({})),
-        (2, "web.open", json!({"url": "ref:u1"})),
+    for (step, tool, args, expected) in [
+        // mail.read is tier 3: halts at once.
+        (
+            1,
+            "mail.read",
+            json!({}),
+            Reply::Takeover(DenyCode::OffPlan),
+        ),
+        // web.open is tier 1: refused and counted.
+        (
+            2,
+            "web.open",
+            json!({"url": "ref:u1"}),
+            Reply::Denied(DenyCode::OffPlan),
+        ),
     ] {
         let mut h = harness();
         h.start();
-        assert_eq!(
-            h.gate.submit(&req(step, tool, args)),
-            Reply::Takeover(DenyCode::OffPlan),
-            "{tool}"
-        );
-        assert_eq!(
-            h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
-            Reply::Halted
-        );
+        assert_eq!(h.gate.submit(&req(step, tool, args)), expected, "{tool}");
         assert!(h.opened.lock().unwrap().is_empty());
     }
     assert!(h.opened.lock().unwrap().is_empty());
@@ -2807,13 +2811,13 @@ fn the_amended_step_has_a_budget_and_running_out_is_not_a_takeover() {
 }
 
 #[test]
-fn off_plan_tier_2_and_3_tools_are_still_takeovers() {
-    // file.write is tier 2.
+fn off_plan_tier_2_is_deferred_and_tier_3_tools_are_still_takeovers() {
+    // file.write is tier 2: refused, counted, the task goes on.
     let mut h = amend_harness();
     h.start();
     assert_eq!(
         h.gate.submit(&req(0, "file.write", json!({}))),
-        Reply::Takeover(DenyCode::OffPlan)
+        Reply::Denied(DenyCode::OffPlan)
     );
     assert!(amended_events(&h).is_empty());
     assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 3);
@@ -2837,7 +2841,7 @@ fn a_plan_with_auto_max_tier_0_amends_tier_0_only() {
     assert_eq!(
         h.gate
             .submit(&req(0, "link.ping", json!({"url": "ref:u1"}))),
-        Reply::Takeover(DenyCode::OffPlan)
+        Reply::Denied(DenyCode::OffPlan)
     );
     assert!(amended_events(&h).is_empty());
 
@@ -2946,7 +2950,7 @@ fn an_amended_egress_step_takes_destinations_from_the_clean_side_only() {
     let reply = h
         .gate
         .submit(&req(0, "link.ping", json!({"url": links[0]})));
-    assert_eq!(reply, Reply::Takeover(DenyCode::UntrustedDestination));
+    assert_eq!(reply, Reply::Denied(DenyCode::UntrustedDestination));
     // The step was added before the ruling, and the ledger says so.
     assert_eq!(amended_events(&h).len(), 1);
 }
@@ -2984,4 +2988,131 @@ fn recovery_hands_the_new_agent_the_planned_steps_only() {
     // The Gate keeps the amendment (and counts it toward the limit).
     assert_eq!(h.gate.plan(&task_id()).unwrap().steps.len(), 3);
     assert_eq!(h.gate.context_trust(&task_id()), Some(Trust::FULL));
+}
+
+fn deferred_events(h: &Harness) -> Vec<Value> {
+    h.entries()
+        .into_iter()
+        .map(|e| e.event)
+        .filter(|e| e["event"] == "takeover_deferred")
+        .collect()
+}
+
+/// A tier 1 egress call (an amended `link.ping`) to an address taken from the page: a takeover-class deny.
+fn untraced_ping(step: u32, link: &str) -> Request {
+    req(step, "link.ping", json!({"url": link}))
+}
+
+/// The id of the step the Gate amended in last.
+fn amended_step(h: &Harness) -> u32 {
+    h.gate.plan(&task_id()).unwrap().steps.last().unwrap().id
+}
+
+#[test]
+fn a_tier_1_untraced_destination_is_denied_and_the_task_goes_on() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    let links = h.read_page();
+    assert_eq!(
+        h.gate.submit(&untraced_ping(0, &links[0])),
+        Reply::Denied(DenyCode::UntrustedDestination)
+    );
+    // The ledger still says it was a takeover-class signal, with the strike count.
+    let deferred = deferred_events(&h);
+    assert_eq!(deferred.len(), 1);
+    assert_eq!(deferred[0]["code"], "untrusted_destination");
+    assert_eq!(deferred[0]["strikes"], 1);
+    assert!(h.entries().iter().all(|e| e.event["event"] != "takeover"));
+    // An honest call afterwards runs (the prompt's own address).
+    let step = amended_step(&h);
+    let reply = h
+        .gate
+        .submit(&req(step, "link.ping", json!({"url": "ref:u1"})));
+    assert!(matches!(reply, Reply::Delivered(_)), "{reply:?}");
+    assert!(matches!(
+        h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
+        Reply::Delivered(_)
+    ));
+}
+
+#[test]
+fn the_third_takeover_class_deny_halts_and_later_calls_are_halted() {
+    assert_eq!(TAKEOVER_STRIKES, 3);
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    let links = h.read_page();
+    for strike in 1..TAKEOVER_STRIKES {
+        // The first call amends the step in; the later ones use it.
+        let step = if strike == 1 { 0 } else { amended_step(&h) };
+        assert_eq!(
+            h.gate.submit(&untraced_ping(step, &links[0])),
+            Reply::Denied(DenyCode::UntrustedDestination),
+            "strike {strike}"
+        );
+    }
+    assert_eq!(deferred_events(&h).len(), 2);
+    let step = amended_step(&h);
+    assert_eq!(
+        h.gate.submit(&untraced_ping(step, &links[0])),
+        Reply::Takeover(DenyCode::UntrustedDestination)
+    );
+    // Exactly like an immediate takeover: a `takeover` event, no third deferred event, and everything is halted.
+    assert_eq!(deferred_events(&h).len(), 2);
+    assert_eq!(
+        h.entries()
+            .iter()
+            .filter(|e| e.event["event"] == "takeover")
+            .count(),
+        1
+    );
+    assert_eq!(
+        h.gate
+            .submit(&req(step, "link.ping", json!({"url": "ref:u1"}))),
+        Reply::Halted
+    );
+    assert_eq!(
+        h.gate.submit(&req(1, "web.open", json!({"url": "ref:u1"}))),
+        Reply::Halted
+    );
+}
+
+#[test]
+fn a_blocked_value_is_refused_again_after_a_deferred_takeover() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    let links = h.read_page();
+    let first = h.gate.submit(&untraced_ping(0, &links[0]));
+    assert_eq!(first, Reply::Denied(DenyCode::UntrustedDestination));
+    // The same value again, from any step the plan has: still refused (it traces to the page, not the user).
+    let step = amended_step(&h);
+    assert_eq!(
+        h.gate.submit(&untraced_ping(step, &links[0])),
+        Reply::Denied(DenyCode::UntrustedDestination)
+    );
+    assert_eq!(
+        h.gate.submit(&req(
+            2,
+            "email.send",
+            json!({"to": [links[0]], "subject": "Hi", "body": "x"})
+        )),
+        Reply::Takeover(DenyCode::UntrustedDestination)
+    );
+    assert_eq!(h.emails_sent(), 0);
+}
+
+#[test]
+fn a_tier_3_untraced_destination_halts_at_once() {
+    let mut h = amend_harness();
+    start_without_news(&mut h);
+    let links = h.read_page();
+    assert_eq!(
+        h.gate.submit(&req(
+            2,
+            "email.send",
+            json!({"to": [links[0]], "subject": "Hi", "body": "x"})
+        )),
+        Reply::Takeover(DenyCode::UntrustedDestination)
+    );
+    assert!(deferred_events(&h).is_empty());
+    assert_eq!(h.gate.submit(&email_to_boss("Hi")), Reply::Halted);
 }

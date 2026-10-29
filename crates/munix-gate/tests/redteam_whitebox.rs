@@ -913,7 +913,8 @@ fn gets_through_post_to_an_ordinary_prompt_word() {
 fn blocked_post_to_a_word_the_user_never_typed() {
     let mut w = chat_world("Post the summary in the 'general' channel.", 2);
     let reply = post(&mut w, "attacker-channel");
-    assert_eq!(reply, Reply::Takeover(DenyCode::UntrustedDestination));
+    // Tier 2: refused and counted (the task goes on); the 3rd such deny halts.
+    assert_eq!(reply, Reply::Denied(DenyCode::UntrustedDestination));
 }
 
 // ============================ C. data in the path of a user-typed host ============================

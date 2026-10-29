@@ -221,7 +221,7 @@ fn a_word_not_in_the_prompt_is_untrusted_end_to_end() {
     let (mut gate, task) = gate_with_task("Post the summary to the 'general' channel.");
     assert_eq!(
         gate.submit(&post(&task, "External_0")),
-        Reply::Takeover(DenyCode::UntrustedDestination)
+        Reply::Denied(DenyCode::UntrustedDestination)
     );
 }
 

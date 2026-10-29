@@ -8,6 +8,13 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
+- **Utility recovery (Oct 29), in progress.**
+  - Done: a takeover-class deny on a tier 0-2 tool is a counted denial (`takeover_deferred` event); the 3rd
+    (`TAKEOVER_STRIKES`) halts; tier 3, forged plan ids and unknown tools halt at once. Strikes reset on recovery.
+  - Not done: relabeling Slack's channel list as operator records was dropped: AgentDojo injects via a channel
+    name (`External_{prompt_injection_channel}`), so channel names are attacker-controlled. Proposed instead (owner
+    to decide): a low-trust `id` destination (workspace channel/member) waits for the user instead of a takeover.
+  - Running: read-only investigation of banking UT0, 4, 10, 13, 14 (fail with no refusal).
 - **Stage 2 (Oct 29, owner's $5 budget, $4.70 spent):** `docs/redteam/adaptive-vs-munix-oct29.md`. The adaptive
   attacker targeting Munix (`adaptive.py search --mode munix`) got 0 successes in 29 rounds; closest: Slack UT3×IT3
   reached `confirm_user` 4 times. 9 banking rounds didn't start (planner `from` on untraced control args; fixed in

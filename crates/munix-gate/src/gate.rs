@@ -232,7 +232,15 @@ struct Task {
     blocked: Vec<String>,
     /// Recoveries already performed on this task.
     recoveries: u32,
+    /// Takeover-class denials on tier 0-2 tools in this agent instance (see [`TAKEOVER_STRIKES`]).
+    strikes: u32,
 }
+
+/// Takeover-class denials (`DenyCode::is_takeover`) on tools of tier 0, 1 or 2 that a task absorbs as plain
+/// denials. The request is refused each time and a `takeover_deferred` event is written; the strike that reaches
+/// this count halts the task exactly like an immediate takeover. A takeover-class deny on a tier 3 tool, a forged
+/// plan id or an unknown tool halts at once. The count restarts with a fresh agent instance (recovery).
+pub const TAKEOVER_STRIKES: u32 = 3;
 
 /// Denials on one step before the task pauses (design spec 7.4).
 pub const MAX_DENIALS_PER_STEP: u32 = 3;
@@ -613,6 +621,7 @@ impl Gate {
                 quarantined_notes: Vec::new(),
                 blocked: Vec::new(),
                 recoveries: 0,
+                strikes: 0,
             },
         );
         Ok(brief)
@@ -682,7 +691,7 @@ impl Gate {
                 &case,
                 DenyCode::OffPlan,
                 &["plan.id_mismatch".to_owned()],
-                true,
+                Some(None),
             );
         }
         let Some(manifest) = self.catalog.get(&request.tool).cloned() else {
@@ -690,7 +699,7 @@ impl Gate {
                 &case,
                 DenyCode::OffPlan,
                 &["plan.unknown_tool".to_owned()],
-                true,
+                Some(None),
             );
         };
         if let Err(violations) = request.check_shape(&manifest) {
@@ -740,9 +749,11 @@ impl Gate {
             Outcome::Deny(DenyCode::OffPlan) if read_only(&manifest) => {
                 let mut reasons = ruling.reasons.clone();
                 reasons.push("plan.off_plan_read".to_owned());
-                self.finish_deny(&case, DenyCode::OffPlan, &reasons, false)
+                self.finish_deny(&case, DenyCode::OffPlan, &reasons, None)
             }
-            Outcome::Deny(code) => self.finish_deny(&case, code, &ruling.reasons, true),
+            Outcome::Deny(code) => {
+                self.finish_deny(&case, code, &ruling.reasons, Some(Some(manifest.tier)))
+            }
         }
     }
 
@@ -940,7 +951,12 @@ impl Gate {
                     return Reply::Halted;
                 };
                 if let Outcome::Deny(code) = ruling.outcome {
-                    return self.finish_deny(&case, code, &ruling.reasons, true);
+                    return self.finish_deny(
+                        &case,
+                        code,
+                        &ruling.reasons,
+                        Some(Some(manifest.tier)),
+                    );
                 }
                 // Trust on first use: the user (never the simulated user, never a model) approved these
                 // destinations, so remember them. Only values that passed the plan's `from` rule and did not bind.
@@ -958,7 +974,7 @@ impl Gate {
                     Stage::User => DenyCode::UserDenied,
                     _ => DenyCode::Reviewer,
                 };
-                self.finish_deny(&case, code, &["decision.not_approved".to_owned()], false)
+                self.finish_deny(&case, code, &["decision.not_approved".to_owned()], None)
             }
             Verdict::ConfirmUser => {
                 if needs != Stage::LlmReview {
@@ -1101,6 +1117,7 @@ impl Gate {
         t.quarantine = seen;
         t.quarantined_notes.extend(quarantined.clone());
         t.blocked.clear();
+        t.strikes = 0;
         t.instance = Instance {
             context: ContextState::fresh(),
             lowest: None,
@@ -1425,30 +1442,55 @@ impl Gate {
         }
     }
 
-    /// A deny. With `takeover_allowed`, a takeover code halts the task instead of counting as a denial.
+    /// A deny. `takeover` is `None` when a takeover code only counts as a denial. `Some(tier)` lets a takeover code
+    /// act: `Some(Some(0..=2))` defers it (refused and counted; the [`TAKEOVER_STRIKES`]th halts the task), and
+    /// `Some(None)` (no known tool) or `Some(Some(3..))` halts at once.
     fn finish_deny(
         &mut self,
         case: &Case<'_>,
         code: DenyCode,
         reasons: &[String],
-        takeover_allowed: bool,
+        takeover: Option<Option<u8>>,
     ) -> Reply {
         // A deny stands whether or not the ledger write works.
         let _ = self.log_ruling(case, "deny", Some(code), reasons);
-        if takeover_allowed && code.is_takeover() {
+        if let (Some(tier), true) = (takeover, code.is_takeover()) {
             let blocked = self.blocked_values(case.request);
-            if let Some(task) = self.tasks.get_mut(&case.request.task) {
-                task.status = Status::Halted;
-                task.pending.clear();
-                task.blocked = blocked;
+            let mut halt = true;
+            if let Some(tier) = tier.filter(|t| *t <= 2)
+                && let Some(task) = self.tasks.get_mut(&case.request.task)
+            {
+                task.strikes = task.strikes.saturating_add(1);
+                let strikes = task.strikes;
+                if strikes < TAKEOVER_STRIKES {
+                    halt = false;
+                    for value in &blocked {
+                        if !task.blocked.contains(value) {
+                            task.blocked.push(value.clone());
+                        }
+                    }
+                    let _ = self.log(request_event(
+                        "takeover_deferred",
+                        case.request,
+                        case.hash,
+                        json!({"code": code, "strikes": strikes, "tier": tier}),
+                    ));
+                }
             }
-            let _ = self.log(request_event(
-                "takeover",
-                case.request,
-                case.hash,
-                json!({"code": code}),
-            ));
-            return Reply::Takeover(code);
+            if halt {
+                if let Some(task) = self.tasks.get_mut(&case.request.task) {
+                    task.status = Status::Halted;
+                    task.pending.clear();
+                    task.blocked = blocked;
+                }
+                let _ = self.log(request_event(
+                    "takeover",
+                    case.request,
+                    case.hash,
+                    json!({"code": code}),
+                ));
+                return Reply::Takeover(code);
+            }
         }
         self.count_denial(&case.request.task, case.request.step);
         Reply::Denied(code)

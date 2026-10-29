@@ -790,7 +790,7 @@ fn an_unknown_tool_is_a_takeover() {
 }
 
 #[test]
-fn a_tool_in_the_catalog_but_not_in_the_plan_is_a_takeover() {
+fn a_tier_2_tool_in_the_catalog_but_not_in_the_plan_is_denied_and_the_session_goes_on() {
     // news.read is in the catalog and registered, but this plan has no step for it. The front still submits it
     // (on step 0), and the Gate rules. At tier 2 it is above the plan's auto_max_tier, so it is not amended in.
     let mut h = build(&Options {
@@ -808,8 +808,9 @@ fn a_tool_in_the_catalog_but_not_in_the_plan_is_a_takeover() {
         "the agent is not offered it"
     );
     refused(&front.call("news_read", &json!({})), "denied: off_plan");
-    assert!(front.should_stop());
-    assert_eq!(front.takeover(), Some(DenyCode::OffPlan));
+    // Tier 2: the same coarse error, but the session goes on (the 3rd takeover-class deny halts).
+    assert!(!front.should_stop());
+    assert_eq!(front.takeover(), None);
     drop(front);
     assert!(h.ledger_len() > before);
 }
