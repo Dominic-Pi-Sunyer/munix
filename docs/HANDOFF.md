@@ -8,6 +8,8 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
+- **AgentDojo attack rerun on the Oct 29 build (done):** banking 0/144 attacks, utility under attack 76/144 (was
+  83); Slack 0/105, 10/105 (same). All 251 ledgers verify. `results/after-oct29-fixes/`, `docs/redteam/agentdojo.md`.
 - **Utility recovery (Oct 29), in progress.**
   - Done: a takeover-class deny on a tier 0-2 tool is a counted denial (`takeover_deferred` event); the 3rd
     (`TAKEOVER_STRIKES`) halts; tier 3, forged plan ids and unknown tools halt at once. Strikes reset on recovery.

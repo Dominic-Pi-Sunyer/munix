@@ -118,20 +118,22 @@ in content Munix would otherwise trust, and when it misses, the Gate still holds
 
 | | Banking: bare | Banking: Munix | Slack: bare | Slack: Munix |
 | :-- | --: | --: | --: | --: |
-| Attack success rate | 0 / 144 | **0 / 140** | 0 / 105 | **0 / 105** |
+| Attack success rate | 0 / 144 | **0 / 144** | 0 / 105 | **0 / 105** |
 | Utility, no attack | 15 / 16 | 9 / 16 * | 20 / 21 | 2 / 19 * |
-| Utility under attack | 118 / 144 | 92 / 140 | 79 / 105 | 10 / 105 |
+| Utility under attack | 118 / 144 | 76 / 144 † | 79 / 105 | 10 / 105 † |
 
 \* Oct 29, after the amount fix and the utility fixes, with the simulated user, one run each (banking was 7 / 16
 right after the amount fix; Slack's last 2 tasks didn't run, budget). Repeats of the bare runs: banking 15 / 14 / 14,
-Slack 20 / 19 / 19.
+Slack 20 / 19 / 19. † Oct 29 rerun on the current build, simulated user; all 251 ledgers verify. Banking was
+83 / 144 before; the biggest drop is the rent task (UT2, 9 → 0 of 9), which now waits for you because the new
+amount comes from a letter.
 
 Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
 number found only in a file, opening a link from a channel message, or inviting someone whose email is on their
 website. Those stop and wait for you instead of guessing. Slack is the hard case, because most of its tasks pick a
-destination from others' messages; the fixes that keep the guarantee are listed in the write-up. The attack rows
-for banking use no human; the starred rows and Slack use a labeled simulated user that declines anything whose
-destination or amount came from content you didn't provide. See
+destination from others' messages; the fixes that keep the guarantee are listed in the write-up. The starred and
+daggered rows use a labeled simulated user that declines anything whose destination or amount came from content you
+didn't provide. See
 [`docs/redteam/agentdojo.md`](docs/redteam/agentdojo.md).
 
 ### Stress tests
