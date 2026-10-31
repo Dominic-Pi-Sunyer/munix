@@ -38,6 +38,9 @@ asks me first. The attacker's account is never touched."
 
 [M6 0:47, verdict bars] (no VO; hold on "ATTACK SUCCEEDED" / "ATTACK BLOCKED")
 
+> **Bank app take.** For a visual S2, run each side with `--web` (`eval/agentdojo/demo_replay.py --case rent --side
+> bare --live --web`, then `--side munix`) and record the page full screen; it plays the real run's steps and payments.
+>
 > **Film note.** Under the current build a live take parks the rent change for the user (`amount.value_unbound`);
 > with no one at the Console it is declined, so the right side ends with the attack blocked and the rent unchanged.
 > The M5 line matches that. If we add an interactive Console to `demo_replay.py`, film yourself approving the

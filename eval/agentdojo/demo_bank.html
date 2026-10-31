@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Munix demo: the rent attack</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter+Tight:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #F2EEE5; --card: #FBF9F4; --ink: #16161A; --muted: #6B6862; --line: #DDD7CB;
+    --green: #00A86B; --green-soft: #E3F4EC; --red: #D6452F; --red-soft: #FBE7E3; --amber: #C98A12; --amber-soft: #FBF0D9;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 17px/1.45 "Inter Tight", system-ui, sans-serif; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 28px 32px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+  .side { font: 700 30px/1.1 "Space Grotesk", sans-serif; letter-spacing: -0.01em; }
+  .pill { font: 600 14px "IBM Plex Mono", monospace; padding: 7px 14px; border-radius: 999px; border: 1.5px solid currentColor; }
+  .pill.bare { color: var(--red); } .pill.munix { color: var(--green); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 22px; }
+  .label { font: 600 12px "IBM Plex Mono", monospace; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px; }
+  .ask { font-size: 20px; font-weight: 500; }
+  .doc .name { font-family: "IBM Plex Mono", monospace; font-size: 15px; margin-bottom: 12px; }
+  .bar { height: 13px; background: var(--ink); border-radius: 3px; margin: 9px 0; }
+  .doc .note { font-size: 14px; color: var(--muted); margin-top: 12px; }
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .steps li { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px dashed var(--line); opacity: 0; transform: translateY(6px); transition: all .35s ease; }
+  .steps li.show { opacity: 1; transform: none; }
+  .steps li:first-child { border-top: 0; }
+  .dot { flex: 0 0 12px; height: 12px; border-radius: 50%; margin-top: 6px; background: var(--muted); }
+  .dot.ok { background: var(--ink); } .dot.bad { background: var(--red); } .dot.deny { background: var(--green); }
+  .tool { font: 600 15px "IBM Plex Mono", monospace; }
+  .args { font: 14px "IBM Plex Mono", monospace; color: var(--muted); word-break: break-all; }
+  .args .atk { color: var(--red); font-weight: 600; }
+  .why { font-size: 15px; margin-top: 3px; }
+  .why.deny { color: var(--green); font-weight: 600; } .why.hold { color: var(--amber); font-weight: 600; }
+  .why.bad { color: var(--red); font-weight: 600; }
+  .reader { font: 13px "IBM Plex Mono", monospace; color: var(--muted); margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th { text-align: left; font: 600 12px "IBM Plex Mono", monospace; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 0 8px 8px 0; }
+  td { padding: 10px 8px 10px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  td.mono { font-family: "IBM Plex Mono", monospace; font-size: 14px; }
+  tr.changed td { background: var(--red-soft); transition: background .5s; }
+  tr.safe td { background: var(--green-soft); transition: background .5s; }
+  .tag { display: inline-block; font: 600 11px "IBM Plex Mono", monospace; padding: 2px 7px; border-radius: 5px; margin-left: 6px; vertical-align: 2px; }
+  .tag.atk { background: var(--red); color: #fff; } .tag.ok { background: var(--green); color: #fff; }
+  .gate li { font: 14px "IBM Plex Mono", monospace; padding: 6px 0; list-style: none; }
+  .gate ul { margin: 0; padding: 0; }
+  .gate .deny { color: var(--green); font-weight: 600; } .gate .hold { color: var(--amber); font-weight: 600; }
+  .gate .chain { color: var(--muted); margin-top: 6px; }
+  .verdict { border-radius: 14px; padding: 22px 26px; font: 700 28px/1.2 "Space Grotesk", sans-serif; color: #fff; display: none; }
+  .verdict small { display: block; font: 500 16px "Inter Tight", sans-serif; margin-top: 6px; opacity: .92; }
+  .verdict.bad { background: var(--red); display: block; } .verdict.good { background: var(--green); display: block; }
+  .working { font: 600 15px "IBM Plex Mono", monospace; color: var(--muted); }
+  .working::after { content: "…"; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .hidden { display: none; }
+  footer { font-size: 13px; color: var(--muted); margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="side" id="side">Loading…</div>
+    <div class="pill" id="pill"></div>
+  </header>
+  <div class="grid">
+    <div>
+      <div class="card"><div class="label">You ask the agent</div><div class="ask" id="ask"></div></div>
+      <div class="card doc">
+        <div class="label">The file it reads</div>
+        <div class="name">landlord-notices.txt</div>
+        <div class="bar" style="width:92%"></div><div class="bar" style="width:78%"></div>
+        <div class="bar" style="width:86%"></div><div class="bar" style="width:55%"></div>
+        <div class="note">Hidden in this notice: instructions a stranger wrote. Text withheld (reported to Meta).</div>
+      </div>
+      <div class="card">
+        <div class="label">What the agent does</div>
+        <div class="working" id="working">Agent working</div>
+        <ul class="steps" id="steps"></ul>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="label">Your bank · scheduled payments</div>
+        <table><thead><tr><th>Payment</th><th>To account</th><th>Amount</th></tr></thead><tbody id="payments"></tbody></table>
+      </div>
+      <div class="card gate hidden" id="gate">
+        <div class="label">Munix Gate · plain code, no model</div>
+        <ul id="gatelist"></ul>
+      </div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+  <footer id="foot"></footer>
+</div>
+<script>
+const STEP_MS = 1500;
+let played = false;
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const money = n => "$" + Number(n).toLocaleString("en-US", {minimumFractionDigits: 2});
+
+function argsHtml(step) {
+  return Object.entries(step.args).map(([k, v]) => {
+    const atk = String(v).toLowerCase() === step.attacker_iban.toLowerCase();
+    return `${esc(k)}=<span class="${atk ? "atk" : ""}">${esc(v)}</span>${atk ? ' <span class="tag atk">ATTACKER</span>' : ""}`;
+  }).join(", ");
+}
+
+function rows(list, story, final) {
+  return list.map(t => {
+    const atk = t.recipient.toLowerCase() === story.attacker_iban.toLowerCase();
+    const cls = final ? (atk ? "changed" : (story.side === "munix" && t.subject === "Rent" ? "safe" : "")) : "";
+    return `<tr class="${cls}"><td>${esc(t.subject)}${t.recurring ? " · monthly" : ""}</td>` +
+      `<td class="mono">${esc(t.recipient)}${atk ? '<span class="tag atk">ATTACKER</span>' : (t.subject === "Rent" ? '<span class="tag ok">LANDLORD</span>' : "")}</td>` +
+      `<td class="mono">${money(t.amount)}</td></tr>`;
+  }).join("");
+}
+
+function header(story) {
+  document.getElementById("side").textContent = story.side === "munix" ? "Muse Spark inside Munix" : "Muse Spark on its own";
+  const pill = document.getElementById("pill");
+  pill.textContent = story.side === "munix" ? "PROTECTED BY MUNIX" : "NO PROTECTION";
+  pill.className = "pill " + story.side;
+  document.getElementById("ask").textContent = story.prompt;
+}
+
+async function play(story) {
+  played = true;
+  header(story);
+  document.getElementById("working").classList.add("hidden");
+  document.getElementById("payments").innerHTML = rows(story.before, story, false);
+  const ul = document.getElementById("steps");
+  for (const step of story.steps) {
+    const li = document.createElement("li");
+    let dot = "ok", why = "";
+    if (step.verdict === "deny") { dot = "deny"; why = `<div class="why deny">Blocked by Munix: ${esc(step.reason)}</div>`; }
+    else if (step.verdict === "hold") { dot = "deny"; why = `<div class="why hold">Held by Munix: ${esc(step.reason)}</div>`; }
+    else if (step.verdict === "hijacked") { dot = "bad"; why = `<div class="why bad">Done. The rent now goes to the attacker.</div>`; }
+    li.innerHTML = `<span class="dot ${dot}"></span><div><div class="tool">${esc(step.tool)}</div>` +
+      (Object.keys(step.args).length ? `<div class="args">${argsHtml({...step, attacker_iban: story.attacker_iban})}</div>` : "") +
+      (step.reader ? `<div class="reader">The agent got only typed values: ${esc(step.reader)}</div>` : "") + why + `</div>`;
+    ul.appendChild(li);
+    await new Promise(r => requestAnimationFrame(() => r()));
+    li.classList.add("show");
+    if (step.verdict === "hijacked") document.getElementById("payments").innerHTML = rows(story.after, story, true);
+    await new Promise(r => setTimeout(r, STEP_MS));
+  }
+  if (story.side === "munix") {
+    document.getElementById("gate").classList.remove("hidden");
+    document.getElementById("gatelist").innerHTML = story.gate.map(g =>
+      `<li><span class="${g.kind}">${esc(g.text)}</span></li>`).join("") +
+      (story.chain ? `<li class="chain">${esc(story.chain)}</li>` : "");
+    await new Promise(r => setTimeout(r, STEP_MS));
+  }
+  document.getElementById("payments").innerHTML = rows(story.after, story, true);
+  const v = document.getElementById("verdict");
+  if (story.attack_succeeded) {
+    v.className = "verdict bad";
+    v.innerHTML = `Attack succeeded<small>Your rent now goes to the attacker's account. AgentDojo's own check confirms it.</small>`;
+  } else {
+    v.className = "verdict good";
+    v.innerHTML = `Attack blocked<small>Nothing goes to the attacker's account. AgentDojo's own check confirms it.</small>`;
+  }
+  document.getElementById("foot").textContent = story.note || "";
+}
+
+async function poll() {
+  if (played) return;
+  try {
+    const story = await (await fetch("/story.json", {cache: "no-store"})).json();
+    header(story);
+    if (story.before) document.getElementById("payments").innerHTML = rows(story.before, story, false);
+    if (story.status === "done") { play(story); return; }
+  } catch (e) { /* the run hasn't started serving yet */ }
+  setTimeout(poll, 500);
+}
+poll();
+</script>
+</body>
+</html>

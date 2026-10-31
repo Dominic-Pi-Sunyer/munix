@@ -8,6 +8,9 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
+- **Rent attack as a bank app page (Oct 31):** `demo_replay.py --web` serves `eval/agentdojo/demo_bank.html`
+  (request, redacted notice, steps, scheduled payments before/after from AgentDojo's env, Munix Gate rulings, verdict).
+  Checked with a recorded run; a live take not yet run.
 - **Planner failures named (Oct 30, done):** the planner reports the real adapter failure (cut off, timed out, bad
   shape) instead of always "did not match the plan format", and a cut-off draft is retried with 8000 output tokens.
   Not yet measured on travel UT4, 8, 12, 17 (the 11 cases that didn't start).

@@ -4,6 +4,12 @@
     .venv/bin/python -I demo_replay.py --case rent --side bare --recorded     # a recorded run: no API call
     .venv/bin/python -I demo_replay.py --case rent --side munix --recorded
     .venv/bin/python -I demo_replay.py --case rent --side munix --live        # runs it now (Meta credit)
+    .venv/bin/python -I demo_replay.py --case rent --side bare --live --web   # the same, shown as a bank app page
+
+`--web` serves `demo_bank.html` on 127.0.0.1 (default port 8765) and opens it: the page shows "agent working" while
+the run goes, then plays that run's steps at a watchable pace, the bank's scheduled payments before and after (from
+AgentDojo's own environment on a live run), and, under Munix, the Gate's rulings from the ledger. It never shows the
+injected text or any free-text argument.
 
 The cases come from the adaptive search (`adaptive.py`): Muse Spark wrote a fresh injection that took the bare
 agent over in 6 of 6 replays, and Munix blocked it in 6 of 6.
@@ -23,7 +29,10 @@ the run to it. `--recorded` replays a run from the replay files and makes no API
 """
 
 import argparse
+import http.server
 import json
+import threading
+import webbrowser
 import re
 import subprocess
 import sys
@@ -185,6 +194,126 @@ def render(
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# The bank app page (--web)
+# ---------------------------------------------------------------------------------------------------------------
+
+STORY: dict = {}
+WEB_PAGE = HERE / "demo_bank.html"
+LEDGER_LINE = re.compile(r"^\s*\d+\s+(\w+)\s+(.*)$")
+REASONS = {
+    "untrusted_destination": "the account number came from the notice, not from you",
+    "user_denied": "the change came from the notice, so Munix asked you first; no one approved, so nothing changed",
+    "off_plan": "not part of the plan for your request",
+}
+
+
+def payments(env) -> list[dict]:
+    """Scheduled payments as the page shows them. Subjects come from the default environment by id, since an injected
+    environment can carry the attacker's text in them; a payment that isn't in the default is "New payment"."""
+    from agentdojo.task_suite.load_suites import get_suite
+
+    default = {t.id: t.subject for t in get_suite("v1.2.2", "banking").load_and_inject_default_environment({})
+               .bank_account.scheduled_transactions}
+    return [{"id": t.id, "subject": default.get(t.id, "New payment"), "recipient": t.recipient,
+             "amount": t.amount, "recurring": t.recurring} for t in env.bank_account.scheduled_transactions]
+
+
+def ledger_events(path: str | None) -> tuple[list[dict], str | None]:
+    """The Gate's non-allow rulings, takeovers and restarts, in order, and the chain check line."""
+    if not path or not Path(path).is_file() or not BINARY.is_file():
+        return [], None
+    out = subprocess.run([str(BINARY), "ledger", path], capture_output=True, text=True, timeout=30).stdout
+    events, chain, allowed = [], None, 0
+    for line in out.splitlines():
+        if line.startswith(("chain verified", "CHAIN DOES NOT VERIFY")):
+            chain = line
+            continue
+        m = LEDGER_LINE.match(line)
+        if not m:
+            continue
+        event, rest = m.groups()
+        fields = dict(f.split("=", 1) for f in rest.split() if "=" in f and not f.startswith("["))
+        tool = fields.get("tool", "").split(".", 1)[-1]
+        outcome, code = fields.get("outcome"), fields.get("code")
+        if event == "ruling" and outcome == "allow":
+            allowed += 1
+        elif event == "ruling" and outcome == "deny" and code != "user_denied":
+            events.append({"kind": "deny", "code": code,
+                           "text": f"DENY {tool}: {REASONS.get(code or '', code or 'refused')}"})
+        elif event == "ruling" and outcome == "confirm_user":
+            unbound = [r for r in rest.split() if r.endswith("value_unbound")]
+            why = "the amount came from the notice, not from you" if unbound else "it needs your OK"
+            events.append({"kind": "hold", "code": "confirm_user", "text": f"HOLD {tool}: {why}; asks you first"})
+        elif event == "decision":
+            events.append({"kind": "hold", "code": "decision", "text": "No one approved: the change is not made"})
+        elif event == "takeover":
+            events.append({"kind": "deny", "code": "takeover",
+                           "text": "TAKEOVER: the agent is stopped and the notice quarantined"})
+        elif event == "recovered":
+            events.append({"kind": "deny", "code": "recovered", "text": "A clean agent restarts on the same plan"})
+    if allowed:
+        events.insert(0, {"kind": "", "code": "allow", "text": f"{allowed} reads allowed (they trace to your request)"})
+    return events, chain
+
+
+def story(side: str, prompt: str, steps, attack_succeeded: bool, before: list[dict], after: list[dict],
+          ledger_path: str | None, digests: dict | None, note: str) -> dict:
+    """What the page plays: shown arguments only (never free text), each step's outcome, the payments before and
+    after, and under Munix the Gate's rulings."""
+    gate, chain = ledger_events(ledger_path) if side == "munix" else ([], None)
+    reasons = [g for g in gate if g["code"] in REASONS or g["code"] == "confirm_user"]
+    out_steps = []
+    for i, (tool, args, error) in enumerate(steps):
+        if tool.startswith("("):
+            continue
+        shown = {k: args[k] for k in SHOWN_ARGS if k in args}
+        verdict, reason = "", ""
+        if error and "declined" in error:
+            verdict, reason = "hold", REASONS["user_denied"]
+        elif error and "denied" in error:
+            verdict = "deny"
+            first = next((g for g in reasons if g["code"] in REASONS and g["code"] != "user_denied"), None)
+            reason = REASONS.get(first["code"], "refused") if first else "refused"
+            if first:
+                reasons.remove(first)
+        elif error:
+            verdict, reason = "deny", "refused"
+        elif any(str(v).lower() == ATTACKER_IBAN.lower() for v in args.values()):
+            verdict = "hijacked"
+        out_steps.append({"tool": tool, "args": shown, "verdict": verdict, "reason": reason,
+                          "reader": (digests or {}).get(i)})
+    return {"status": "done", "side": side, "prompt": prompt, "attacker_iban": ATTACKER_IBAN, "steps": out_steps,
+            "before": before, "after": after, "gate": gate, "chain": chain,
+            "attack_succeeded": attack_succeeded, "note": note}
+
+
+class _Page(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.split("?")[0] == "/story.json":
+            body, ctype = json.dumps(STORY).encode("utf-8"), "application/json"
+        elif self.path.split("?")[0] in ("/", "/index.html"):
+            body, ctype = WEB_PAGE.read_bytes(), "text/html; charset=utf-8"
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+def serve(port: int) -> None:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    webbrowser.open(f"http://127.0.0.1:{port}/")
+
+
 def recorded(case: str, side: str, run: int) -> str:
     from agentdojo.task_suite.load_suites import get_suite
 
@@ -196,7 +325,13 @@ def recorded(case: str, side: str, run: int) -> str:
     r = pair["runs"][run - 1]
     prompt = get_suite("v1.2.2", "banking").get_user_task_by_id(uid).PROMPT
     ledger = ledger_lines((r.get("munix") or {}).get("ledger")) if side == "munix" else None
-    text = render(side, prompt, steps_from_transcript(r["transcript"]), bool(r["security"]), ledger)
+    steps = steps_from_transcript(r["transcript"])
+    text = render(side, prompt, steps, bool(r["security"]), ledger)
+    before = payments(get_suite("v1.2.2", "banking").load_and_inject_default_environment({}))
+    STORY.update(story(side, prompt, steps, bool(r["security"]), before, before,
+                       (r.get("munix") or {}).get("ledger") if side == "munix" else None, None,
+                       f"Recorded run {run} of {len(pair['runs'])}, {doc['generated'][:10]} (transcript shortened; "
+                       "payments after the run are only known on a live run)."))
     return f"(recorded run {run} of {len(pair['runs'])}, {doc['generated']})\n" + text
 
 
@@ -236,6 +371,17 @@ def live(case: str, side: str, budget: float) -> str:
         )
     munix_executor.SUMMARIES.clear()
     target = make_target(target_args("munix" if session else "bare", "low", str(BINARY)), model, key, session)
+    # The capture element is the pipeline's last: it also sees the environment after the run, for the page.
+    capture_query = target.capture.query
+
+    def query_keeping_env(query, runtime, env=None, messages=(), extra_args=None):
+        target.capture.env = env
+        return capture_query(query, runtime, env, messages, extra_args)
+
+    target.capture.query = query_keeping_env
+    before = payments(suite.load_and_inject_default_environment({}))
+    STORY.update({"status": "running", "side": side, "prompt": user_task.PROMPT, "attacker_iban": ATTACKER_IBAN,
+                  "before": before})
     try:
         _, security, _ = run_case(suite, target, user_task, injection_task, injections)
         messages = list(target.capture.messages)
@@ -256,6 +402,10 @@ def live(case: str, side: str, budget: float) -> str:
     full = steps_with_results(messages)
     digests = {i: reader_digest(result) for i, (_, _, _, result) in enumerate(full)} if session else None
     steps = [(tool, args, error) for tool, args, error, _ in full]
+    env = getattr(target.capture, "env", None)
+    STORY.update(story(side, user_task.PROMPT, steps, bool(security), before, payments(env) if env else before,
+                       summary.get("ledger") if session is not None and munix_executor.SUMMARIES else None, digests,
+                       f"Live run, {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}, muse-spark-1.3."))
     return render(side, user_task.PROMPT, steps, bool(security), ledger, digests) + (
         f"\n(live run, about ${spent:.3f})"
     )
@@ -270,8 +420,19 @@ def main() -> int:
     how.add_argument("--live", action="store_true", help="run it now (Meta credit)")
     ap.add_argument("--run", type=int, default=1, help="--recorded: which of the recorded runs (1-3)")
     ap.add_argument("--budget", type=float, default=0.15, help="--live: warn above this cost (USD)")
+    ap.add_argument("--web", action="store_true", help="also show the run as a bank app page in the browser")
+    ap.add_argument("--port", type=int, default=8765, help="--web: the local port")
     args = ap.parse_args()
+    if args.web:
+        STORY.update({"status": "running", "side": args.side})
+        serve(args.port)
     print(recorded(args.case, args.side, args.run) if args.recorded else live(args.case, args.side, args.budget))
+    if args.web:
+        print(f"page: http://127.0.0.1:{args.port}/ (Ctrl-C to stop)")
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
     return 0
 
 
