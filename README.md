@@ -40,15 +40,36 @@ can propose actions but can't take them. Every action goes through code that kno
    behind it, and restarts a clean agent, at most twice. Every decision, with its reasons, goes into a hash-chained
    ledger.
 
-### What it guarantees, and what it doesn't
+### Scope: what Munix protects, and what it doesn't
 
-- **It guarantees:** content an attacker controls can't make the agent send your data or money to a destination you
-  didn't name or approve, whichever model runs the agent. Payment amounts and recurrence are traced too: an amount
-  that didn't come from you or your own records waits for your OK. Swapping models changes how useful the agent is, never how
-  safe it is.
-- **It doesn't make the agent smarter.** An attacker can still make an agent give up or do a worse job. A task that
-  really does mean acting on a stranger's word, such as paying the account number in a file nobody vouched for,
-  stops and asks you first.
+Munix can't stop bad data from reaching an agent. It limits what bad data can do through the agent's tools. The
+attacker is assumed to control anything the agent reads (web pages, files, emails, messages, tool outputs), to know
+exactly how Munix works, and to adapt. Swapping models changes how useful the agent is, never how safe it is.
+
+**In scope (code enforces these, whichever model runs the agent):**
+- **Actions you didn't authorize.** Content from a stranger can't make the agent send, pay, post or delete toward a
+  destination you didn't name or approve.
+- **Amounts and recurrence.** A payment amount or schedule that didn't come from you or your own records waits for
+  your OK.
+- **Data leaving.** Your private data can't go to a destination a stranger chose, and private text an attacker tries
+  to copy out verbatim (whole or in fragments) is caught by a leak check.
+- **Routing around Munix.** The agent has no network, no keys and no route but Munix's channel. Changing Munix's own
+  code, manifests, plans or config while a task runs stops every task (the Integrity Seal).
+- **Stalling and spinning.** An agent that stops making progress is killed and restarted clean, at most twice, and
+  plan budgets cap cost.
+
+**Out of scope (bounded at best, not prevented):**
+- **What the agent says.** Content can still steer the agent's answer: a biased recommendation, a wrong summary.
+  Readers usually keep the instruction from reaching the agent at all, but no code check can decide whether an
+  opinion is true. (AgentDojo travel has goals like this, and we report them separately.)
+- **Usefulness.** An attacker can still make the agent give up or do a worse job. A task that really does mean acting
+  on a stranger's word, such as paying the account number in a file nobody vouched for, stops and asks you first.
+- **Paraphrased or encoded leaks.** Private text rewritten or encoded before it leaves isn't matched by the leak
+  check. Destinations are still traced, so it can only go where you allowed.
+- **Threats outside the agent:** a malicious user, a compromised host or Munix process, a compromised model provider
+  or backdoored weights, and floods of requests from outside.
+
+The full threat model is in [`docs/design-spec.md`](docs/design-spec.md), section 2.
 
 ## Status (Oct 29, day 4 of 10): every piece works end to end, and we attacked it
 
