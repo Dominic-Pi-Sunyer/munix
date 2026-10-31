@@ -290,7 +290,7 @@ def cmd_run(args) -> int:
             elif args.phase == "goals":
                 stopped = run_cases(shard_of(inj_ids, args.shard), goal_case, should_stop)
             else:
-                attack = load_attack(ATTACK, suite, pipe)
+                attack = load_attack(args.attack, suite, pipe)
 
                 # One (user task, injection task) pair at a time, so the budget is checked before every case.
                 def attack_case(pair: tuple[str, str]) -> None:
@@ -327,7 +327,7 @@ def cmd_run(args) -> int:
         "phase": args.phase,
         "shard": args.shard,
         "benchmark_version": BENCHMARK_VERSION,
-        "attack": ATTACK if args.phase == "attack" else None,
+        "attack": args.attack if args.phase == "attack" else None,
         "setup": tag,
         "simulated_user": args.simulated_user,
         "detector_url": args.detector_url,
@@ -357,7 +357,9 @@ def cmd_run(args) -> int:
     }
     if args.mode == "munix":
         doc["munix"] = list(munix_executor.SUMMARIES)
-    out = HERE / "results" / result_name(tag, args.suite, args.phase, args.shard)
+    # A non-default attack gets its own file name, so it never overwrites the important_instructions results.
+    phase = args.phase if args.phase != "attack" or args.attack == ATTACK else f"attack-{args.attack}"
+    out = HERE / "results" / result_name(tag, args.suite, phase, args.shard)
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out.relative_to(HERE)}: {usage.calls} agent calls, about ${doc['estimated_cost_usd']:.4f}")
@@ -451,6 +453,7 @@ def main() -> int:
                    help="--mode munix: the prompt-injection detector's sidecar (loopback); runs are named munix+guard")
     r.add_argument("--detector-threshold", type=float, metavar="F",
                    help="--mode munix: score at or above which the detector flags a field (default: the bridge's)")
+    r.add_argument("--attack", default=ATTACK, help=f"AgentDojo attack for --phase attack (default: {ATTACK})")
     r.add_argument("--effort", default="low", choices=("minimal", "low", "medium", "high"))
     r.add_argument("--takeover", action="store_true", help="add the labeled simulated takeover to the system prompt")
     r.add_argument("--base-url", default=META_URL, help="OpenAI-compatible endpoint (default: the Meta Model API)")

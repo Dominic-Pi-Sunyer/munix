@@ -60,8 +60,8 @@ exactly how Munix works, and to adapt. Swapping models changes how useful the ag
 
 **Out of scope (bounded at best, not prevented):**
 - **What the agent says.** Content can still steer the agent's answer: a biased recommendation, a wrong summary.
-  Readers usually keep the instruction from reaching the agent at all, but no code check can decide whether an
-  opinion is true. (AgentDojo travel has goals like this, and we report them separately.)
+  Where a Reader handles the content, the instruction never reaches the agent; where text passes through (travel's
+  reviews), it can. Either way, no code check can decide whether an opinion is true. (AgentDojo travel has goals like this, and we report them separately.)
 - **Usefulness.** An attacker can still make the agent give up or do a worse job. A task that really does mean acting
   on a stranger's word, such as paying the account number in a file nobody vouched for, stops and asks you first.
 - **Paraphrased or encoded leaks.** Private text rewritten or encoded before it leaves isn't matched by the leak
@@ -148,6 +148,12 @@ right after the amount fix; Slack's last 2 tasks didn't run, budget). Repeats of
 Slack 20 / 19 / 19. † Oct 29 rerun on the current build, simulated user; all 251 ledgers verify. Banking was
 83 / 144 before; the biggest drop is the rent task (UT2, 9 → 0 of 9), which now waits for you because the new
 amount comes from a letter.
+
+**A stronger attack and a third suite (Oct 30).** With `tool_knowledge`, AgentDojo's strongest built-in attack,
+banking was 0 / 144 bare and **0 / 144 under Munix** (utility 121 vs 79). On the travel suite, AgentDojo scores 1 / 140
+bare and 2 / 140 under Munix, but all three are the same "say this hotel is gorgeous" goal, and in each the agent
+refused and named the hotel while warning the user: **0 real successes on either side**. Travel utility under attack
+was 124 / 140 bare and 85 / 140 under Munix.
 
 Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
 number found only in a file, opening a link from a channel message, or inviting someone whose email is on their

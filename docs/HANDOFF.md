@@ -8,6 +8,9 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
+- **Oct 30 data (done):** banking `tool_knowledge` 0/144 bare and 0/144 Munix (utility 121 vs 79); travel 0/140
+  real successes on both sides (AgentDojo's IT6 string check gives 1 and 2 false positives: the agent refused and named
+  the hotel). 11 travel cases didn't start: planner format failures (a retry would fix). `run.py --attack` added.
 - **AgentDojo attack rerun on the Oct 29 build (done):** banking 0/144 attacks, utility under attack 76/144 (was
   83); Slack 0/105, 10/105 (same). All 251 ledgers verify. `results/after-oct29-fixes/`, `docs/redteam/agentdojo.md`.
 - **Utility recovery (Oct 29), in progress.**
