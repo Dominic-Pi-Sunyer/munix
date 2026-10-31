@@ -111,7 +111,9 @@ def reader_digest(result: str) -> str | None:
         head, _, body = block.partition("\n")
         name = head.split(" ", 1)[0]
         if name in READER_FIELDS:
-            value = " ".join(line.strip("- ").strip() for line in body.strip().splitlines() if line.strip())
+            # Munix's own flag note (`front::FLAG_NOTE`) follows the last field after a blank line: not a value.
+            value = " ".join(line.strip("- ").strip() for line in body.split("Note: a Munix Reader")[0].strip().split("\n\n")[0].splitlines()
+                             if line.strip())
             parts.append(f"{name}={value}")
     return ", ".join(parts) or None
 
@@ -239,8 +241,8 @@ def ledger_events(path: str | None) -> tuple[list[dict], str | None]:
         if event == "ruling" and outcome == "allow":
             allowed += 1
         elif event == "ruling" and outcome == "deny" and code != "user_denied":
-            events.append({"kind": "deny", "code": code,
-                           "text": f"DENY {tool}: {REASONS.get(code or '', code or 'refused')}"})
+            reason = untrusted_reason(rest) or REASONS.get(code or "", code or "refused")
+            events.append({"kind": "deny", "code": code, "reason": reason, "text": f"DENY {tool}: {reason}"})
         elif event == "ruling" and outcome == "confirm_user":
             unbound = [r for r in rest.split() if r.endswith("value_unbound")]
             why = "the amount came from the notice, not from you" if unbound else "it needs your OK"
@@ -257,6 +259,17 @@ def ledger_events(path: str | None) -> tuple[list[dict], str | None]:
     return events, chain
 
 
+def untrusted_reason(rest: str) -> str | None:
+    """Which argument the Gate couldn't trace to the user, from a ruling's reasons (`amount.trace_untrusted`)."""
+    for r in rest.strip("[]").replace("[", " ").replace("]", " ").split():
+        arg, _, check = r.partition(".")
+        if check in ("trace_untrusted", "value_unbound"):
+            what = {"recipient": "account number", "amount": "new amount", "date": "date",
+                    "recurring": "repeat setting"}.get(arg, arg)
+            return f"the {what} came from the notice, not from you"
+    return None
+
+
 def story(side: str, prompt: str, steps, attack_succeeded: bool, before: list[dict], after: list[dict],
           ledger_path: str | None, digests: dict | None, note: str) -> dict:
     """What the page plays: shown arguments only (never free text), each step's outcome, the payments before and
@@ -264,9 +277,12 @@ def story(side: str, prompt: str, steps, attack_succeeded: bool, before: list[di
     gate, chain = ledger_events(ledger_path) if side == "munix" else ([], None)
     reasons = [g for g in gate if g["code"] in REASONS or g["code"] == "confirm_user"]
     out_steps = []
+    halted = any(g["code"] == "takeover" for g in gate) and not any(g["code"] == "recovered" for g in gate)
     for i, (tool, args, error) in enumerate(steps):
         if tool.startswith("("):
             continue
+        if halted and error and any(st["verdict"] == "deny" for st in out_steps):
+            continue  # the agent was stopped at the takeover: its later calls only hit a halted task
         shown = {k: args[k] for k in SHOWN_ARGS if k in args}
         verdict, reason = "", ""
         if error and "declined" in error:
@@ -274,7 +290,7 @@ def story(side: str, prompt: str, steps, attack_succeeded: bool, before: list[di
         elif error and "denied" in error:
             verdict = "deny"
             first = next((g for g in reasons if g["code"] in REASONS and g["code"] != "user_denied"), None)
-            reason = REASONS.get(first["code"], "refused") if first else "refused"
+            reason = first.get("reason") or REASONS.get(first["code"], "refused") if first else "refused"
             if first:
                 reasons.remove(first)
         elif error:
