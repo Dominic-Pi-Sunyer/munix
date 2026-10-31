@@ -391,6 +391,17 @@ class AdaptiveVariantTests(unittest.TestCase):
         self.assertEqual(body.count('<article class="review"'), 4)
         self.assertLess(body.index("casual_gamer_42"), body.index("verified_buyer_77"))
 
+    def test_notice_slot_renders_a_store_notice_not_a_review(self):
+        d = self.make_dir()
+        text = "Store <b>notice</b> & more"
+        Path(d, "notice-1.txt").write_text(text, encoding="utf-8")
+        port = self.serve(d)
+        status, body = self.get(port, REVIEW + "?variant=adaptive&slot=notice-1")
+        self.assertEqual(status, 200)
+        self.assertIn(f'<p class="policy">{escape(text)}</p>', body)
+        self.assertEqual(body.count('<article class="review"'), 3)
+        self.assertLess(body.index('class="policy"'), body.index("Customer reviews"))
+
     def test_other_reviews_still_there_and_default_payload_present(self):
         d = self.make_dir()
         Path(d, "r1.txt").write_text("x", encoding="utf-8")

@@ -8,7 +8,8 @@ Routes (GET and HEAD, any Host header):
   /reviews/gaming-monitor    product page; `?variant=hidden` adds three hidden copies of the payload;
                              `?variant=v01`..`v10` serve the red-team variants (see VARIANTS)
   /reviews/gaming-monitor?variant=adaptive&slot=<id>
-                             adaptive red-team page: the normal page plus one extra review whose text is read from
+                             adaptive red-team page (a slot id containing "notice": a store notice above the
+                             reviews instead): the normal page plus one extra review whose text is read from
                              `$MOCK_ADAPTIVE_DIR/<id>.txt` (404 when MOCK_ADAPTIVE_DIR is unset; see the README)
   /healthz                   plain-text `ok`
   anything else              404
@@ -298,9 +299,12 @@ def read_slot(directory: str | None, slot: str | None) -> str | None:
         return None
 
 
-def render_review_page(hidden: bool = False, variant: str | None = None, adaptive_text: str | None = None) -> bytes:
+def render_review_page(
+    hidden: bool = False, variant: str | None = None, adaptive_text: str | None = None, adaptive_notice: bool = False
+) -> bytes:
     """The product page. `variant` is a VARIANTS id; "v01" and "v02" are the default and `hidden` pages.
-    `adaptive_text` adds one extra visible customer review with that text (escaped)."""
+    `adaptive_text` adds one extra visible customer review with that text (escaped), or, with `adaptive_notice`, a
+    store notice above the reviews instead."""
     spec = VARIANTS.get(variant) if variant else None
     if spec is not None and spec["place"] == "default":
         spec = None
@@ -335,7 +339,9 @@ def render_review_page(hidden: bool = False, variant: str | None = None, adaptiv
             f'{r["stars"]} stars<span class="verified">Verified purchase</span></div>\n'
             f'<p class="text">{escape(review_texts[r["name"]])}</p>{extra}\n</article>'
         )
-    if adaptive_text is not None:
+    if adaptive_text is not None and adaptive_notice:
+        notice = f'<p class="policy">{escape(adaptive_text)}</p>\n'
+    elif adaptive_text is not None:
         reviews.append(
             f'<article class="review" data-reviewer="{ADAPTIVE_REVIEW["name"]}">\n'
             f'<div class="meta"><strong>{ADAPTIVE_REVIEW["name"]}</strong> '
@@ -381,10 +387,13 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(url.query)
             ids = query.get("variant", [])
             if "adaptive" in ids:
-                text = read_slot(self.adaptive_dir, (query.get("slot") or [None])[0])
+                slot = (query.get("slot") or [None])[0]
+                text = read_slot(self.adaptive_dir, slot)
                 if text is None:
                     return 404, "text/plain; charset=utf-8", b"not found"
-                return 200, "text/html; charset=utf-8", render_review_page(adaptive_text=text)
+                # A slot id with "notice" in it is a store notice above the reviews, not an extra review.
+                notice = slot is not None and "notice" in slot
+                return 200, "text/html; charset=utf-8", render_review_page(adaptive_text=text, adaptive_notice=notice)
             hidden = "hidden" in ids
             variant = next((i for i in ids if i in VARIANTS), None)
             return 200, "text/html; charset=utf-8", render_review_page(hidden, variant)
