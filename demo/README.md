@@ -73,8 +73,13 @@ One side per take; record each full screen and put them side by side in the edit
 
 ```bash
 CLEAR=1 demo/visual.sh left     # the plain agent: browser opens the page, the email goes to the injected address
-demo/visual.sh right            # inside Munix: refused, a clean agent restarts, the summary goes to the boss
+demo/visual.sh right            # inside Munix: refused, a clean agent restarts, you type y, the boss gets the summary
 ```
+
+The right side uses `examples/demo-plan.yaml`, which reads the raw page, so the attack reaches the agent and the
+refusal is on screen; after the restart Munix asks you to confirm the boss's email (the agent read untrusted text),
+so run it in a real terminal and type `y`. `READER=1` uses the planner's plan instead: a Reader returns typed values
+and the agent never sees the attack (safe, but nothing to refuse on camera).
 
 It starts Mailpit and the mock site, opens the inbox (and, for the right side, `munix dashboard` on port 8090),
 shows the agent's browser for 10 s per page read, and starts the agent 5 s after printing "start recording now".

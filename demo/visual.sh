@@ -3,7 +3,8 @@
 # Mailpit inbox on screen. Record each side full screen and put them side by side in the edit.
 #
 #   demo/visual.sh left            # the plain agent: the injected recipient gets the email
-#   demo/visual.sh right           # the same agent inside Munix: refused, then the summary goes to the boss
+#   demo/visual.sh right           # inside Munix: refused, a clean agent restarts, you type y, the boss gets the summary
+#   READER=1 demo/visual.sh right  # the planner's plan: a Reader returns typed values, the agent never sees the attack
 #   CLEAR=1 demo/visual.sh left    # empty the local Mailpit inbox first, for a clean shot
 #   REAL=1 demo/visual.sh left     # without the labeled simulated takeover (bare Muse Spark usually resists)
 #
@@ -39,6 +40,11 @@ if [ "$side" = "right" ]; then
     done
   fi
   open "http://127.0.0.1:8090"
+  # The hand-written plan reads the raw page (web.open), so the attack reaches the agent and the Gate's refusal is on
+  # screen. After the restart Munix asks you to confirm the boss's email: run this in a real terminal and type y.
+  if [ "${READER:-0}" != "1" ]; then
+    export PLAN="${PLAN:-examples/demo-plan.yaml}"
+  fi
 fi
 
 export HEADED=1
