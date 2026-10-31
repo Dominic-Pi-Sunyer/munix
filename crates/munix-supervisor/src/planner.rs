@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use munix_adapters::{ModelAdapter, ModelRequest, complete_typed, sanitize_schema};
+use munix_adapters::{AdapterError, ModelAdapter, ModelRequest, complete_typed, sanitize_schema};
 use munix_core::crypto::{Purpose, Signed, SigningKey};
 use munix_core::ids::{PlanId, ToolName};
 use munix_core::label::RegionType;
@@ -17,6 +17,9 @@ use serde_json::{Map, Value, json};
 use crate::reviewer::region_name;
 
 const MAX_OUTPUT_TOKENS: u32 = 4000;
+/// The output limit for the retry after a draft was cut off: long multi-part tasks (with reasoning tokens counted
+/// against the limit) can run past the first one.
+const MAX_OUTPUT_TOKENS_AFTER_CUTOFF: u32 = 8000;
 
 const SYSTEM_PROMPT: &str = "\
 You are the Munix Supervisor planner. Before the agent reads any untrusted content, you write the \
@@ -275,8 +278,9 @@ impl Planner {
     ///   - every budget at most `MAX_BUDGET_PER_STEP`;
     ///   - `auto_max_tier` at most 1;
     ///   - no store path that isn't in `stores`.
-    /// - **Retry:** on a failed check it asks once more, adding the failure text (the validator's message, never
-    ///   echoed model output) to the conversation. A second failure is `NoPlan`.
+    /// - **Retry:** on a failed check it asks once more, adding the failure text (the validator's message or the
+    ///   adapter's error, never echoed model output) to the conversation. A draft that was cut off is retried with
+    ///   `MAX_OUTPUT_TOKENS_AFTER_CUTOFF`. A second failure is `NoPlan`.
     /// - **Signing:** with `Purpose::Plan`.
     pub fn plan(
         &self,
@@ -292,6 +296,7 @@ impl Planner {
         let schema = plan_schema(catalog);
 
         let mut last_failure: Option<String> = None;
+        let mut max_output_tokens = MAX_OUTPUT_TOKENS;
         for _attempt in 0..2 {
             let user = match &last_failure {
                 None => base_user.clone(),
@@ -305,15 +310,28 @@ impl Planner {
                 user,
                 schema_name: "plan_draft".to_owned(),
                 schema: schema.clone(),
-                max_output_tokens: MAX_OUTPUT_TOKENS,
+                max_output_tokens,
             };
             let draft = match complete_typed::<PlanDraft>(self.adapter.as_ref(), &req) {
                 Ok(draft) => draft,
-                Err(_) => {
+                // Adapter errors never carry response text, so naming them is safe.
+                Err(AdapterError::BadOutput(_)) => {
                     last_failure = Some(
                         "draft parse check failed: the answer did not match the plan format"
                             .to_owned(),
                     );
+                    continue;
+                }
+                Err(AdapterError::Truncated) => {
+                    max_output_tokens = MAX_OUTPUT_TOKENS_AFTER_CUTOFF;
+                    last_failure = Some(
+                        "draft length check failed: the answer was cut off before the plan was complete"
+                            .to_owned(),
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    last_failure = Some(format!("planner call failed: {e}"));
                     continue;
                 }
             };
@@ -964,6 +982,46 @@ amendments:
         );
         assert!(!seen[1].user.contains("\"auto_max_tier\""));
         assert!(!seen[1].user.contains("may_embed"));
+    }
+
+    #[test]
+    fn a_cut_off_draft_is_retried_with_a_larger_limit() {
+        let mock = Arc::new(MockAdapter::new(vec![
+            Err(AdapterError::Truncated),
+            Ok(valid_demo_draft()),
+        ]));
+        let planner = Planner::new(mock.clone(), key());
+        planner
+            .plan(&prompt(), &catalog(), &stores(), "P-cut".parse().unwrap())
+            .unwrap();
+        let seen = mock.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].max_output_tokens, MAX_OUTPUT_TOKENS);
+        assert_eq!(seen[1].max_output_tokens, MAX_OUTPUT_TOKENS_AFTER_CUTOFF);
+        assert!(seen[1].user.contains("the answer was cut off"));
+    }
+
+    #[test]
+    fn a_failed_call_is_named_not_called_a_format_error() {
+        let mock = Arc::new(MockAdapter::new(vec![
+            Err(AdapterError::Timeout),
+            Err(AdapterError::Timeout),
+        ]));
+        let planner = Planner::new(mock.clone(), key());
+        let err = planner
+            .plan(
+                &prompt(),
+                &catalog(),
+                &stores(),
+                "P-timeout".parse().unwrap(),
+            )
+            .unwrap_err();
+        let PlanError::NoPlan(msg) = err else {
+            panic!("expected NoPlan, got {err:?}");
+        };
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(!msg.contains("plan format"), "{msg}");
+        assert_eq!(mock.seen()[1].max_output_tokens, MAX_OUTPUT_TOKENS);
     }
 
     #[test]

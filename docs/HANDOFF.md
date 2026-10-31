@@ -8,6 +8,9 @@ editing code, and the rest when you finish a piece of work.** Read `CLAUDE.md` (
 
 _Last updated: Thu Oct 29, 2026, by Claude (Opus 5.5)._
 
+- **Planner failures named (Oct 30, done):** the planner reports the real adapter failure (cut off, timed out, bad
+  shape) instead of always "did not match the plan format", and a cut-off draft is retried with 8000 output tokens.
+  Not yet measured on travel UT4, 8, 12, 17 (the 11 cases that didn't start).
 - **Oct 30 data (done):** banking `tool_knowledge` 0/144 bare and 0/144 Munix (utility 121 vs 79); travel 0/140
   real successes on both sides (AgentDojo's IT6 string check gives 1 and 2 false positives: the agent refused and named
   the hotel). 11 travel cases didn't start: planner format failures (a retry would fix). `run.py --attack` added.
