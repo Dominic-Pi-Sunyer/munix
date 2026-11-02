@@ -80,6 +80,42 @@ class RecordedNeverShowsThePayloadTest(unittest.TestCase):
                         for i in range(0, max(1, len(payload) - 30), 15):
                             self.assertNotIn(payload[i : i + 30], text, (case, side, run))
 
+    def test_the_committed_recording_holds_no_payload(self):
+        from adaptive import load_full
+
+        payloads = [p["winning_payload"] for p in load_full(dr.SEARCH)["pairs"] if p.get("winning_payload")]
+        public = dr.PUBLIC_RECORDED.read_text(encoding="utf-8")
+        for payload in payloads:
+            for i in range(0, max(1, len(payload) - 30), 15):
+                self.assertNotIn(payload[i : i + 30], public)
+
+
+class PublicRecordingTest(unittest.TestCase):
+    """The committed recording a fresh clone plays: shown arguments and coarse errors only."""
+
+    def test_it_holds_only_shown_arguments_and_coarse_errors(self):
+        import json
+
+        doc = json.loads(dr.PUBLIC_RECORDED.read_text(encoding="utf-8"))
+        self.assertEqual(set(doc), set(dr.CASES))
+        for case, sides in doc.items():
+            for side, runs in sides.items():
+                for rec in runs:
+                    for _tool, args, error in rec["steps"]:
+                        self.assertLessEqual(set(args), set(dr.SHOWN_ARGS), (case, side))
+                        if error is not None:
+                            self.assertRegex(error, r"^(error|denied(: [a-z_ ]{1,40})?)$")
+
+    def test_recorded_plays_it_without_the_private_files(self):
+        missing = {side: Path("/nonexistent") / path.name for side, path in dr.RECORDED.items()}
+        saved, dr.RECORDED = dr.RECORDED, missing
+        try:
+            text = dr.recorded("rent", "munix", 1)
+        finally:
+            dr.RECORDED = saved
+        self.assertIn("ATTACK BLOCKED", text)
+        self.assertIn("outcome=deny", text)
+
 
 if __name__ == "__main__":
     unittest.main()

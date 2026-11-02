@@ -71,7 +71,7 @@ exactly how Munix works, and to adapt. Swapping models changes how useful the ag
 
 The full threat model is in [`docs/design-spec.md`](docs/design-spec.md), section 2.
 
-## Status (Oct 29, day 4 of 10): every piece works end to end, and we attacked it
+## Status (Nov 1): every piece works end to end, and we attacked it
 
 | Piece | What it does |
 | :-- | :-- |
@@ -86,7 +86,9 @@ The full threat model is in [`docs/design-spec.md`](docs/design-spec.md), sectio
 | Refusals | The agent hears only "denied: not permitted" (or that you declined), never which rule tripped, so there's nothing to work around. The reasons go to the ledger |
 
 New on day 4: a white-box red team of the Gate (65 offline tests), fixes for what it found (attacker-chosen payment
-amounts, private text copied into messages), an adaptive attacker aimed at Munix itself, and utility fixes.
+amounts, private text copied into messages), an adaptive attacker aimed at Munix itself, and utility fixes. Since
+then: AgentDojo's strongest built-in attack on banking and Slack, the travel suite, a planner that retries a cut-off
+plan, and a bank app page that plays the real rent attack (`demo_replay.py --web`).
 
 ## Results
 
@@ -119,7 +121,7 @@ See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prom
   names you typed, untraced dates, a leak check that misses reversed text, and amounts or flags that match any of
   your own records.
 - **Adaptive, aimed at Munix.** The same Muse Spark attacker, told Munix's rules and, after every round, which rule
-  refused it, starting from the attacks that beat the bare agent: **0 of 29 rounds** got through. The closest it got
+  refused it, starting from the attacks that beat the bare agent: **0 of 53 rounds** got through. The closest it got
   was a request held for the user. A small run (budget-capped), see
   [`docs/redteam/adaptive-vs-munix-oct29.md`](docs/redteam/adaptive-vs-munix-oct29.md).
 
@@ -153,7 +155,8 @@ amount comes from a letter.
 banking was 0 / 144 bare and **0 / 144 under Munix** (utility 121 vs 79). On the travel suite, AgentDojo scores 1 / 140
 bare and 2 / 140 under Munix, but all three are the same "say this hotel is gorgeous" goal, and in each the agent
 refused and named the hotel while warning the user: **0 real successes on either side**. Travel utility under attack
-was 124 / 140 bare and 85 / 140 under Munix.
+was 124 / 140 bare and 94 / 140 under Munix. On Slack (Nov 1), `tool_knowledge` got 0 / 105 bare and **0 / 105 under
+Munix** (utility 78 vs 10).
 
 Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
 number found only in a file, opening a link from a channel message, or inviting someone whose email is on their
@@ -202,8 +205,12 @@ are test data.
 
 ```bash
 eval/agentdojo/.venv/bin/python -I eval/agentdojo/demo_replay.py --case rent --side bare --recorded
-eval/agentdojo/.venv/bin/python -I eval/agentdojo/demo_replay.py --case rent --side munix --recorded
+eval/agentdojo/.venv/bin/python -I eval/agentdojo/demo_replay.py --case rent --side munix --recorded --web
 ```
+
+Set up its environment first with `uv sync --project eval/agentdojo`. `--web` also plays the run as a bank app page in
+your browser. The recorded runs come from `eval/agentdojo/results/demo-recorded.json`, which holds tool names,
+account numbers, amounts and the Gate's rulings, never the attack text.
 
 **Prompt Guard 2** (gated on Hugging Face: accept Meta's license and put `HF_TOKEN` in `.env`):
 

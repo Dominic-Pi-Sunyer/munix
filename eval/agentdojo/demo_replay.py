@@ -50,6 +50,9 @@ RECORDED = {
     "bare": PRIVATE / "adaptive--banking-replay-bare-20261027T141629Z.json",
     "munix": PRIVATE / "adaptive--banking-replay-munix-20261027T142655Z.json",
 }
+# The same runs with every free text dropped (shown arguments, coarse errors, the ledger's rulings), committed so a
+# fresh clone can play them. `--export-recorded` writes it from the private files.
+PUBLIC_RECORDED = HERE / "results" / "demo-recorded.json"
 CASES = {
     "rent": ("user_task_2", "injection_task_4"),
     "spotify": ("user_task_5", "injection_task_0"),
@@ -271,10 +274,14 @@ def untrusted_reason(rest: str) -> str | None:
 
 
 def story(side: str, prompt: str, steps, attack_succeeded: bool, before: list[dict], after: list[dict],
-          ledger_path: str | None, digests: dict | None, note: str) -> dict:
+          ledger_path: str | None, digests: dict | None, note: str,
+          events: tuple[list[dict], str | None] | None = None) -> dict:
     """What the page plays: shown arguments only (never free text), each step's outcome, the payments before and
-    after, and under Munix the Gate's rulings."""
-    gate, chain = ledger_events(ledger_path) if side == "munix" else ([], None)
+    after, and under Munix the Gate's rulings (from the ledger, or `events` already read from it)."""
+    if events is not None:
+        gate, chain = [dict(g) for g in events[0]], events[1]
+    else:
+        gate, chain = ledger_events(ledger_path) if side == "munix" else ([], None)
     reasons = [g for g in gate if g["code"] in REASONS or g["code"] == "confirm_user"]
     out_steps = []
     halted = any(g["code"] == "takeover" for g in gate) and not any(g["code"] == "recovered" for g in gate)
@@ -336,19 +343,52 @@ def recorded(case: str, side: str, run: int) -> str:
     from adaptive import load_full
 
     uid, iid = CASES[case]
-    doc = load_full(RECORDED[side])
+    if RECORDED[side].is_file():
+        rec = recording(load_full(RECORDED[side]), uid, iid, side, run)
+    elif PUBLIC_RECORDED.is_file():
+        rec = json.loads(PUBLIC_RECORDED.read_text(encoding="utf-8"))[case][side][run - 1]
+    else:
+        raise SystemExit(f"no recorded runs here ({PUBLIC_RECORDED.name} is missing)")
+    prompt = get_suite("v1.2.2", "banking").get_user_task_by_id(uid).PROMPT
+    steps = [(tool, args, error) for tool, args, error in rec["steps"]]
+    ledger = rec["ledger"] if side == "munix" else None
+    text = render(side, prompt, steps, rec["security"], ledger)
+    before = payments(get_suite("v1.2.2", "banking").load_and_inject_default_environment({}))
+    STORY.update(story(side, prompt, steps, rec["security"], before, before, None, None,
+                       f"Recorded run {run} of {rec['runs']}, {rec['generated'][:10]} (transcript shortened; "
+                       "payments after the run are only known on a live run).", (rec["gate"], rec["chain"])))
+    return f"(recorded run {run} of {rec['runs']}, {rec['generated']})\n" + text
+
+
+def recording(doc: dict, uid: str, iid: str, side: str, run: int) -> dict:
+    """One recorded run with no free text left: the shown arguments, errors cut to Munix's coarse refusal (or just
+    "error"), and the ledger's rulings as `munix ledger` prints them."""
     pair = next(p for p in doc["pairs"] if (p["user_task"], p["injection_task"]) == (uid, iid))
     r = pair["runs"][run - 1]
-    prompt = get_suite("v1.2.2", "banking").get_user_task_by_id(uid).PROMPT
-    ledger = ledger_lines((r.get("munix") or {}).get("ledger")) if side == "munix" else None
-    steps = steps_from_transcript(r["transcript"])
-    text = render(side, prompt, steps, bool(r["security"]), ledger)
-    before = payments(get_suite("v1.2.2", "banking").load_and_inject_default_environment({}))
-    STORY.update(story(side, prompt, steps, bool(r["security"]), before, before,
-                       (r.get("munix") or {}).get("ledger") if side == "munix" else None, None,
-                       f"Recorded run {run} of {len(pair['runs'])}, {doc['generated'][:10]} (transcript shortened; "
-                       "payments after the run are only known on a live run)."))
-    return f"(recorded run {run} of {len(pair['runs'])}, {doc['generated']})\n" + text
+    path = (r.get("munix") or {}).get("ledger") if side == "munix" else None
+    steps = []
+    for tool, args, error in steps_from_transcript(r["transcript"]):
+        if error is not None and not re.fullmatch(r"denied: [a-z_ ]{1,40}", error):
+            error = "denied" if error.startswith("denied") else "error"
+        steps.append([tool, {k: args[k] for k in SHOWN_ARGS if k in args}, error])
+    gate, chain = ledger_events(path) if side == "munix" else ([], None)
+    return {"generated": doc["generated"], "runs": len(pair["runs"]), "security": bool(r["security"]),
+            "steps": steps, "ledger": ledger_lines(path) if side == "munix" else None, "gate": gate, "chain": chain}
+
+
+def export_recorded() -> str:
+    """Writes PUBLIC_RECORDED from the private replays: every case, both sides, every run."""
+    from adaptive import load_full
+
+    out: dict = {}
+    for case, (uid, iid) in CASES.items():
+        out[case] = {}
+        for side in ("bare", "munix"):
+            doc = load_full(RECORDED[side])
+            pair = next(p for p in doc["pairs"] if (p["user_task"], p["injection_task"]) == (uid, iid))
+            out[case][side] = [recording(doc, uid, iid, side, n) for n in range(1, len(pair["runs"]) + 1)]
+    PUBLIC_RECORDED.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+    return f"wrote {PUBLIC_RECORDED.relative_to(HERE)}"
 
 
 def live(case: str, side: str, budget: float) -> str:
@@ -429,16 +469,23 @@ def live(case: str, side: str, budget: float) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--case", choices=sorted(CASES), required=True)
-    ap.add_argument("--side", choices=("bare", "munix"), required=True)
+    ap.add_argument("--case", choices=sorted(CASES))
+    ap.add_argument("--side", choices=("bare", "munix"))
     how = ap.add_mutually_exclusive_group(required=True)
     how.add_argument("--recorded", action="store_true", help="show a recorded run (no API call)")
     how.add_argument("--live", action="store_true", help="run it now (Meta credit)")
+    how.add_argument("--export-recorded", action="store_true",
+                     help=f"write results/{PUBLIC_RECORDED.name} from the private replays (no API call)")
     ap.add_argument("--run", type=int, default=1, help="--recorded: which of the recorded runs (1-3)")
     ap.add_argument("--budget", type=float, default=0.15, help="--live: warn above this cost (USD)")
     ap.add_argument("--web", action="store_true", help="also show the run as a bank app page in the browser")
     ap.add_argument("--port", type=int, default=8765, help="--web: the local port")
     args = ap.parse_args()
+    if args.export_recorded:
+        print(export_recorded())
+        return 0
+    if not args.case or not args.side:
+        ap.error("--case and --side are required")
     if args.web:
         STORY.update({"status": "running", "side": args.side})
         serve(args.port)

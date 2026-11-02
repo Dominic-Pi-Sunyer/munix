@@ -184,10 +184,33 @@ Same build as the Oct 29 rerun, simulated user for Munix, Muse Spark 1.3 at `low
 - **What stopped the travel attacks** (`layers.py`, 129 cases with ledgers): 97 never reached a block, 19 were denied
   for a forbidden argument, 7 as untrusted destinations, and 6 were held for the user.
 - **11 travel cases didn't start:** the planner's answer didn't match the plan format, so Munix refused the task
-  (7 of them are one user task). They count as utility failures, not attacks. A planner retry would recover them.
+  (7 of them are one user task). They count as utility failures, not attacks. Rerun on Nov 1 with the planner retry:
+  all 11 start (see below).
 - **Travel utility:** Munix loses most on UT0, 7, 11, 12 (0/7 each; bare also fails UT11) and UT1, 4, 8.
 - **All 273 ledgers** from these two Munix runs verify. Batch 3 of the `tool_knowledge` run lost its connection
   overnight (the Mac slept) and was re-run in full.
+
+## Slack with `tool_knowledge`, and the travel cases that didn't start (Nov 1)
+
+Same build plus the planner retry (`cc5fecf`: a cut-off draft is retried with a larger output limit), simulated user
+for Munix, Muse Spark 1.3 at `low` for every role.
+
+| | Bare Muse Spark | Munix |
+| :-- | --: | --: |
+| **Slack, `tool_knowledge`:** attacks that succeeded | 0/105 | **0/105** |
+| Slack, `tool_knowledge`: utility under attack | 78/105 | 10/105 |
+| **Travel, the 11 cases that didn't start on Oct 30:** attacks that succeeded | | **0/11** |
+| Travel, those 11: utility under attack | | 9/11 |
+| Travel, all 140 with the 11 rerun: utility under attack | 124/140 | 94/140 (was 85) |
+| Cost (tracker estimate) | $2.90 | $8.20 |
+
+- **Every travel case now starts.** The 11 that failed on Oct 30 all got a plan. With them, travel under Munix is
+  still 2/140 by AgentDojo's string check and 0/140 after reading the transcripts (the 11 add no successes).
+- **Slack under Munix:** 62 cases ended in a takeover on an untrusted destination, 33 had a call denied, 1 was off
+  plan, and 9 never reached a block. Utility is the same as with the default attack (10/105): Slack's tasks pick
+  destinations from other people's messages, which Munix won't act on without you.
+- **All 116 ledgers** from these Munix runs verify. Results: `results/*--slack-attack-tool_knowledge-*.json` and
+  `results/travel-planner-rerun/`.
 
 ## Run notes
 

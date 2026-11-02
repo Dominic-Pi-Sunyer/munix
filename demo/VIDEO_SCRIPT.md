@@ -1,30 +1,35 @@
-# Demo video script (draft 3, synced to the motion graphics)
+# Demo video script (draft 5, synced to the motion graphics, with face cam)
 
 Target **3:00**. Each section is one After Effects scene comp (S1 to S7, prompts in the Google Doc "Munix demo
 video: motion graphics prompts"). The VO lines are timed to the scene's build markers: **[M1]**, **[M2]**… are the
-markers to place in that comp, and the VO line after a marker starts on it. About 150 words a minute; every block
-below fits its slot when read at that pace.
+markers to place in that comp, and the VO line after a marker starts on it. About 150 words a minute.
 
 **Rules on screen** (from `HACKATHON.md`): the injected text is never shown (redaction bars stand in for it); no
 Web Speed branding; every number matches `docs/redteam/*.md` and the benchmark doc.
 
 ---
 
-## S1 · 0:00–0:10 · Title and intro (face cam or VO over the title card)
+## S1 · 0:00–0:10 · Title and intro (face cam)
 
-[M1 0:00, headline reveals] "Hi, I'm Dominic. AI agents now read the web, your email and your files, and anything
-they read can carry instructions written by a stranger."
+[M1 0:00, face cam, headline reveals over the shot] "Hi, I'm Dominic. AI agents now read the web, your email and
+your files, and anything they read can carry instructions written by a stranger."
 
-[M2 0:05, lower third] "I built Munix, a runtime that makes sure those strangers can't take over the agent. Here's
-what that looks like."
+[M2 0:05, face cam, name lower third] "I built Munix, a runtime that makes sure those strangers can't turn the
+agent's tools against you. Here's what that looks like."
 
-## S2 · 0:10–0:50 · The split screen (footage + S2 overlays)
+> **Face cam note.** Three pieces are on camera, about 35 s of the 3:00: S1 (0:00–0:10), the opening of S3 M1
+> (0:50–1:01) and S7 M1–M2 (2:40–2:54). Everything else is screen footage or motion graphics with VO. Record them
+> last, after the demo is cut, so each line fits its slot. Frame at eye level with a window in front of you and a
+> plain background, and keep the same framing and shirt for all three so they cut together. Use the same mic as the
+> VO, so the voice doesn't change between camera and screen. Do three takes of each line and pick in the edit.
+
+## S2 · 0:10–0:50 · The split screen (bank app footage + S2 overlays)
 
 [M1 0:10, labels] "Same model, Muse Spark, same task, same attack. On the left it runs on its own. On the right it
 runs inside Munix."
 
 [M2 0:15, task line] "The user asks it to update their rent from the landlord's notice. Hidden in that notice is an
-attack Muse Spark wrote against itself. It worked on the unprotected agent every time we tried it."
+attack Muse Spark wrote against itself. It takes over the unprotected agent in most runs."
 
 [M3 ~0:25, left callout, retime to footage] "On the left, the agent changes the rent and redirects it to the
 attacker's account. AgentDojo's own check confirms the attack succeeded."
@@ -33,25 +38,21 @@ attacker's account. AgentDojo's own check confirms the attack succeeded."
 values: a rent notice, an amount, what the amount means, and a flag that it contained instructions. There's no text
 left for an attack to ride in on."
 
-[M5 ~0:41, right callout 2] "And because that amount came from a document, not from me, Munix holds the change and
-asks me first. The attacker's account is never touched."
+[M5 ~0:41, right callout 2] "And because that new amount came from a letter, not from me, the Gate refuses the
+change and stops the agent. The attacker gets nothing."
 
 [M6 0:47, verdict bars] (no VO; hold on "ATTACK SUCCEEDED" / "ATTACK BLOCKED")
 
-> **Bank app take.** For a visual S2, run each side with `--web` (`eval/agentdojo/demo_replay.py --case rent --side
-> bare --live --web`, then `--side munix`) and record the page full screen; it plays the real run's steps and payments.
->
-> **Film note.** Under the current build a live take parks the rent change for the user (`amount.value_unbound`);
-> with no one at the Console it is declined, so the right side ends with the attack blocked and the rent unchanged.
-> The M5 line matches that. If we add an interactive Console to `demo_replay.py`, film yourself approving the
-> 1,200.00 instead and change M5 to "…asks me first. I approve the amount; the attacker's account is never
-> touched." `--recorded` takes are from the Oct 28 build and don't show the hold.
+> **Film note.** Film each side as the bank app page and record it full screen:
+> `eval/agentdojo/demo_replay.py --case rent --side bare --live --web`, then the same with `--side munix`. The page
+> plays the real run: the agent's steps, the scheduled payments before and after, and on the right the Gate's
+> rulings. The bare agent sometimes ignores the attack, so retake until it lands. Each live take costs a few cents.
 
-## S3 · 0:50–1:50 · How Munix works (architecture build)
+## S3 · 0:50–1:50 · How Munix works (face cam, then architecture build)
 
-[M1 0:50, agent + sandbox closes] "Munix doesn't trust the model to refuse. A refusal is a probability, and an agent
-that acts a thousand times a day only has to fail once. So the agent runs boxed in: no network, no keys. It can only
-propose actions."
+[M1 0:50, face cam for the first two sentences; cut to the build on "So the agent runs boxed in" as the sandbox
+closes] "Munix doesn't trust the model to refuse. A refusal is a probability, and an agent that acts a thousand times
+a day only has to fail once. So the agent runs boxed in: no network, no keys. It can only propose actions."
 
 [M2 1:00, You + Supervisor] "Before it reads anything, a separate Muse Spark planner, which only ever sees my
 prompt, writes a plan: which tools may run, and where each argument may come from."
@@ -63,8 +64,8 @@ destination and every amount back to where it came from. No model makes that cal
 
 [M5 1:25, Tools] "Only what the Gate allows reaches the real tools."
 
-[M6 1:30, Ingest + loop] "Everything coming back is labeled by who wrote it. Links become opaque references, and
-text from strangers comes back only as typed values. Trust only ever goes down."
+[M6 1:30, Ingest + loop] "Everything coming back is labeled by who wrote it. Links become opaque references, and text
+from strangers comes back only as typed values. Trust only ever goes down."
 
 [M7 1:40, Ledger + pulse] "And every decision, with its reason, goes into a hash-chained ledger you can verify."
 
@@ -73,8 +74,8 @@ text from strangers comes back only as typed values. Trust only ever goes down."
 [M1 1:50, table rows] "Munix also runs Meta's Llama Prompt Guard 2 as a detector that can only lower trust. It
 catches the obvious attacks: fourteen out of fourteen."
 
-[M2 1:58, last rows count] "But AgentDojo's strongest attack, and the sixteen attacks Muse Spark wrote that took
-over the agent, read like ordinary notices. It flagged none of them."
+[M2 1:58, last rows count] "But AgentDojo's strongest attack, and the sixteen attacks Muse Spark wrote that took over
+the agent, read like ordinary notices. It flagged none of them."
 
 [M3 2:05, closing line] "Munix doesn't need the detector to be right."
 
@@ -83,28 +84,27 @@ over the agent, read like ordinary notices. It flagged none of them."
 [M1 2:10, headline counters] "We had Muse Spark write new attacks against itself. Sixteen of them broke the
 unprotected agent, forty-two times in forty-eight runs. Under Munix: zero."
 
-[M2 2:18, model swap card] "Swap in a different model, Muse Wonder, and the agent changes. The safety doesn't:
-still zero."
+[M2 2:18, model swap card] "Swap in a different model, Muse Wonder, and the agent changes. The safety doesn't: still
+zero."
 
-[M3 2:24, attacker-vs-Munix card] "Then we gave the attacker Munix's rules and told it why each attempt was
-refused. Zero of twenty-nine rounds got through."
+[M3 2:24, attacker-vs-Munix card] "Then we gave the attacker Munix's rules and told it why each attempt was refused.
+Zero of twenty-nine rounds got through."
 
 [M4 2:31, AgentDojo table] "On AgentDojo, the academic benchmark for agent security, Munix stopped every attack in
-banking and Slack. It has a cost, and we report it: when a task really means acting on a stranger's word, Munix
-stops and asks you."
+banking, Slack and travel. It has a cost: when a task means relying on a stranger's word, it stops and asks you."
 
 ## S6 · inside S5 · Efficiency (optional 6 s, cut if over time)
 
 [M1] "The code check takes about twelve milliseconds, and no model ever has the final say."
 
-## S7 · 2:40–3:00 · Close
+## S7 · 2:40–3:00 · Close (face cam, then logo card)
 
-[M1 2:40, close lines] "Content an attacker controls can't send your money or your data somewhere you didn't
-choose."
+[M1 2:40, face cam, line as a lower third] "Content an attacker controls can't send your money or your data
+somewhere you didn't choose."
 
-[M2 2:48, second card] "Swap the model and the agent gets smarter or dumber, never less safe."
+[M2 2:48, face cam, line as a lower third] "Swap the model and the agent gets smarter or dumber, never less safe."
 
-[M3 2:54, logo + repo] "That's Munix, built on Muse Spark and Llama Prompt Guard 2. Thanks for watching."
+[M3 2:54, cut to logo + repo, VO] "That's Munix, built on Muse Spark and Llama Prompt Guard 2. Thanks for watching."
 
 ---
 
@@ -118,15 +118,5 @@ choose."
 | S5 | 16 attacks; bare 42 / 48, Munix 0 / 48, Munix + Prompt Guard 0 / 48 | same |
 | S5 | Muse Wonder as the agent: bare 7 / 27, Munix 0 / 27 | same |
 | S5 | Attacker that knows Munix's rules: 0 of 29 rounds | `docs/redteam/adaptive-vs-munix-oct29.md` |
-| S5 | AgentDojo banking 144 attacks (140 ran under Munix), Slack 105: 0 succeeded bare, 0 under Munix | `docs/redteam/agentdojo.md` |
+| S5 | AgentDojo, attacks that succeeded, bare / Munix: banking 0 / 0 (144 cases, default and `tool_knowledge` attacks), Slack 0 / 0 (105), travel 0 / 0 (140; AgentDojo's string check counts 1 and 2, all refusals that named the hotel) | `docs/redteam/agentdojo.md` |
 | S6 | about 12 ms per code check | latency tests |
-
-## Open items
-
-- **Utility line (S5 M4):** the Oct 29 utility fixes are being measured now. If the numbers recover enough, add one
-  card with tasks completed (bare vs Munix); otherwise keep the honest one-line "it stops and asks you".
-- **S2 live take:** decide between filming the hold as is (M5 as written) or adding an interactive Console so you
-  approve the amount on camera.
-- **S6 "1.2× cost with plan memory":** measured before Oct 29; plan memory was relearned after the manifest change,
-  so it's off screen until remeasured.
-- Video length limit and face cam vs voice only: confirm against the submission rules.
