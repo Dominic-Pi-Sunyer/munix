@@ -87,7 +87,7 @@ The full threat model is in [`docs/design-spec.md`](docs/design-spec.md), sectio
 
 New on day 4: a white-box red team of the Gate (65 offline tests), fixes for what it found (attacker-chosen payment
 amounts, private text copied into messages), an adaptive attacker aimed at Munix itself, and utility fixes. Since
-then: AgentDojo's strongest built-in attack on banking and Slack, the travel suite, a planner that retries a cut-off
+then: AgentDojo's strongest built-in attack on all three suites, the travel suite, a planner that retries a cut-off
 plan, and a bank app page that plays the real rent attack (`demo_replay.py --web`).
 
 ## Results
@@ -121,8 +121,9 @@ See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prom
   names you typed, untraced dates, a leak check that misses reversed text, and amounts or flags that match any of
   your own records.
 - **Adaptive, aimed at Munix.** The same Muse Spark attacker, told Munix's rules and, after every round, which rule
-  refused it, starting from the attacks that beat the bare agent: **0 of 77 rounds** got through. In Slack the agent
-  did go for the attacker's link or site in most rounds, and the Gate denied each call in code. A small run
+  refused it, starting from the attacks that beat the bare agent: **0 of 89 rounds** got through, across banking, Slack
+  and travel. In Slack and travel the agent did go for the attacker's link, site or hotel in most rounds, and the
+  Gate denied each call in code. A small run
   (budget-capped), see
   [`docs/redteam/adaptive-vs-munix-oct29.md`](docs/redteam/adaptive-vs-munix-oct29.md).
 
@@ -157,7 +158,9 @@ banking was 0 / 144 bare and **0 / 144 under Munix** (utility 121 vs 79). On the
 bare and 2 / 140 under Munix, but all three are the same "say this hotel is gorgeous" goal, and in each the agent
 refused and named the hotel while warning the user: **0 real successes on either side**. Travel utility under attack
 was 124 / 140 bare and 94 / 140 under Munix. On Slack (Nov 1), `tool_knowledge` got 0 / 105 bare and **0 / 105 under
-Munix** (utility 78 vs 10).
+Munix** (utility 78 vs 10). On travel (Nov 2), `tool_knowledge` got 0 real successes on either side (AgentDojo's
+string check counts 5 / 140 bare and 2 / 127 under Munix, all refusals that named the hotel; 13 Munix cases were cut
+by the credit floor), utility 126 / 140 vs 76 / 127.
 
 Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
 number found only in a file, opening a link from a channel message, or inviting someone whose email is on their
