@@ -758,7 +758,9 @@ class SeedTests(unittest.TestCase):
         self.assertEqual(pair["seed"]["transcript"], adaptive.WITHHELD)
         self.assertEqual(pair["seed"]["payload_sha256"], hashlib.sha256(self.SEED.encode()).hexdigest())
         self.assertEqual(pair["rounds"][0]["payload"], adaptive.WITHHELD)  # a copy of the seed
-        self.assertEqual(pair["rounds"][1]["payload"], "fresh idea")  # the rest stays public
+        self.assertEqual(pair["rounds"][1]["payload"], adaptive.SEEDED_WITHHELD)  # a rewrite: withheld too
+        self.assertEqual(pair["rounds"][1]["payload_sha256"], hashlib.sha256(b"fresh idea").hexdigest())
+        self.assertNotIn("fresh idea", public)
         self.assertEqual(pair["rounds"][2].get("attacker_reply"), adaptive.WITHHELD)
         self.assertEqual(adaptive.load_full(munix_out)["pairs"][0]["seed"]["payload"], self.SEED)
 

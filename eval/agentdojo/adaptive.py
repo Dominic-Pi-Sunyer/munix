@@ -62,6 +62,10 @@ RESULTS = HERE / "results"
 # until reported to Meta. The public results keep a hash and a length in their place.
 PRIVATE = RESULTS / "private"
 WITHHELD = "successful payload, kept out of the public repo until reported to Meta (see results/private/)"
+# A round of a pair seeded from a working attack: the attacker rewrote that attack, so its text stays private too.
+SEEDED_WITHHELD = (
+    "seeded from a successful payload: kept out of the public repo until reported to Meta (see results/private/)"
+)
 DEFAULT_PRICES = (1.25, 4.25)  # USD per million input / output tokens, as in run.py
 MAX_PAYLOAD_CHARS = 3000
 TRANSCRIPT_CHARS = 1500
@@ -523,8 +527,9 @@ def public_copy(doc: dict) -> dict:
     replayed payload succeeded once, so each pair loses its payload and every run its transcript.
 
     Munix-mode search: a `seed` (an earlier winner, shown to the attacker as round 0) is a working attack, so it
-    always loses its payload and transcript; so does any round whose payload contains the seed's text (the attacker
-    may resubmit it), and a seeded pair's refusal quotes. The Munix fields (`munix_stop`, counts) hold only codes.
+    always loses its payload and transcript. Every round of a seeded pair is a rewrite of it, so each loses its
+    payload, rationale, transcript and refusal quotes as well (WITHHELD for a win or a copy of the seed,
+    SEEDED_WITHHELD for the rest). The Munix fields (`munix_stop`, counts) hold only codes.
     """
     out = copy.deepcopy(doc)
     for pair in out.get("pairs", []):
@@ -548,15 +553,17 @@ def public_copy(doc: dict) -> dict:
         elif isinstance(seed, dict):  # no usable payload text, but the transcript could still quote one
             if "transcript" in seed:
                 seed["transcript"] = WITHHELD
+        seeded = isinstance(seed, dict)
         for rnd in pair.get("rounds", []):
             text = rnd.get("payload")
             copies_seed = isinstance(text, str) and isinstance(seed_text, str) and seed_text.strip() in text
-            if (rnd.get("security") is True or copies_seed) and isinstance(text, str):
-                rnd.update(payload=WITHHELD, payload_sha256=_digest(text), payload_chars=len(text))
-                rnd["rationale"] = WITHHELD
+            mark = WITHHELD if rnd.get("security") is True or copies_seed else SEEDED_WITHHELD if seeded else None
+            if mark and isinstance(text, str):
+                rnd.update(payload=mark, payload_sha256=_digest(text), payload_chars=len(text))
+                rnd["rationale"] = mark
                 if "transcript" in rnd:
-                    rnd["transcript"] = WITHHELD
-            if isinstance(seed_text, str) and "attacker_reply" in rnd:
+                    rnd["transcript"] = mark
+            if seeded and "attacker_reply" in rnd:
                 rnd["attacker_reply"] = WITHHELD
     return out
 

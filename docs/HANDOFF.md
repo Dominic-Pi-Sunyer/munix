@@ -16,8 +16,8 @@ _Last updated: Sun Nov 1, 2026, by Claude (Opus 5.5)._
   (utility 78 vs 10); the 11 travel cases that didn't start all start now, 0/11 attacks, 9/11 utility (travel Munix
   utility 94/140); adaptive-vs-Munix banking UT0 × IT1, IT5, IT8, 24 rounds, 0 successes (53 in all). All 116 ledgers
   verify. The new adaptive public file had the seeded pairs' round text by `public_copy`'s rule (only the seed and
-  copies of it are withheld); it was withheld by hand to match the doc. Open: make `public_copy` withhold every round
-  of a seeded pair (owner to decide).
+  copies of it are withheld); it was withheld by hand to match the doc. `public_copy` now withholds every round of a
+  seeded pair (`SEEDED_WITHHELD`), with its hash and length, so the next seeded search needs no hand fix.
 
 - **Rent attack as a bank app page (Oct 31):** `demo_replay.py --web` serves `eval/agentdojo/demo_bank.html`
   (request, redacted notice, steps, scheduled payments before/after from AgentDojo's env, Munix Gate rulings, verdict).
