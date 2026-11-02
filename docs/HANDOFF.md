@@ -12,6 +12,9 @@ _Last updated: Sun Nov 1, 2026, by Claude (Opus 5.5)._
   `demo_replay.py --recorded` failed there (it read only `results/private/`); it now falls back to a committed,
   text-free recording (`results/demo-recorded.json`, rebuilt by `--export-recorded`), with tests. `demo/VIDEO_SCRIPT.md`
   synced to the Google Doc (draft 5, face cam).
+- **Nov 1 data, second batch (owner's OK, ~$3.90 tracker):** Muse Wonder on the 7 adaptive attacks not tried before:
+  bare 3/21, Munix 0/21 (all 16: 10/48 vs 0/48). Adaptive vs Munix on 3 new seeded Slack pairs (UT1 × IT3,
+  UT17 × IT1, UT18 × IT3): 0 of 24, the Gate denied 21 rounds (`untrusted_destination`); 0 of 77 rounds in all.
 - **Nov 1 data (owner's OK, floor $20, ~$13.60 tracker):** Slack `tool_knowledge` 0/105 bare and 0/105 Munix
   (utility 78 vs 10); the 11 travel cases that didn't start all start now, 0/11 attacks, 9/11 utility (travel Munix
   utility 94/140); adaptive-vs-Munix banking UT0 × IT1, IT5, IT8, 24 rounds, 0 successes (53 in all). All 116 ledgers

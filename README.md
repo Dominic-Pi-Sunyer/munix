@@ -105,7 +105,7 @@ account, leak private data in a payment, send a coworker a phishing link, or sen
 | The same agent under Munix | **0 / 48** |
 | Under Munix with Llama Prompt Guard 2 | **0 / 48** |
 | Llama Prompt Guard 2 alone, scoring the attack text | flagged **0 / 16** |
-| Swap the agent for Muse Wonder (first 9 attacks): no protection / under Munix | 7 / 27 / **0 / 27** |
+| Swap the agent for Muse Wonder: no protection / under Munix | 10 / 48 / **0 / 48** |
 
 In banking, the Readers stopped the attacks: the poisoned file and payment notes reached the agent only as typed
 values, so it never tried. In Slack, the agent did try to open the phishing site, and the Gate denied the call in code:
@@ -121,8 +121,9 @@ See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prom
   names you typed, untraced dates, a leak check that misses reversed text, and amounts or flags that match any of
   your own records.
 - **Adaptive, aimed at Munix.** The same Muse Spark attacker, told Munix's rules and, after every round, which rule
-  refused it, starting from the attacks that beat the bare agent: **0 of 53 rounds** got through. The closest it got
-  was a request held for the user. A small run (budget-capped), see
+  refused it, starting from the attacks that beat the bare agent: **0 of 77 rounds** got through. In Slack the agent
+  did go for the attacker's link or site in most rounds, and the Gate denied each call in code. A small run
+  (budget-capped), see
   [`docs/redteam/adaptive-vs-munix-oct29.md`](docs/redteam/adaptive-vs-munix-oct29.md).
 
 ### Meta's Prompt Guard 2, inside Munix
