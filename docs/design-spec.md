@@ -6,7 +6,7 @@
 > everything in this repository's git history (first commit Oct 26, 2026).
 
 
-*v0.3, 2026-10-10. M0–M2 are done (see the roadmap in section 12 and [STATUS.md](docs/STATUS.md) for the current state and next steps). The wire types live in `crates/munix-core`, JSON Schemas in `/schemas`, example manifests in `/manifests`, and the worked example in `/examples`. When this document and the code disagree, the code and schemas are authoritative.*
+*v0.3, 2026-10-10. M0–M2 are done (see the roadmap in section 12 and the prototype's `STATUS.md` (not in this repository) for the current state and next steps). The wire types live in `crates/munix-core`, JSON Schemas in `/schemas`, example manifests in `/manifests`, and the worked example in `/examples`. When this document and the code disagree, the code and schemas are authoritative.*
 
 Munix sits between any AI agent (any model, any framework) and everything the agent can touch: tools, the web, MCP servers, credentials. Its job is to make sure untrusted content can't cause actions the user didn't intend, and can't leak data to places the user didn't intend, while the agent still runs on autopilot.
 
@@ -572,7 +572,7 @@ Every milestone ends with exit criteria. The crates have clean ownership boundar
 |---|---|---|
 | **M0** ✅ | Freeze the spec: threat model, manifest, plan, request and decision schemas | Schemas published, with example manifests for 5 tools. **Done 2026-10-07:** `munix-core`, 10 schemas, 5 manifests, worked example, 32 tests |
 | **M1** ✅ | Gate core: Tool Proxy, Vault placeholders, request validation, budgets, ledger, deterministic policy engine (plans written by hand) | A toy agent can act only through the Gate. Unsigned or altered requests are rejected. The ledger chain verifies. **Done 2026-10-08:** `munix-gate`, `munix-ledger`, toy agent, 205 tests |
-| **M2** ✅ | Supervisor: planner, metadata view with redaction, two-stage approver, denials and amendments, two model adapters | A fuzz test shows no attacker string ever reaches B's model. `munix demo --attack` runs end to end with real models. **Done 2026-10-10:** `munix-supervisor`, `munix-adapters` (Anthropic, OpenAI-compatible/LM Studio, `agy` CLI, mock), `munix-cli`. The AgentDojo run moved to M7, since it needs the M6 integration to drive a real agent. Status and handoff: [STATUS.md](docs/STATUS.md) |
+| **M2** ✅ | Supervisor: planner, metadata view with redaction, two-stage approver, denials and amendments, two model adapters | A fuzz test shows no attacker string ever reaches B's model. `munix demo --attack` runs end to end with real models. **Done 2026-10-10:** `munix-supervisor`, `munix-adapters` (Anthropic, OpenAI-compatible/LM Studio, `agy` CLI, mock), `munix-cli`. The AgentDojo run moved to M7, since it needs the M6 integration to drive a real agent. Status and handoff: the prototype's `STATUS.md` (not in this repository) |
 | **M3** | Trust Engine v1: render, strip hidden content, segment, classify, score; templates for the top 25 sites; domain scoring; filtering by plan; context trust and bands | Region classification ≥ 95% accurate on the template sites. Strictness bands enforced |
 | **M4** | Provenance tracer and DLP: destination tracing, encoded variants, confidentiality labels | Destination tracing ≥ 99% on the test suite. Red-team items 7 and 8 pass |
 | **M5** | Readers: typed schemas, capacity calculation, reference IDs for strings | Reader results never lower context trust. Requests over capacity are degraded to free text correctly |

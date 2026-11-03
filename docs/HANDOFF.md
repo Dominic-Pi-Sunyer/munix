@@ -435,17 +435,11 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 
 ## Next steps (in order)
 
-1. **Approve at the Console:** the owner runs `munix run` in their own terminal and answers `y`; check that the summary
-   reaches Mailpit. Command (Mailpit and the mock site running):
-   `cargo run -p munix-cli -- run --plan examples/demo-plan.yaml --prompt "<demo prompt>" -- python /agent/agent.py --server "python /munix/shim.py connect" "<demo prompt>"`.
-   Expect the boss's email to need confirmation at the Console after the page read.
-2. **Takeover switch:** done and checked live (see "Now").
-3. **Supervisor** (Day 5): a Muse Spark planner that writes and signs the plan, a redacted metadata view (invariant
-   3: no attacker strings, add tests), and a gray-zone reviewer at `minimal` effort, replacing the user prompt for
-   `needs: LlmReview`.
-4. **Recovery and watchdog** (Day 6): kill, quarantine the traced region, restart (max two). Liveness, deadlines and
-   a spin budget from the gateway's token counts. The red-team's v10 stall is the test case.
-5. **Integrity Seal or Readers** (Day 7), then red-team and metrics (Day 8, feature freeze).
+1. **Submit** (target Nov 3, hard deadline Nov 4, 9 PM ET): the form text, the YouTube link, and the video link at
+   the top of the README (the video link is in the README's "For judges" block).
+2. **Finals (if chosen):** keep the Meta credit floor at $20 for a live take (`demo_replay.py --live --web`, about
+   $0.10 for both sides); `--recorded --web` is the offline fallback.
+3. **Optional:** the Vercel project site (the prompt is outside the repo, in the owner's files).
 
 ## How we work
 
@@ -507,7 +501,8 @@ rule blocks exactly that. So the demo shows a *labeled, simulated* takeover, nev
 ## Known issues and backlog
 
 - A Reader's own Prompt Guard score isn't written to the ledger; only the Gate's `detector_scored` is.
-- The planner sometimes returns a plan that doesn't parse (1 in 105 Slack cases per setup); Munix refuses the task.
+- The planner sometimes returns a plan that doesn't parse or times out (1 in 105 Slack cases, 2 timeouts and 1 bad
+  rule in 127 travel `tool_knowledge` cases); a cut-off draft is retried, and otherwise Munix refuses the task.
 - `enum` tool outputs can't be validated: `OutputSpec` has no list of allowed values.
 - The model gateway has no per-task token, so any local process can use it. Acceptable on a single-user demo machine.
 - `RefTable::find_value` orders refs by id string (`ref:u10` sorts before `ref:u2`).

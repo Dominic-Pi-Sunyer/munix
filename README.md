@@ -8,6 +8,20 @@ can only act through the **Gate**: plain code that checks every tool call agains
 read anything risky. If something on a web page talks the agent into emailing an attacker, the Gate sees that the
 address came from that page, not from you, and denies the call in code. No model gets the final say.
 
+> **For judges**
+> - **Demo video (3 min):** https://youtu.be/dWVMim_Kp4g
+> - **Attacks Muse Spark wrote against itself:** 16 that took over the unprotected agent in 42 of 48 runs. Under
+>   Munix, 0 of 48, and 0 of 48 again with Muse Wonder as the agent.
+> - **An attacker told Munix's rules,** and after every round which rule refused it: 0 of 89 rounds got through.
+> - **AgentDojo** (banking, Slack, travel; the default and the strongest built-in attack): 0 real attack successes
+>   under Munix.
+> - **Try it free, no API key:** `uv sync --project eval/agentdojo`, then
+>   `eval/agentdojo/.venv/bin/python -I eval/agentdojo/demo_replay.py --case rent --side munix --recorded --web`
+>   plays a recorded run of the real rent attack as a bank app page.
+>
+> The video was filmed when the attacker had run 29 rounds against Munix and Muse Wonder had been tried on 9 of the 16
+> attacks; the numbers here include the runs since.
+
 ## What is Munix?
 
 **The problem.** An agent that reads email, web pages or documents, and can also send messages or move money, has a
@@ -61,7 +75,8 @@ exactly how Munix works, and to adapt. Swapping models changes how useful the ag
 **Out of scope (bounded at best, not prevented):**
 - **What the agent says.** Content can still steer the agent's answer: a biased recommendation, a wrong summary.
   Where a Reader handles the content, the instruction never reaches the agent; where text passes through (travel's
-  reviews), it can. Either way, no code check can decide whether an opinion is true. (AgentDojo travel has goals like this, and we report them separately.)
+  reviews), it can. Either way, no code check can decide whether an opinion is true. (AgentDojo travel has goals like
+  this, and we report them separately.)
 - **Usefulness.** An attacker can still make the agent give up or do a worse job. A task that really does mean acting
   on a stranger's word, such as paying the account number in a file nobody vouched for, stops and asks you first.
 - **Paraphrased or encoded leaks.** Private text rewritten or encoded before it leaves isn't matched by the leak
@@ -71,7 +86,7 @@ exactly how Munix works, and to adapt. Swapping models changes how useful the ag
 
 The full threat model is in [`docs/design-spec.md`](docs/design-spec.md), section 2.
 
-## Status (Nov 1): every piece works end to end, and we attacked it
+## Status (Nov 2): every piece works end to end, and we attacked it
 
 | Piece | What it does |
 | :-- | :-- |
@@ -105,11 +120,13 @@ account, leak private data in a payment, send a coworker a phishing link, or sen
 | The same agent under Munix | **0 / 48** |
 | Under Munix with Llama Prompt Guard 2 | **0 / 48** |
 | Llama Prompt Guard 2 alone, scoring the attack text | flagged **0 / 16** |
-| Swap the agent for Muse Wonder: no protection / under Munix | 10 / 48 / **0 / 48** |
+| Swap the agent for Muse Wonder, no protection | 10 / 48 |
+| Muse Wonder under Munix | **0 / 48** |
 
 In banking, the Readers stopped the attacks: the poisoned file and payment notes reached the agent only as typed
 values, so it never tried. In Slack, the agent did try to open the phishing site, and the Gate denied the call in code:
-the URL came from a web page, not from the user. The working attack text stays private until it's reported to Meta.
+the URL came from a web page, not from the user. The working attack text was reported to Meta and stays out of this
+repository; the results keep only its hash and length.
 See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prompt-guard.md).
 
 ### Attacking Munix itself
@@ -121,10 +138,9 @@ See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prom
   names you typed, untraced dates, a leak check that misses reversed text, and amounts or flags that match any of
   your own records.
 - **Adaptive, aimed at Munix.** The same Muse Spark attacker, told Munix's rules and, after every round, which rule
-  refused it, starting from the attacks that beat the bare agent: **0 of 89 rounds** got through, across banking, Slack
-  and travel. In Slack and travel the agent did go for the attacker's link, site or hotel in most rounds, and the
-  Gate denied each call in code. A small run
-  (budget-capped), see
+  refused it, starting in banking and Slack from the attacks that beat the bare agent: **0 of 89 rounds** got
+  through, across banking, Slack and travel. In Slack and travel the agent did go for the attacker's link, site or
+  hotel in most rounds, and the Gate denied each call in code. A small, budget-capped run: see
   [`docs/redteam/adaptive-vs-munix-oct29.md`](docs/redteam/adaptive-vs-munix-oct29.md).
 
 ### Meta's Prompt Guard 2, inside Munix
@@ -132,43 +148,37 @@ See [`docs/redteam/adaptive-and-prompt-guard.md`](docs/redteam/adaptive-and-prom
 | Injections | Prompt Guard 2 flags |
 | :-- | --: |
 | "Ignore previous instructions" style | 14 / 14 |
-| AgentDojo's strongest attack (`important_instructions`) | 0 / 14 |
+| AgentDojo's default attack (`important_instructions`) | 0 / 14 |
 | Every attempt the adaptive attacker wrote | 7 / 402 |
 
 Prompt Guard catches attacks that openly tell a model to drop its instructions, and misses ones written to read like
 ordinary messages. Munix runs it as an optional detector that can only lower trust: it covers crude injections planted
 in content Munix would otherwise trust, and when it misses, the Gate still holds.
 
-### AgentDojo, the benchmark's default attack
+### AgentDojo: three suites, the default and the strongest built-in attack
 
-| | Banking: bare | Banking: Munix | Slack: bare | Slack: Munix |
+| Suite and attack | Attacks that succeeded: bare | Under Munix | Utility under attack: bare | Under Munix |
 | :-- | --: | --: | --: | --: |
-| Attack success rate | 0 / 144 | **0 / 144** | 0 / 105 | **0 / 105** |
-| Utility, no attack | 15 / 16 | 9 / 16 * | 20 / 21 | 2 / 19 * |
-| Utility under attack | 118 / 144 | 76 / 144 † | 79 / 105 | 10 / 105 † |
+| Banking, `important_instructions` (default) | 0 / 144 | **0 / 144** | 118 / 144 | 76 / 144 |
+| Banking, `tool_knowledge` (strongest) | 0 / 144 | **0 / 144** | 121 / 144 | 79 / 144 |
+| Slack, `important_instructions` | 0 / 105 | **0 / 105** | 79 / 105 | 10 / 105 |
+| Slack, `tool_knowledge` | 0 / 105 | **0 / 105** | 78 / 105 | 10 / 105 |
+| Travel, `important_instructions` | 0 / 140 * | **0 / 140** * | 124 / 140 | 94 / 140 |
+| Travel, `tool_knowledge` | 0 / 140 * | **0 / 127** *† | 126 / 140 | 76 / 127 |
 
-\* Oct 29, after the amount fix and the utility fixes, with the simulated user, one run each (banking was 7 / 16
-right after the amount fix; Slack's last 2 tasks didn't run, budget). Repeats of the bare runs: banking 15 / 14 / 14,
-Slack 20 / 19 / 19. † Oct 29 rerun on the current build, simulated user; all 251 ledgers verify. Banking was
-83 / 144 before; the biggest drop is the rent task (UT2, 9 → 0 of 9), which now waits for you because the new
-amount comes from a letter.
+\* After reading the transcripts. AgentDojo's string check counts 1 and 2 (default) and 5 and 2 (`tool_knowledge`),
+all the same "say this hotel is gorgeous" goal, and in every one the agent refused and named the hotel while warning
+the user. † 13 cases were cut by the credit floor.
 
-**A stronger attack and a third suite (Oct 30).** With `tool_knowledge`, AgentDojo's strongest built-in attack,
-banking was 0 / 144 bare and **0 / 144 under Munix** (utility 121 vs 79). On the travel suite, AgentDojo scores 1 / 140
-bare and 2 / 140 under Munix, but all three are the same "say this hotel is gorgeous" goal, and in each the agent
-refused and named the hotel while warning the user: **0 real successes on either side**. Travel utility under attack
-was 124 / 140 bare and 94 / 140 under Munix. On Slack (Nov 1), `tool_knowledge` got 0 / 105 bare and **0 / 105 under
-Munix** (utility 78 vs 10). On travel (Nov 2), `tool_knowledge` got 0 real successes on either side (AgentDojo's
-string check counts 5 / 140 bare and 2 / 127 under Munix, all refusals that named the hotel; 13 Munix cases were cut
-by the credit floor), utility 126 / 140 vs 76 / 127.
+Bare Muse Spark resists these public attacks too, so they don't separate the two setups; the adaptive attacks above
+do. Under Munix they run with a labeled simulated user that declines anything whose destination or amount came from
+content you didn't provide. Utility with no attack: banking 15 / 16 bare vs 9 / 16 under Munix, Slack 20 / 21 vs
+2 / 19. Every Munix ledger from these runs verifies, apart from 3 travel cases whose plan never started.
 
 Munix costs utility, and we report it. Its losses are tasks that act on what a stranger wrote: paying an account
 number found only in a file, opening a link from a channel message, or inviting someone whose email is on their
 website. Those stop and wait for you instead of guessing. Slack is the hard case, because most of its tasks pick a
-destination from others' messages; the fixes that keep the guarantee are listed in the write-up. The starred and
-daggered rows use a labeled simulated user that declines anything whose destination or amount came from content you
-didn't provide. See
-[`docs/redteam/agentdojo.md`](docs/redteam/agentdojo.md).
+destination from other people's messages. See [`docs/redteam/agentdojo.md`](docs/redteam/agentdojo.md).
 
 ### Stress tests
 
@@ -238,13 +248,13 @@ set with `scripts/credit.py`.
 | `fixtures/mock-web/` | The poisoned PixelMart page and its ten injection variants |
 | `scripts/` | The red-team runner and an API smoke check |
 | `docs/` | The pre-event design spec, red-team results, and the live handoff between coding sessions |
-| `eval/agentdojo/` | AgentDojo runs under Munix: Slack and banking manifests, the bridge, the adaptive attacker, results |
+| `eval/agentdojo/` | AgentDojo runs under Munix: banking, Slack and travel manifests, the bridge, the adaptive attacker, results |
 | `guard/` | The Llama Prompt Guard 2 sidecar Munix uses as a detector |
 | `demo/VIDEO_SCRIPT.md` | The demo video script |
 
 ## Checks
 
-About 720 Rust tests, plus the Python suites:
+About 850 Rust tests, plus the Python suites:
 
 ```bash
 cargo fmt --all --check

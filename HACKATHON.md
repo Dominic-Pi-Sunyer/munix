@@ -2,6 +2,9 @@
 
 Indie track. Build window **Mon Oct 26 → Wed Nov 4, 9:00 PM ET**. Judging Nov 4–8, live finals Nov 9.
 
+> This is the plan written during the first days of the event (scope, rules, schedule). The final results and the
+> current demo are in [`README.md`](README.md); where the two differ, the README is current.
+
 ## Rules that shape this repo
 
 - **New work only.** Everything here is written between Oct 26 and Nov 4. The design (`docs/design-spec.md`) was
