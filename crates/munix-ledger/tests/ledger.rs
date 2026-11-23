@@ -385,3 +385,41 @@ fn floats_survive_reopen() {
     drop(l);
     assert_eq!(Ledger::open(d.file()).unwrap().len(), 1);
 }
+
+#[test]
+fn reopen_and_append_twice_keeps_chain() {
+    let d = TempDir::new();
+    let mut l = Ledger::create(d.file()).unwrap();
+    l.append(json!({"kind": "test", "i": 0})).unwrap();
+    l.append(json!({"kind": "test", "i": 1})).unwrap();
+    drop(l);
+    let mut l = Ledger::open(d.file()).unwrap();
+    l.append(json!({"kind": "test", "i": 2})).unwrap();
+    l.append(json!({"kind": "test", "i": 3})).unwrap();
+    drop(l);
+    let l = Ledger::open(d.file()).unwrap();
+    assert_eq!(l.entries().len(), 4);
+    for (i, e) in l.entries().iter().enumerate() {
+        assert_eq!(e.seq, i as u64);
+    }
+    drop(l);
+    assert_eq!(verify_file(d.file()).unwrap(), 4);
+}
+
+#[test]
+fn reopen_append_preserves_existing_bytes() {
+    let d = TempDir::new();
+    make(&d.file(), 2);
+    let old = fs::read(d.file()).unwrap();
+    let mut l = Ledger::open(d.file()).unwrap();
+    l.append(json!({"kind": "test", "i": 2})).unwrap();
+    l.append(json!({"kind": "test", "i": 3})).unwrap();
+    drop(l);
+    let new = fs::read(d.file()).unwrap();
+    assert!(new.len() > old.len());
+    assert_eq!(&new[..old.len()], &old[..]);
+    let tail = String::from_utf8(new[old.len()..].to_vec()).unwrap();
+    assert_eq!(tail.lines().count(), 2);
+    assert!(tail.ends_with('\n'));
+    assert_eq!(verify_file(d.file()).unwrap(), 4);
+}

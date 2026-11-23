@@ -11,7 +11,7 @@
 //! recomputes every hash. Anchoring the head off-host (checkpoints) is future work.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -130,7 +130,7 @@ fn lock(file: &File) -> Result<(), LedgerError> {
     }
 }
 
-/// An open, locked, append-only ledger.
+/// An open, locked, append-only ledger (append-only by construction; the file handle is positioned explicitly).
 #[derive(Debug)]
 pub struct Ledger {
     file: File,
@@ -143,10 +143,7 @@ pub struct Ledger {
 impl Ledger {
     /// Create a new, empty ledger. Fails if the file already exists.
     pub fn create(path: impl AsRef<Path>) -> Result<Ledger, LedgerError> {
-        let file = OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(path)?;
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         lock(&file)?;
         Ok(Ledger {
             file,
@@ -158,10 +155,11 @@ impl Ledger {
 
     /// Open an existing ledger for appending, after verifying the whole chain.
     pub fn open(path: impl AsRef<Path>) -> Result<Ledger, LedgerError> {
-        let mut file = OpenOptions::new().read(true).append(true).open(path)?;
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         lock(&file)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
+        file.seek(SeekFrom::Start(bytes.len() as u64))?;
         let entries = verify_bytes(&bytes)?;
         let head = entries
             .last()
@@ -192,9 +190,12 @@ impl Ledger {
             hash,
         };
         let line = to_line(&entry)?;
+        // The handle is not in append mode (on Windows that mode forbids sync_data and set_len), so position
+        // explicitly at the verified end. The exclusive lock guarantees no other writer moves it.
         let written = self
             .file
-            .write_all(line.as_bytes())
+            .seek(SeekFrom::Start(self.len_bytes))
+            .and_then(|_| self.file.write_all(line.as_bytes()))
             .and_then(|()| self.file.sync_data());
         if let Err(e) = written {
             // Best effort: do not leave a partial line that would poison the next append.
